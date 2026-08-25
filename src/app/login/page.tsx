@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import { GoogleWorkspaceLogin } from "@/components/auth/GoogleWorkspaceLogin";
 
 export const metadata: Metadata = {
-  title: "Đăng nhập Google Workspace",
+  title: "Đăng nhập",
 };
+
+function safeAccount(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== "string" || value.length > 254) return undefined;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : undefined;
+}
 
 export default async function LoginPage({
   searchParams,
@@ -12,5 +17,6 @@ export default async function LoginPage({
 }) {
   const parameters = await searchParams;
   const error = typeof parameters.error === "string" ? parameters.error : undefined;
-  return <GoogleWorkspaceLogin error={error} />;
+  const account = safeAccount(parameters.account);
+  return <GoogleWorkspaceLogin error={error} account={account} />;
 }

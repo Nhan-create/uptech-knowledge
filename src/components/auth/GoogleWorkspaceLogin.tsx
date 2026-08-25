@@ -1,36 +1,135 @@
 import Link from "next/link";
-import {
-  ArrowLeft,
-  Building2,
-  Check,
-  LockKeyhole,
-  ShieldCheck,
-} from "lucide-react";
+import { AlertCircle, ArrowLeft, LockKeyhole } from "lucide-react";
 
 import Logo from "@/components/Logo";
 import { GoogleLoginSubmitButton } from "@/components/auth/GoogleLoginSubmitButton";
+import { SecurityPrivacyDisclosure } from "@/components/auth/SecurityPrivacyDisclosure";
 
-const prerequisites = [
-  "Danh tính được xác minh trực tiếp bởi Google",
-  "Workspace được phân giải từ hosted domain đã kiểm chứng",
-  "Phiên UPTECH riêng biệt, không dùng Google token làm phiên",
-] as const;
+type LoginState = Readonly<{
+  title: string;
+  description: string;
+  actionLabel: string;
+  isError: boolean;
+  showAlternateAccountAction?: boolean;
+}>;
 
-const safeErrors: Readonly<Record<string, string>> = Object.freeze({
-  access_required:
-    "Tài khoản đã được xác minh nhưng chưa có quyền vào workspace. Hãy liên hệ quản trị viên.",
-  rate_limited: "Có quá nhiều yêu cầu đăng nhập. Vui lòng thử lại sau ít phút.",
-  temporarily_unavailable:
-    "Dịch vụ xác minh danh tính tạm thời chưa sẵn sàng. Vui lòng thử lại.",
-  provider_rejected: "Yêu cầu đăng nhập Google đã bị hủy hoặc từ chối.",
-  login_failed:
-    "Không thể hoàn tất đăng nhập bằng tài khoản này. Quyền truy cập chưa được cấp.",
-  active_authority:
-    "Trình duyệt đang có một phiên hoặc yêu cầu cấp quyền khác. Hãy đăng xuất trước khi đổi tài khoản.",
+const normalState: LoginState = Object.freeze({
+  title: "Đăng nhập vào workspace",
+  description: "Sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
+  actionLabel: "Tiếp tục với Google Workspace",
+  isError: false,
 });
 
-export function GoogleWorkspaceLogin({ error }: { readonly error?: string }) {
-  const safeError = error === undefined ? undefined : safeErrors[error];
+const loginStates: Readonly<Record<string, LoginState>> = Object.freeze({
+  personal_gmail: {
+    title: "Không thể sử dụng tài khoản này",
+    description:
+      "UPTECH KNOWLEDGE chỉ cho phép tài khoản Google Workspace được tổ chức của bạn cấp.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  personal_account: {
+    title: "Không thể sử dụng tài khoản này",
+    description:
+      "UPTECH KNOWLEDGE chỉ cho phép tài khoản Google Workspace được tổ chức của bạn cấp.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  unknown_workspace: {
+    title: "Không tìm thấy workspace",
+    description:
+      "Tài khoản Google của bạn đã được xác minh, nhưng tổ chức này chưa được cấu hình trên UPTECH KNOWLEDGE.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  workspace_not_found: {
+    title: "Không tìm thấy workspace",
+    description:
+      "Tài khoản Google của bạn đã được xác minh, nhưng tổ chức này chưa được cấu hình trên UPTECH KNOWLEDGE.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  access_required: {
+    title: "Bạn chưa được cấp quyền truy cập",
+    description:
+      "Vui lòng liên hệ quản trị viên workspace để được cấp quyền sử dụng UPTECH KNOWLEDGE.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  not_provisioned: {
+    title: "Bạn chưa được cấp quyền truy cập",
+    description:
+      "Vui lòng liên hệ quản trị viên workspace để được cấp quyền sử dụng UPTECH KNOWLEDGE.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  suspended: {
+    title: "Quyền truy cập đã bị tạm ngưng",
+    description:
+      "Tài khoản này hiện không còn quyền truy cập UPTECH KNOWLEDGE. Vui lòng liên hệ quản trị viên của tổ chức.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  session_expired: {
+    title: "Phiên đăng nhập đã hết hạn",
+    description: "Vui lòng đăng nhập lại để tiếp tục.",
+    actionLabel: "Tiếp tục với Google Workspace",
+    isError: false,
+  },
+  rate_limited: {
+    title: "Vui lòng thử lại sau",
+    description:
+      "Có quá nhiều yêu cầu đăng nhập. Vui lòng đợi ít phút rồi thử lại.",
+    actionLabel: "Thử lại",
+    isError: true,
+  },
+  temporarily_unavailable: {
+    title: "Tạm thời không thể đăng nhập",
+    description:
+      "Dịch vụ xác minh tài khoản đang tạm thời gián đoạn. Vui lòng thử lại.",
+    actionLabel: "Thử lại",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+  provider_rejected: {
+    title: "Đăng nhập chưa hoàn tất",
+    description:
+      "Yêu cầu đăng nhập đã bị hủy hoặc từ chối. Bạn có thể thử lại khi sẵn sàng.",
+    actionLabel: "Thử lại",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+  active_authority: {
+    title: "Đã có phiên đăng nhập khác",
+    description:
+      "Trình duyệt đang có một phiên đăng nhập hoặc yêu cầu cấp quyền khác. Vui lòng đăng xuất trước khi đổi tài khoản.",
+    actionLabel: "Thử lại",
+    isError: true,
+  },
+  login_failed: {
+    title: "Không thể đăng nhập",
+    description:
+      "Đã xảy ra lỗi trong quá trình xác minh tài khoản. Vui lòng thử lại.",
+    actionLabel: "Thử lại",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+});
+
+function resolveLoginState(error?: string): LoginState {
+  if (error === undefined) return normalState;
+  return loginStates[error] ?? loginStates.login_failed;
+}
+
+export function GoogleWorkspaceLogin({
+  error,
+  account,
+}: {
+  readonly error?: string;
+  readonly account?: string;
+}) {
+  const state = resolveLoginState(error);
+
   return (
     <main
       id="main-content"
@@ -38,155 +137,113 @@ export function GoogleWorkspaceLogin({ error }: { readonly error?: string }) {
     >
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 opacity-30"
+        className="pointer-events-none absolute inset-0 opacity-40"
         style={{
           backgroundImage:
-            "linear-gradient(rgba(148,163,184,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.07) 1px, transparent 1px)",
+            "linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px)",
           backgroundSize: "56px 56px",
-          maskImage: "linear-gradient(120deg, black 0%, transparent 72%)",
+          maskImage:
+            "radial-gradient(circle at 50% 42%, black 0%, transparent 72%)",
         }}
       />
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -left-32 top-1/3 size-96 rounded-full bg-blue-600/15 blur-[120px]"
+        className="pointer-events-none absolute left-1/2 top-1/3 size-[34rem] -translate-x-1/2 rounded-full bg-blue-600/14 blur-[140px]"
       />
       <div
         aria-hidden="true"
         className="pointer-events-none absolute -right-40 bottom-0 size-96 rounded-full bg-violet-600/10 blur-[120px]"
       />
 
-      <div className="relative mx-auto grid min-h-dvh max-w-7xl lg:grid-cols-[0.9fr_1.1fr]">
-        <div className="flex flex-col px-5 py-6 sm:px-8 lg:px-12 lg:py-10">
-          <div className="flex items-center justify-between">
-            <Link
-              href="/"
-              aria-label="UPTECH KNOWLEDGE - Trang chủ"
-              className="inline-flex min-h-11 items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-            >
-              <Logo className="h-7 w-auto" />
-              <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-semibold tracking-[0.18em] text-slate-300 sm:inline">
-                KNOWLEDGE
-              </span>
-            </Link>
-            <Link
-              href="/"
-              className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-400 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-            >
-              <ArrowLeft aria-hidden="true" className="size-4" />
-              Trang chủ
-            </Link>
-          </div>
-
-          <div className="my-auto hidden max-w-lg py-16 lg:block">
-            <div className="inline-flex items-center gap-2 rounded-full border border-violet-400/20 bg-violet-400/10 px-3 py-1.5 text-xs font-medium text-violet-200">
-              <ShieldCheck aria-hidden="true" className="size-3.5" />
-              Permission-first by design
-            </div>
-            <p className="mt-7 text-balance text-5xl font-semibold leading-[1.08] tracking-[-0.045em] text-slate-100">
-              Tri thức đúng nguồn, dành cho đúng người.
-            </p>
-            <p className="mt-6 max-w-md text-base leading-7 text-slate-400">
-              Truy cập chỉ được mở sau khi danh tính Google Workspace,
-              workspace và quyền tài liệu có thể được xác minh phía máy chủ.
-            </p>
-            <div className="mt-10 space-y-4">
-              {[
-                "Không dùng email suffix làm tenant boundary",
-                "Không tin role hoặc workspace do trình duyệt gửi lên",
-                "Không đưa nội dung chưa được phép vào AI context",
-              ].map((item) => (
-                <div
-                  key={item}
-                  className="flex items-start gap-3 text-sm text-slate-300"
-                >
-                  <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-400/10 text-emerald-300">
-                    <Check aria-hidden="true" className="size-3" />
-                  </span>
-                  {item}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <p className="hidden text-xs text-slate-400 lg:block">
-            © 2026 UPTECH · Secure access containment
-          </p>
-        </div>
-
-        <section
-          aria-labelledby="login-title"
-          className="flex items-center justify-center px-4 pb-8 sm:px-8 lg:border-l lg:border-slate-800/80 lg:px-12 lg:py-10"
+      <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8 sm:py-7 lg:px-12">
+        <Link
+          href="/"
+          aria-label="UPTECH KNOWLEDGE - Trang chủ"
+          className="inline-flex min-h-11 items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
-          <div className="animate-fade-in-up w-full max-w-[32rem] rounded-2xl border border-slate-700/80 bg-[var(--bg-surface)] p-5 shadow-[var(--panel-shadow)] backdrop-blur motion-reduce:animate-none sm:rounded-3xl sm:p-8">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-400/20 bg-amber-400/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-200">
-                  <span className="size-1.5 rounded-full bg-amber-300" />
-                  Đăng nhập bảo mật
-                </div>
-                <h1
-                  id="login-title"
-                  className="mt-4 text-2xl font-semibold tracking-[-0.025em] text-slate-100 sm:text-3xl"
-                >
-                  Đăng nhập UPTECH KNOWLEDGE
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-slate-400">
-                  Tiếp tục bằng tài khoản Google Workspace của tổ chức. Hệ
-                  thống chỉ mở phiên sau khi xác minh danh tính, domain và quyền
-                  thành viên ở phía máy chủ.
-                </p>
-              </div>
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-blue-400/20 bg-blue-400/10 text-blue-300">
-                <LockKeyhole aria-hidden="true" className="size-5" />
-              </div>
-            </div>
+          <Logo className="h-7 w-auto" />
+          <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-semibold tracking-[0.18em] text-slate-300 sm:inline">
+            KNOWLEDGE
+          </span>
+        </Link>
+        <Link
+          href="/"
+          className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-400 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+        >
+          <ArrowLeft aria-hidden="true" className="size-4" />
+          Trang chủ
+        </Link>
+      </header>
 
-            <div
-              role="status"
-              aria-live="polite"
-              className="mt-7 rounded-xl border border-slate-700 bg-slate-950/55 p-4"
-            >
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                <Building2 aria-hidden="true" className="size-4 text-blue-300" />
-                Luồng xác minh production
-              </div>
-              <ul className="mt-4 space-y-3">
-                {prerequisites.map((item) => (
-                  <li
-                    key={item}
-                    className="flex items-start gap-3 text-sm leading-6 text-slate-300"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="mt-2 size-1.5 shrink-0 rounded-full bg-slate-500"
-                    />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </div>
+      <section
+        aria-labelledby="login-title"
+        className="relative z-10 flex min-h-[calc(100dvh-5.25rem)] items-center justify-center px-4 pb-20 pt-6 sm:px-8 sm:pb-24"
+      >
+        <div
+          className="animate-fade-in-up min-w-0 rounded-2xl border border-slate-700/80 bg-[var(--bg-surface)] p-6 shadow-[var(--panel-shadow)] backdrop-blur motion-reduce:animate-none sm:rounded-3xl sm:p-8"
+          style={{ width: "min(28rem, calc(100vw - 2rem))" }}
+        >
+          <div className="mx-auto flex size-12 items-center justify-center rounded-2xl border border-blue-400/20 bg-blue-400/10 text-blue-300 shadow-[0_0_28px_rgba(37,99,235,0.12)]">
+            {state.isError ? (
+              <AlertCircle aria-hidden="true" className="size-5" />
+            ) : (
+              <LockKeyhole aria-hidden="true" className="size-5" />
+            )}
+          </div>
 
-            {safeError !== undefined ? (
-              <p
-                role="alert"
-                className="mt-6 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-sm leading-6 text-amber-100"
-              >
-                {safeError}
-              </p>
-            ) : null}
-            <form action="/api/v1/auth/google/transactions" method="post">
-              <GoogleLoginSubmitButton />
-            </form>
-            <p
-              id="login-description"
-              className="mt-3 text-center text-xs leading-5 text-slate-400"
+          <div
+            role={state.isError ? "alert" : undefined}
+            className="mt-5 text-center"
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.17em] text-blue-300">
+              UPTECH KNOWLEDGE
+            </p>
+            <h1
+              id="login-title"
+              className="mt-3 text-balance text-2xl font-semibold tracking-[-0.03em] text-slate-100 sm:text-[1.75rem]"
             >
-              Chỉ yêu cầu các scope openid, email và profile. Không có mật khẩu,
-              OTP hoặc demo bypass.
+              {state.title}
+            </h1>
+            <p className="mx-auto mt-3 max-w-sm text-pretty text-sm leading-6 text-slate-400">
+              {state.description}
             </p>
           </div>
-        </section>
-      </div>
+
+          {account !== undefined ? (
+            <div className="mt-5 rounded-xl border border-slate-700/80 bg-slate-950/45 px-4 py-3 text-sm">
+              <p className="text-xs text-slate-400">Tài khoản</p>
+              <p className="mt-1 break-all font-medium text-slate-200">
+                {account}
+              </p>
+            </div>
+          ) : null}
+
+          <div aria-live="polite">
+            <form action="/api/v1/auth/google/transactions" method="post">
+              <GoogleLoginSubmitButton label={state.actionLabel} />
+            </form>
+          </div>
+
+          <p
+            id="login-description"
+            className="mt-4 text-center text-xs leading-5 text-slate-400"
+          >
+            UPTECH không nhận hoặc lưu mật khẩu Google của bạn.
+          </p>
+
+          <div className="mt-5 flex flex-col items-center gap-3 border-t border-slate-800 pt-5">
+            <SecurityPrivacyDisclosure />
+            {state.showAlternateAccountAction ? (
+              <Link
+                href="/login"
+                className="inline-flex min-h-10 items-center rounded-lg px-2 text-xs font-medium text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+              >
+                Đăng nhập bằng tài khoản khác
+              </Link>
+            ) : null}
+          </div>
+        </div>
+      </section>
     </main>
   );
 }
