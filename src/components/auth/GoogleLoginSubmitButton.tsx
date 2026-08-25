@@ -9,7 +9,11 @@ export function GoogleLoginSubmitButton() {
     <button
       type="submit"
       disabled={submitting}
-      onClick={() => setSubmitting(true)}
+      onClick={() => {
+        // Let the native form submit complete before disabling its submitter.
+        // Disabling synchronously can cancel the browser's default submit action.
+        window.setTimeout(() => setSubmitting(true), 0);
+      }}
       aria-describedby="login-description"
       className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 disabled:cursor-wait disabled:opacity-70"
     >
