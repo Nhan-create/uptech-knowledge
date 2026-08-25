@@ -325,10 +325,22 @@ export function DemoRequestDialog() {
         signal: controller.signal,
       });
       const result = (await response.json().catch(() => null)) as
-        | { ok?: boolean }
+        | {
+            ok?: boolean;
+            error?: {
+              fieldErrors?: LeadErrors & { _form?: string };
+            };
+          }
         | null;
 
       if (!response.ok || !result?.ok) {
+        const serverErrors = result?.error?.fieldErrors;
+        if (serverErrors) {
+          const { _form: _formError, ...leadErrors } = serverErrors;
+          setErrors(leadErrors);
+          focusFirstInvalidField(leadErrors);
+          if (!_formError && Object.keys(leadErrors).length > 0) return;
+        }
         throw new Error("Demo lead submission failed");
       }
 
@@ -430,7 +442,6 @@ export function DemoRequestDialog() {
                       aria-invalid={Boolean(errors.lastName)}
                       aria-describedby={errors.lastName ? fieldId("lastName") + "-error" : undefined}
                       className={inputClassName + (errors.lastName ? invalidInputClassName : "")}
-                      placeholder="Nguyễn"
                     />
                   </FieldGroup>
 
@@ -452,13 +463,12 @@ export function DemoRequestDialog() {
                       aria-invalid={Boolean(errors.firstName)}
                       aria-describedby={errors.firstName ? fieldId("firstName") + "-error" : undefined}
                       className={inputClassName + (errors.firstName ? invalidInputClassName : "")}
-                      placeholder="An"
                     />
                   </FieldGroup>
 
                   <FieldGroup
                     id={fieldId("workEmail")}
-                    label="Email công việc"
+                    label="Email Google Workspace của công ty"
                     required
                     error={errors.workEmail}
                   >
@@ -475,7 +485,6 @@ export function DemoRequestDialog() {
                       aria-invalid={Boolean(errors.workEmail)}
                       aria-describedby={errors.workEmail ? fieldId("workEmail") + "-error" : undefined}
                       className={inputClassName + (errors.workEmail ? invalidInputClassName : "")}
-                      placeholder="an@congty.vn"
                     />
                   </FieldGroup>
 
@@ -497,7 +506,6 @@ export function DemoRequestDialog() {
                       aria-invalid={Boolean(errors.company)}
                       aria-describedby={errors.company ? fieldId("company") + "-error" : undefined}
                       className={inputClassName + (errors.company ? invalidInputClassName : "")}
-                      placeholder="Tên doanh nghiệp của bạn"
                     />
                   </FieldGroup>
 
@@ -545,7 +553,6 @@ export function DemoRequestDialog() {
                       aria-invalid={Boolean(errors.phone)}
                       aria-describedby={errors.phone ? fieldId("phone") + "-error" : undefined}
                       className={inputClassName + (errors.phone ? invalidInputClassName : "")}
-                      placeholder="+84 912 345 678"
                     />
                   </FieldGroup>
 
@@ -592,7 +599,6 @@ export function DemoRequestDialog() {
                         aria-invalid={Boolean(errors.interest)}
                         aria-describedby={errors.interest ? fieldId("interest") + "-error" : undefined}
                         className={inputClassName + " min-h-28 resize-y py-3" + (errors.interest ? invalidInputClassName : "")}
-                        placeholder="Ví dụ: tìm kiếm quy trình nội bộ nhanh hơn, hỗ trợ nhân sự mới..."
                       />
                     </FieldGroup>
                   </div>

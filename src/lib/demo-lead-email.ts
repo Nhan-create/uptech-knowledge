@@ -18,19 +18,19 @@ export class DemoEmailError extends Error {
 interface EmailConfiguration {
   apiKey: string;
   from: string;
-  owner: string;
 }
+
+const DEMO_LEAD_OWNER_EMAIL = "nngo9154@gmail.com";
 
 function getEmailConfiguration(): EmailConfiguration {
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.DEMO_LEAD_FROM_EMAIL?.trim();
-  const owner = process.env.DEMO_LEAD_TO_EMAIL?.trim();
 
-  if (!apiKey || !from || !owner) {
+  if (!apiKey || !from) {
     throw new DemoEmailError("configuration");
   }
 
-  return { apiKey, from, owner };
+  return { apiKey, from };
 }
 
 export function escapeHtml(value: string) {
@@ -92,12 +92,13 @@ function detailRow(label: string, value: string) {
   </tr>`;
 }
 
-function leadDetailsHtml(lead: DemoLead) {
+function leadDetailsHtml(lead: DemoLead, workspaceDomain: string) {
   const interest = escapeHtml(lead.interest).replace(/\r?\n/gu, "<br />");
 
   return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0">
     ${detailRow("Họ và tên", formatLeadName(lead))}
     ${detailRow("Email công việc", lead.workEmail)}
+    ${detailRow("Google Workspace", workspaceDomain + " (MX đã xác minh)")}
     ${detailRow("Số điện thoại", lead.phone)}
     ${detailRow("Công ty", lead.company)}
     ${detailRow("Quy mô", DEMO_COMPANY_SIZE_LABELS[lead.companySize])}
@@ -111,10 +112,11 @@ function leadDetailsHtml(lead: DemoLead) {
   </table>`;
 }
 
-function leadDetailsText(lead: DemoLead) {
+function leadDetailsText(lead: DemoLead, workspaceDomain: string) {
   return [
     `Họ và tên: ${formatLeadName(lead)}`,
     `Email công việc: ${lead.workEmail}`,
+    `Google Workspace: ${workspaceDomain} (MX đã xác minh)`,
     `Số điện thoại: ${lead.phone}`,
     `Công ty: ${lead.company}`,
     `Quy mô: ${DEMO_COMPANY_SIZE_LABELS[lead.companySize]}`,
@@ -124,34 +126,39 @@ function leadDetailsText(lead: DemoLead) {
   ].join("\n");
 }
 
-function ownerLeadEmail(lead: DemoLead, requestId: string) {
+function ownerLeadEmail(lead: DemoLead, requestId: string, workspaceDomain: string) {
   return {
     subject: "Lead dùng thử mới - UPTECH KNOWLEDGE",
     html: emailFrame(
       "Có một yêu cầu dùng thử mới.",
       "Yêu cầu dùng thử mới",
       `<p style="margin:0 0 20px;">Một khách hàng tiềm năng vừa gửi biểu mẫu dùng thử.</p>
-      ${leadDetailsHtml(lead)}
+      ${leadDetailsHtml(lead, workspaceDomain)}
       <p style="margin:22px 0 0;color:#60708c;font-size:13px;">Mã yêu cầu: ${escapeHtml(requestId)}</p>`,
     ),
     text: [
       "Yêu cầu dùng thử mới",
       "",
-      leadDetailsText(lead),
+      leadDetailsText(lead, workspaceDomain),
       "",
       `Mã yêu cầu: ${requestId}`,
     ].join("\n"),
   };
 }
 
-export async function sendNewDemoLead(lead: DemoLead, requestId: string) {
+export async function sendNewDemoLead(
+  lead: DemoLead,
+  requestId: string,
+  workspaceDomain: string,
+) {
   const configuration = getEmailConfiguration();
   const resend = new Resend(configuration.apiKey);
-  const email = ownerLeadEmail(lead, requestId);
+  const email = ownerLeadEmail(lead, requestId, workspaceDomain);
   const { data, error } = await resend.emails.send(
     {
       from: configuration.from,
-      to: [configuration.owner],
+      to: [DEMO_LEAD_OWNER_EMAIL],
+      replyTo: lead.workEmail,
       ...email,
     },
     { idempotencyKey: `demo-lead-create-${requestId}` },

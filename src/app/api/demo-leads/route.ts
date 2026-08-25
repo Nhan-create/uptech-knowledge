@@ -6,6 +6,10 @@ import {
   type DemoLeadFieldErrors,
 } from "@/lib/demo-lead-validation";
 import { DemoEmailError, sendNewDemoLead } from "@/lib/demo-lead-email";
+import {
+  verifyGoogleWorkspaceEmail,
+  WorkEmailVerificationError,
+} from "@/lib/google-workspace-email";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -244,8 +248,11 @@ export async function POST(request: Request) {
       );
     }
 
+    const workspace = await verifyGoogleWorkspaceEmail(
+      validation.data.lead.workEmail,
+    );
     const requestId = randomUUID();
-    await sendNewDemoLead(validation.data.lead, requestId);
+    await sendNewDemoLead(validation.data.lead, requestId, workspace.domain);
 
     return jsonResponse({ ok: true, requestId }, 201, correlationId);
   } catch (error) {
@@ -276,6 +283,29 @@ export async function POST(request: Request) {
         "Rất tiếc! Đã xảy ra lỗi khi gửi biểu mẫu.",
         503,
         correlationId,
+      );
+    }
+
+    if (error instanceof WorkEmailVerificationError) {
+      if (error.kind === "unavailable") {
+        logSafeFailure("workspace_email_verification_unavailable", correlationId);
+        return errorResponse(
+          "SUBMISSION_FAILED",
+          "Chưa thể kiểm tra email công việc lúc này. Vui lòng thử lại.",
+          503,
+          correlationId,
+        );
+      }
+
+      return errorResponse(
+        "VALIDATION_ERROR",
+        "Vui lòng sử dụng email Google Workspace của doanh nghiệp.",
+        422,
+        correlationId,
+        {
+          workEmail:
+            "Email này không thuộc một Google Workspace doanh nghiệp hợp lệ.",
+        },
       );
     }
 
