@@ -182,12 +182,12 @@ BEGIN
   );
 
   consume_result := uptech.consume_google_login_transaction_v1(
-    'WEB_LOGIN',
-    pg_catalog.decode(pg_catalog.repeat('b0', 32), 'hex'),
-    pg_catalog.decode(pg_catalog.repeat('b1', 32), 'hex'),
-    pg_catalog.decode(pg_catalog.repeat('b3', 32), 'hex'),
-    pg_catalog.decode(pg_catalog.repeat('b7', 32), 'hex'),
-    'a2000000-0000-0000-0000-000000000005'
+    'WEB_LOGIN'::uptech.google_login_purpose_v1,
+    pg_catalog.decode(pg_catalog.repeat('b0', 32), 'hex')::uptech.google_auth_hash32_v1,
+    pg_catalog.decode(pg_catalog.repeat('b1', 32), 'hex')::uptech.google_auth_hash32_v1,
+    pg_catalog.decode(pg_catalog.repeat('b3', 32), 'hex')::uptech.google_auth_hash32_v1,
+    pg_catalog.decode(pg_catalog.repeat('b7', 32), 'hex')::uptech.google_auth_hash32_v1,
+    'a2000000-0000-0000-0000-000000000005'::uuid
   );
 
   IF (begin_result).outcome <> 'CREATED'
