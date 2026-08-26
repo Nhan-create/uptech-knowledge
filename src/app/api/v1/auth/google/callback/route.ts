@@ -151,6 +151,8 @@ export async function GET(request: Request): Promise<Response> {
     const safeError =
       result.outcome === "RATE_LIMITED"
         ? "rate_limited"
+        : result.outcome === "PERSONAL_GOOGLE_ACCOUNT"
+          ? "personal_account"
         : result.outcome === "PROVIDER_UNAVAILABLE"
           ? "temporarily_unavailable"
           : result.outcome === "PROVIDER_REJECTED"

@@ -961,14 +961,31 @@ const invalidClaimScenarios: ReadonlyArray<{
     overrides: () => ({ email_verified: false }),
   },
   {
-    name: "missing hosted domain",
-    overrides: () => ({ hd: undefined }),
-  },
-  {
     name: "claim nonce mismatch",
     overrides: () => ({ nonce: proof(6) }),
   },
 ];
+
+test("a personal Google account is denied with a Workspace-specific outcome", async () => {
+  const harness = createHarness({
+    claims: (input) => validClaims(input.nonce, { hd: undefined }),
+  });
+
+  const result = await callbackWithStartedTransaction(harness);
+
+  assert.deepEqual(result, { outcome: "PERSONAL_GOOGLE_ACCOUNT" });
+  assertRepositoryCalls(harness.repository, {
+    begin: 1,
+    consume: 1,
+    complete: 0,
+    rejectUnbound: 0,
+    rejectBound: 1,
+  });
+  assert.equal(
+    harness.repository.rejectBoundCalls[0].rejectionClass,
+    "CLAIMS_INVALID",
+  );
+});
 
 for (const scenario of invalidClaimScenarios) {
   test(`verified-claim boundary denies ${scenario.name}`, async () => {

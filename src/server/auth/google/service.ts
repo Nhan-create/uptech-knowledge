@@ -4,7 +4,10 @@ import {
   hashCredential,
   issueSessionCredential,
 } from "../../sessions/session-security.ts";
-import { verifyGoogleWorkspaceClaims } from "./claims.ts";
+import {
+  GoogleWorkspaceAccountRequiredError,
+  verifyGoogleWorkspaceClaims,
+} from "./claims.ts";
 import {
   GOOGLE_LOGIN_CONFIGURATION_KEY,
   type GoogleLoginRuntimeConfig,
@@ -57,6 +60,7 @@ export type GoogleLoginCallbackResult =
       readonly outcome:
         | "RATE_LIMITED"
         | "DENIED"
+        | "PERSONAL_GOOGLE_ACCOUNT"
         | "PROVIDER_REJECTED"
         | "PROVIDER_UNAVAILABLE";
     };
@@ -342,11 +346,14 @@ export function createGoogleLoginService(input: {
           operationRequestId,
         );
         return {
-          outcome: rejectionClass === "PROVIDER_UNAVAILABLE"
-            ? "PROVIDER_UNAVAILABLE"
-            : rejectionClass === "PROVIDER_REJECTED"
-              ? "PROVIDER_REJECTED"
-              : "DENIED",
+          outcome:
+            error instanceof GoogleWorkspaceAccountRequiredError
+              ? "PERSONAL_GOOGLE_ACCOUNT"
+              : rejectionClass === "PROVIDER_UNAVAILABLE"
+                ? "PROVIDER_UNAVAILABLE"
+                : rejectionClass === "PROVIDER_REJECTED"
+                  ? "PROVIDER_REJECTED"
+                  : "DENIED",
         };
       }
 
