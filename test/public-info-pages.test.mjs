@@ -187,10 +187,33 @@ test("settings launcher keeps a balanced safe-area position", async (context) =>
 
   assert.match(
     html,
-    /data-testid="settings-menu-root"[^>]+class="[^"]*settings-menu-position/,
+    /data-testid="settings-menu-root"[^>]+class="[^"]*settings-menu-position[^"]*bottom-4[^"]*right-4/,
   );
   assert.match(
     html,
     /data-testid="settings-menu-trigger"[^>]+class="[^"]*size-11[^"]*focus-visible:ring-2/,
+  );
+});
+
+test("public branding is protected from browser translation and stays readable on the media surface", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/", baseUrl), {
+    headers: { cookie: "uptech-theme=light; uptech-locale=en" },
+  });
+  assert.equal(response.status, 200);
+  const html = await response.text();
+
+  assert.match(html, /<html[^>]+lang="en"[^>]+translate="no"/);
+  assert.match(
+    html,
+    /data-testid="public-brand"[^>]+translate="no"[^>]+class="[^"]*notranslate/,
+  );
+  assert.match(
+    html,
+    /data-testid="public-navigation"[^>]+data-media-surface="dark"/,
   );
 });

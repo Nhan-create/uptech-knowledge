@@ -270,12 +270,16 @@ html[data-theme="light"] [data-media-surface="dark"] {
   --landing-glass-shadow: 0 18px 45px rgba(0, 0, 0, 0.18);
   --landing-glass-panel-background: rgba(255, 255, 255, 0.045);
   --landing-glass-panel-border: rgba(255, 255, 255, 0.24);
+  --landing-nav-background: rgba(7, 10, 18, 0.88);
+  --landing-nav-background-scrolled: rgba(7, 10, 18, 0.94);
+  --landing-nav-border: rgba(51, 65, 85, 0.7);
+  --landing-nav-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
   --logo-filter: none;
 }
 
 .settings-menu-position {
-  bottom: max(1rem, env(safe-area-inset-bottom));
-  right: max(1rem, env(safe-area-inset-right));
+  bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+  right: max(1rem, env(safe-area-inset-right, 0px));
 }
 
 .settings-menu-position :focus-visible {

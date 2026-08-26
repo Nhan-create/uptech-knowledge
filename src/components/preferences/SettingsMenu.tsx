@@ -148,8 +148,9 @@ function MoonIcon() {
 function LanguageIcon({ locale }: { locale: Locale }) {
   return (
     <span
+      translate="no"
       aria-hidden="true"
-      className="flex size-7 items-center justify-center rounded-lg border border-current/15 text-[11px] font-bold uppercase"
+      className="notranslate flex size-7 items-center justify-center rounded-lg border border-current/15 text-[11px] font-bold uppercase"
     >
       {locale}
     </span>
@@ -317,7 +318,7 @@ export function SettingsMenu() {
     <div
       ref={rootRef}
       data-testid="settings-menu-root"
-      className="settings-menu-position fixed z-40 print:hidden"
+      className="settings-menu-position fixed bottom-4 right-4 z-40 print:hidden"
     >
       <button
         ref={triggerRef}

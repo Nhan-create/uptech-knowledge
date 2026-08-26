@@ -115,15 +115,19 @@ export function PublicNav() {
 
   return (
     <header
+      data-testid="public-navigation"
+      data-media-surface="dark"
       data-scrolled={scrolled || open ? "true" : "false"}
       className="landing-public-nav fixed inset-x-0 top-0 z-50 border-b"
     >
       <nav aria-label={copy.ariaLabel}>
         <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-4 sm:px-6 lg:h-24 lg:px-8">
         <Link
+          data-testid="public-brand"
+          translate="no"
           href="/"
           aria-label={copy.homeLabel}
-          className="inline-flex min-h-12 items-center gap-4 rounded-lg"
+          className="notranslate inline-flex min-h-12 items-center gap-4 rounded-lg"
         >
           <Logo className="h-10 w-auto sm:h-12" />
           <span className="landing-brand-word hidden border-l-2 border-slate-700/80 pl-4 text-base font-bold tracking-[0.24em] text-slate-100 sm:inline">

@@ -288,16 +288,17 @@ export function GoogleWorkspaceLogin({
         className="pointer-events-none absolute inset-0 -z-10 bg-white/25"
       />
 
-      <header className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-4 sm:px-7 sm:pt-6 lg:px-10">
-        <div
-          data-testid="login-header-shell"
-          className="flex items-center justify-between rounded-2xl border border-white/20 bg-slate-950/55 px-3 py-2 shadow-[0_16px_48px_rgba(2,6,23,0.28)] backdrop-blur-xl sm:px-4"
-        >
+      <header
+        data-media-surface="dark"
+        className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-4 sm:px-7 sm:pt-6 lg:px-10"
+      >
+        <div className="flex items-center justify-between gap-3">
         <Link
           data-testid="login-header-brand"
+          translate="no"
           href="/"
           aria-label={copy.homeLabel}
-          className="inline-flex min-h-11 items-center gap-3 rounded-xl px-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="notranslate inline-flex min-h-12 items-center gap-3 rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Logo className="h-7 w-auto" />
           <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-bold tracking-[0.18em] text-slate-100 sm:inline">
@@ -307,7 +308,7 @@ export function GoogleWorkspaceLogin({
         <Link
           data-testid="login-header-home"
           href="/"
-          className="inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-sm font-semibold text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
           {copy.home}
@@ -352,7 +353,7 @@ export function GoogleWorkspaceLogin({
             role={state.isError ? "alert" : undefined}
             className="mt-5 text-center"
           >
-            <p className="text-xs font-semibold uppercase tracking-[0.17em] text-blue-300">
+            <p translate="no" className="notranslate text-xs font-semibold uppercase tracking-[0.17em] text-blue-300">
               UPTECH KNOWLEDGE
             </p>
             <h1

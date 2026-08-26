@@ -9,7 +9,9 @@ test("login page renders the approved Uptech branding and readable Google action
     return;
   }
 
-  const response = await fetch(new URL("/login", baseUrl));
+  const response = await fetch(new URL("/login", baseUrl), {
+    headers: { cookie: "uptech-theme=light" },
+  });
   assert.equal(response.status, 200);
 
   const html = await response.text();
@@ -67,16 +69,19 @@ test("login header navigation keeps strong contrast over the video", async (cont
 
   assert.match(
     html,
-    /data-testid="login-header-shell"[^>]+class="[^"]*bg-slate-950\/55[^"]*backdrop-blur-xl/,
+    /<html[^>]+translate="no"/,
+  );
+  assert.match(html, /<header[^>]+data-media-surface="dark"/);
+  assert.match(
+    html,
+    /data-testid="login-header-brand"[^>]+translate="no"[^>]+class="[^"]*notranslate[^"]*bg-slate-950\/65[^"]*text-white/,
   );
   assert.match(
     html,
-    /data-testid="login-header-brand"[^>]+class="[^"]*text-white/,
+    /data-testid="login-header-home"[^>]+class="[^"]*bg-slate-950\/65[^"]*text-white/,
   );
-  assert.match(
-    html,
-    /data-testid="login-header-home"[^>]+class="[^"]*text-white/,
-  );
+  assert.doesNotMatch(html, /data-testid="login-header-shell"/);
+  assert.match(html, /translate="no"[^>]*>\s*UPTECH KNOWLEDGE\s*</);
 });
 
 test("login page follows the English preference in normal and error states", async (context) => {
