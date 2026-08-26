@@ -25,6 +25,7 @@ type ValueItem = Readonly<{
 }>;
 
 export type PublicInfoContent = Readonly<{
+  section: PublicInfoSection;
   sectionLabel: string;
   eyebrow: string;
   title: string;
@@ -51,6 +52,7 @@ export type PublicInfoContent = Readonly<{
 
 const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
   product: {
+    section: "product",
     sectionLabel: "Sản phẩm",
     eyebrow: "Trợ lý tri thức AI cho doanh nghiệp",
     title: "Biến tri thức doanh nghiệp thành lợi thế vận hành mỗi ngày.",
@@ -117,6 +119,7 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Trợ lý tri thức AI giúp doanh nghiệp tìm kiếm, hỏi đáp và kiểm chứng thông tin từ đúng nguồn được phép.",
   },
   principles: {
+    section: "principles",
     sectionLabel: "Nguyên tắc",
     eyebrow: "Trust by design",
     title: "AI doanh nghiệp đáng tin bắt đầu từ nguồn và quyền.",
@@ -183,6 +186,7 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Trợ lý tri thức AI giúp doanh nghiệp tìm kiếm, hỏi đáp và kiểm chứng thông tin từ đúng nguồn được phép.",
   },
   capabilities: {
+    section: "capabilities",
     sectionLabel: "Năng lực",
     eyebrow: "Một nơi cho tri thức",
     title: "Bộ công cụ giúp đội ngũ tìm hiểu và hành động nhanh hơn.",
@@ -249,6 +253,7 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Trợ lý tri thức AI giúp doanh nghiệp tìm kiếm, hỏi đáp và kiểm chứng thông tin từ đúng nguồn được phép.",
   },
   workflow: {
+    section: "workflow",
     sectionLabel: "Quy trình",
     eyebrow: "Luồng tri thức khép kín",
     title: "Từ tài liệu rời rạc đến câu trả lời có thể hành động.",

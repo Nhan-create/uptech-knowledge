@@ -56,6 +56,49 @@ test("each public information page makes the product value prominent", async (co
   }
 });
 
+test("each information page previews the real product interface and explains its use", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const expectedPreviews = [
+    {
+      path: "/san-pham",
+      preview: "dashboard",
+      labels: ["Tổng quan workspace", "Trợ lý AI", "Tài liệu"],
+    },
+    {
+      path: "/nguyen-tac",
+      preview: "trust",
+      labels: ["Phạm vi nguồn", "Nguồn trích dẫn", "Được cấp quyền"],
+    },
+    {
+      path: "/nang-luc",
+      preview: "capabilities",
+      labels: ["AI Chat", "Tìm kiếm", "So sánh tài liệu"],
+    },
+    {
+      path: "/quy-trinh",
+      preview: "workflow",
+      labels: ["Tải tài liệu", "Chọn nguồn", "Kiểm tra trích dẫn"],
+    },
+  ];
+
+  for (const { path, preview, labels } of expectedPreviews) {
+    const response = await fetch(new URL(path, baseUrl));
+    assert.equal(response.status, 200, path);
+    const html = await response.text();
+
+    assert.match(html, new RegExp(`data-product-preview="${preview}"`), path);
+    assert.match(html, /data-testid="preview-purpose"/, path);
+    assert.match(html, /Dùng để/, path);
+    for (const label of labels) {
+      assert.match(html, new RegExp(label), `${path}: ${label}`);
+    }
+  }
+});
+
 test("public information pages follow the current English preference", async (context) => {
   if (baseUrl === undefined) {
     context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");

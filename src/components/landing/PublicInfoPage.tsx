@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import Logo from "@/components/Logo";
 import { HeroBackgroundVideo } from "@/components/landing/HeroBackgroundVideo";
+import { ProductInterfacePreview } from "@/components/landing/ProductInterfacePreview";
 import { PublicNav } from "@/components/landing/PublicNav";
 import {
   getPublicInfoContent,
@@ -117,6 +118,8 @@ function PublicInfoView({
             </article>
           </div>
         </section>
+
+        <ProductInterfacePreview section={content.section} locale={locale} />
 
         <section className="px-4 py-16 sm:px-6 sm:py-24 lg:px-8">
           <div className="landing-glass-panel mx-auto max-w-7xl rounded-[2rem] p-5 sm:p-8 lg:p-10">
