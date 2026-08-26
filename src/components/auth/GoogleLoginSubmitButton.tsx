@@ -53,8 +53,7 @@ export function GoogleLoginSubmitButton({
         // Defer disabling so the browser can include the submitter and navigate.
         window.setTimeout(() => setSubmitting(true), 0);
       }}
-      className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-900 shadow-sm transition-[background-color,box-shadow] hover:bg-slate-50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-surface)] disabled:cursor-wait disabled:bg-slate-100 disabled:text-slate-600 disabled:shadow-none"
-      style={{ color: "#0f172a" }}
+      className="mt-6 inline-flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-[#0f172a] shadow-sm transition-[background-color,box-shadow,color] hover:bg-slate-50 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-surface)] disabled:cursor-wait disabled:border-[#0f172a] disabled:bg-[#0f172a] disabled:text-white disabled:shadow-none"
     >
       <span className="flex size-5 shrink-0 items-center justify-center">
         {submitting ? (
