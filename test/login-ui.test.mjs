@@ -46,3 +46,39 @@ test("personal Google accounts receive Workspace guidance with Uptech branding",
   assert.match(html, /data-testid="login-uptech-logo"/);
   assert.match(html, />Đăng nhập bằng tài khoản khác</);
 });
+
+test("login states keep an opaque card above the bright looping video background", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(
+    new URL("/login?error=personal_account", baseUrl),
+  );
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+
+  assert.match(
+    html,
+    /<video[^>]+data-testid="login-background-video"[^>]+autoPlay=""[^>]+loop=""[^>]+muted=""[^>]+playsInline=""/,
+  );
+  assert.match(html, /poster="\/media\/login-background-poster\.jpg"/);
+  assert.match(html, /<source src="\/media\/login-background\.mp4" type="video\/mp4"/);
+  assert.match(html, /data-testid="login-background-poster"/);
+  assert.match(
+    html,
+    /data-testid="login-video-brightness"[^>]+bg-white\/25/,
+  );
+  assert.match(
+    html,
+    /data-testid="login-card"[^>]+bg-\[var\(--bg-surface\)\]/,
+  );
+
+  const videoResponse = await fetch(
+    new URL("/media/login-background.mp4", baseUrl),
+  );
+  assert.equal(videoResponse.status, 200);
+  assert.match(videoResponse.headers.get("content-type") ?? "", /video\/mp4/);
+});

@@ -132,26 +132,34 @@ export function GoogleWorkspaceLogin({
   return (
     <main
       id="main-content"
-      className="relative min-h-dvh overflow-hidden bg-[var(--bg-primary)] text-slate-100"
+      className="relative isolate min-h-dvh overflow-hidden bg-[var(--bg-primary)] text-slate-100"
     >
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-20">
+        <video
+          data-testid="login-background-video"
+          autoPlay
+          loop
+          muted
+          playsInline
+          preload="auto"
+          poster="/media/login-background-poster.jpg"
+          disablePictureInPicture
+          className="size-full object-cover brightness-[1.25] saturate-[0.88] motion-reduce:hidden"
+        >
+          <source src="/media/login-background.mp4" type="video/mp4" />
+        </video>
+        <div
+          data-testid="login-background-poster"
+          className="hidden size-full bg-cover bg-center brightness-[1.25] saturate-[0.88] motion-reduce:block"
+          style={{
+            backgroundImage: "url('/media/login-background-poster.jpg')",
+          }}
+        />
+      </div>
       <div
+        data-testid="login-video-brightness"
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 opacity-40"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px)",
-          backgroundSize: "56px 56px",
-          maskImage:
-            "radial-gradient(circle at 50% 42%, black 0%, transparent 72%)",
-        }}
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute left-1/2 top-1/3 size-[34rem] -translate-x-1/2 rounded-full bg-blue-600/14 blur-[140px]"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -right-40 bottom-0 size-96 rounded-full bg-violet-600/10 blur-[120px]"
+        className="pointer-events-none absolute inset-0 -z-10 bg-white/25"
       />
 
       <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8 sm:py-7 lg:px-12">
@@ -179,7 +187,8 @@ export function GoogleWorkspaceLogin({
         className="relative z-10 flex min-h-[calc(100dvh-5.25rem)] items-center justify-center px-4 pb-20 pt-6 sm:px-8 sm:pb-24"
       >
         <div
-          className="animate-fade-in-up min-w-0 rounded-2xl border border-slate-700/80 bg-[var(--bg-surface)] p-6 shadow-[var(--panel-shadow)] backdrop-blur motion-reduce:animate-none sm:rounded-3xl sm:p-8"
+          data-testid="login-card"
+          className="animate-fade-in-up min-w-0 rounded-2xl border border-slate-700/80 bg-[var(--bg-surface)] p-6 shadow-[var(--panel-shadow)] motion-reduce:animate-none sm:rounded-3xl sm:p-8"
           style={{ width: "min(28rem, calc(100vw - 2rem))" }}
         >
           <div
