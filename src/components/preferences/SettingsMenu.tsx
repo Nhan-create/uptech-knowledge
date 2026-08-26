@@ -316,10 +316,12 @@ export function SettingsMenu() {
   return (
     <div
       ref={rootRef}
-      className="fixed bottom-4 right-4 z-40 print:hidden"
+      data-testid="settings-menu-root"
+      className="settings-menu-position fixed z-40 print:hidden"
     >
       <button
         ref={triggerRef}
+        data-testid="settings-menu-trigger"
         type="button"
         aria-controls={panelId}
         aria-expanded={open}
@@ -330,7 +332,7 @@ export function SettingsMenu() {
           returnFocusRef.current = triggerRef.current;
           setOpen((current) => !current);
         }}
-        className={`relative flex size-12 cursor-pointer items-center justify-center rounded-full border transition-[background-color,border-color,color,box-shadow,transform] duration-150 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-primary)] motion-reduce:transform-none motion-reduce:transition-none ${triggerClassName}`}
+        className={`relative flex size-11 cursor-pointer items-center justify-center rounded-full border transition-[background-color,border-color,color,box-shadow,transform] duration-150 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-primary)] motion-reduce:transform-none motion-reduce:transition-none ${triggerClassName}`}
       >
         <GearIcon />
         <span className="sr-only">{labels.open}</span>

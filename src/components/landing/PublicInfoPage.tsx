@@ -11,6 +11,7 @@ import {
   type PublicInfoContent,
   type PublicInfoSection,
 } from "@/components/landing/public-info-content";
+import { getPublicUseCases } from "@/components/landing/public-use-cases";
 import { LOCALE_COOKIE_NAME, parseLocale, type Locale } from "@/lib/preferences";
 
 function PublicInfoView({
@@ -20,10 +21,13 @@ function PublicInfoView({
   readonly content: PublicInfoContent;
   readonly locale: Locale;
 }) {
+  const useCaseContent = getPublicUseCases(content.section, locale);
+
   return (
     <div
       data-testid="public-info-page"
       data-section-label={content.sectionLabel}
+      data-media-surface="dark"
       className="relative isolate min-h-dvh overflow-x-hidden bg-transparent text-slate-100"
     >
       <HeroBackgroundVideo />
@@ -120,6 +124,33 @@ function PublicInfoView({
         </section>
 
         <ProductInterfacePreview section={content.section} locale={locale} />
+
+        <section data-testid="product-use-cases" className="px-4 py-16 sm:px-6 sm:py-24 lg:px-8">
+          <div className="landing-glass-panel mx-auto max-w-7xl rounded-[2rem] p-5 sm:p-8 lg:p-10">
+            <div className="max-w-3xl">
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-300">{useCaseContent.eyebrow}</p>
+              <h2 className="mt-4 text-balance text-3xl font-semibold tracking-[-0.035em] text-slate-100 sm:text-4xl">{useCaseContent.title}</h2>
+              <p className="mt-5 text-base leading-7 text-slate-300">{useCaseContent.description}</p>
+            </div>
+            <div className="mt-10 grid gap-4 lg:grid-cols-3">
+              {useCaseContent.cases.map((item, index) => (
+                <article key={item[1]} data-use-case={index + 1} className="landing-glass-card flex h-full flex-col rounded-2xl p-6 sm:p-7">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="rounded-full border border-blue-400/25 bg-blue-400/10 px-3 py-1 text-xs font-semibold text-blue-200">{item[0]}</span>
+                    <span className="font-mono text-xs text-slate-400">{String(index + 1).padStart(2, "0")}</span>
+                  </div>
+                  <h3 className="mt-6 text-xl font-semibold text-slate-100">{item[1]}</h3>
+                  <p className="mt-3 text-sm leading-6 text-slate-300">{item[2]}</p>
+                  <dl className="mt-6 space-y-4 border-t border-slate-700/70 pt-5 text-sm">
+                    <div><dt className="font-semibold text-blue-300">{useCaseContent.input}</dt><dd className="mt-1 leading-6 text-slate-400">{item[3]}</dd></div>
+                    <div><dt className="font-semibold text-violet-300">{useCaseContent.action}</dt><dd className="mt-1 leading-6 text-slate-400">{item[4]}</dd></div>
+                    <div><dt className="font-semibold text-emerald-300">{useCaseContent.output}</dt><dd className="mt-1 leading-6 text-slate-400">{item[5]}</dd></div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
 
         <section className="px-4 py-16 sm:px-6 sm:py-24 lg:px-8">
           <div className="landing-glass-panel mx-auto max-w-7xl rounded-[2rem] p-5 sm:p-8 lg:p-10">

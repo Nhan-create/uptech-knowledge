@@ -67,12 +67,46 @@ test("login header navigation keeps strong contrast over the video", async (cont
 
   assert.match(
     html,
-    /data-testid="login-header-brand"[^>]+class="[^"]*bg-slate-950\/80[^"]*text-slate-100/,
+    /data-testid="login-header-shell"[^>]+class="[^"]*bg-slate-950\/55[^"]*backdrop-blur-xl/,
   );
   assert.match(
     html,
-    /data-testid="login-header-home"[^>]+class="[^"]*bg-slate-950\/80[^"]*text-slate-100/,
+    /data-testid="login-header-brand"[^>]+class="[^"]*text-white/,
   );
+  assert.match(
+    html,
+    /data-testid="login-header-home"[^>]+class="[^"]*text-white/,
+  );
+});
+
+test("login page follows the English preference in normal and error states", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const headers = { cookie: "uptech-locale=en" };
+  const normalResponse = await fetch(new URL("/login", baseUrl), { headers });
+  assert.equal(normalResponse.status, 200);
+  const normalHtml = await normalResponse.text();
+
+  assert.match(normalHtml, />Sign in to your workspace</);
+  assert.match(normalHtml, /Use your Workspace account\./);
+  assert.match(normalHtml, />Continue with Google Workspace</);
+  assert.match(normalHtml, />Home</);
+  assert.match(normalHtml, /Security &amp; privacy/);
+  assert.doesNotMatch(normalHtml, /Đăng nhập vào workspace/);
+
+  const errorResponse = await fetch(
+    new URL("/login?error=personal_account", baseUrl),
+    { headers },
+  );
+  assert.equal(errorResponse.status, 200);
+  const errorHtml = await errorResponse.text();
+
+  assert.match(errorHtml, />Invalid account</);
+  assert.match(errorHtml, /Please use a Workspace account, not a personal Google account\./);
+  assert.match(errorHtml, />Sign in with another account</);
 });
 
 test("login states keep an opaque card above the bright looping video background", async (context) => {
