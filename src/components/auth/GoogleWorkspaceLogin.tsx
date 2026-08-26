@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { AlertCircle, ArrowLeft, LockKeyhole } from "lucide-react";
+import Image from "next/image";
+import { AlertCircle, ArrowLeft } from "lucide-react";
 
 import Logo from "@/components/Logo";
 import { GoogleLoginSubmitButton } from "@/components/auth/GoogleLoginSubmitButton";
@@ -15,7 +16,7 @@ type LoginState = Readonly<{
 
 const normalState: LoginState = Object.freeze({
   title: "Đăng nhập vào workspace",
-  description: "Sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
+  description: "Sử dụng tài khoản Workspace của bạn.",
   actionLabel: "Tiếp tục với Google Workspace",
   isError: false,
 });
@@ -183,13 +184,35 @@ export function GoogleWorkspaceLogin({
           className="animate-fade-in-up min-w-0 rounded-2xl border border-slate-700/80 bg-[var(--bg-surface)] p-6 shadow-[var(--panel-shadow)] backdrop-blur motion-reduce:animate-none sm:rounded-3xl sm:p-8"
           style={{ width: "min(28rem, calc(100vw - 2rem))" }}
         >
-          <div className="mx-auto flex size-12 items-center justify-center rounded-2xl border border-blue-400/20 bg-blue-400/10 text-blue-300 shadow-[0_0_28px_rgba(37,99,235,0.12)]">
-            {state.isError ? (
+          {state.isError ? (
+            <div className="mx-auto flex size-12 items-center justify-center rounded-2xl border border-blue-400/20 bg-blue-400/10 text-blue-300 shadow-[0_0_28px_rgba(37,99,235,0.12)]">
               <AlertCircle aria-hidden="true" className="size-5" />
-            ) : (
-              <LockKeyhole aria-hidden="true" className="size-5" />
-            )}
-          </div>
+            </div>
+          ) : (
+            <div
+              data-testid="login-uptech-logo"
+              className="relative mx-auto h-[4.25rem] w-36 sm:w-40"
+            >
+              <Image
+                src="/logo.png"
+                alt="Uptech"
+                width={212}
+                height={91}
+                className="login-brand-logo-base absolute inset-0 size-full object-contain"
+                priority
+                unoptimized
+              />
+              <Image
+                src="/logo.png"
+                alt=""
+                aria-hidden="true"
+                width={212}
+                height={91}
+                className="login-brand-logo-accent absolute inset-0 size-full object-contain"
+                unoptimized
+              />
+            </div>
+          )}
 
           <div
             role={state.isError ? "alert" : undefined}
