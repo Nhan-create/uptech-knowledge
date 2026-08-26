@@ -13,6 +13,9 @@ export class GoogleClaimsValidationError extends Error {
   override readonly name = "GoogleClaimsValidationError";
 }
 
+export class GoogleWorkspaceAccountRequiredError extends GoogleClaimsValidationError {
+}
+
 export interface VerifiedGoogleClaims {
   readonly issuer: "https://accounts.google.com" | "accounts.google.com";
   readonly providerSubject: string;
@@ -172,12 +175,21 @@ export function verifyGoogleWorkspaceClaims(
     return invalidClaims();
   }
 
+  const providerSubject = requireBoundedString(claims.sub, 1, 255);
+  const normalizedEmail = normalizeEmail(claims.email);
+  if (claims.hd === undefined) {
+    throw new GoogleWorkspaceAccountRequiredError(
+      "A Google Workspace account is required",
+    );
+  }
+  const hostedDomain = normalizeHostedDomain(claims.hd);
+
   return Object.freeze({
     issuer: claims.iss,
-    providerSubject: requireBoundedString(claims.sub, 1, 255),
-    normalizedEmail: normalizeEmail(claims.email),
+    providerSubject,
+    normalizedEmail,
     emailVerified: true,
-    hostedDomain: normalizeHostedDomain(claims.hd),
+    hostedDomain,
     issuedAtEpochSeconds: issuedAt,
     expiresAtEpochSeconds: expiresAt,
     audienceConfigurationKey: GOOGLE_LOGIN_CONFIGURATION_KEY,
