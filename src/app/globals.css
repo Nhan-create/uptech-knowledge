@@ -610,7 +610,8 @@ html[data-theme="light"] :is(
 }
 
 .landing-nav-link:hover::after,
-.landing-nav-link:focus-visible::after {
+.landing-nav-link:focus-visible::after,
+.landing-nav-link[aria-current="page"]::after {
   transform: scaleX(1);
 }
 

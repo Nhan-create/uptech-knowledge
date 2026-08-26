@@ -17,7 +17,14 @@ test("login page renders the approved Uptech branding and readable Google action
   assert.match(html, /Sử dụng tài khoản Workspace của bạn\./);
   assert.match(html, /data-testid="login-uptech-logo"/);
   assert.match(html, /alt="Uptech"[^>]+src="\/logo\.png"/);
-  assert.match(html, /data-testid="google-login-submit"[^>]+style="color:#0f172a"/);
+  assert.match(
+    html,
+    /data-testid="google-login-submit"[^>]+class="[^"]*text-\[#0f172a\][^"]*disabled:bg-\[#0f172a\][^"]*disabled:text-white/,
+  );
+  assert.doesNotMatch(
+    html,
+    /data-testid="google-login-submit"[^>]+style="color:#0f172a"/,
+  );
   assert.match(html, />Tiếp tục với Google Workspace</);
 
   const logoResponse = await fetch(new URL("/logo.png", baseUrl));
@@ -45,6 +52,27 @@ test("personal Google accounts receive Workspace guidance with Uptech branding",
   );
   assert.match(html, /data-testid="login-uptech-logo"/);
   assert.match(html, />Đăng nhập bằng tài khoản khác</);
+});
+
+test("login header navigation keeps strong contrast over the video", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/login", baseUrl));
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+
+  assert.match(
+    html,
+    /data-testid="login-header-brand"[^>]+class="[^"]*bg-slate-950\/80[^"]*text-slate-100/,
+  );
+  assert.match(
+    html,
+    /data-testid="login-header-home"[^>]+class="[^"]*bg-slate-950\/80[^"]*text-slate-100/,
+  );
 });
 
 test("login states keep an opaque card above the bright looping video background", async (context) => {

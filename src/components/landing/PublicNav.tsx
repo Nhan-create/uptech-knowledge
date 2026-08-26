@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { ArrowRight, Menu, X } from "lucide-react";
 import Logo from "@/components/Logo";
 import { usePreferences } from "@/components/preferences/PreferencesProvider";
@@ -15,10 +16,10 @@ const publicNavCopy = {
     openMenu: "Mở menu",
     closeMenu: "Đóng menu",
     items: [
-      { href: "#product", label: "Sản phẩm" },
-      { href: "#trust", label: "Nguyên tắc" },
-      { href: "#capabilities", label: "Năng lực" },
-      { href: "#workflow", label: "Quy trình" },
+      { href: "/san-pham", label: "Sản phẩm" },
+      { href: "/nguyen-tac", label: "Nguyên tắc" },
+      { href: "/nang-luc", label: "Năng lực" },
+      { href: "/quy-trinh", label: "Quy trình" },
     ],
   },
   en: {
@@ -29,50 +30,23 @@ const publicNavCopy = {
     openMenu: "Open menu",
     closeMenu: "Close menu",
     items: [
-      { href: "#product", label: "Product" },
-      { href: "#trust", label: "Principles" },
-      { href: "#capabilities", label: "Capabilities" },
-      { href: "#workflow", label: "Workflow" },
+      { href: "/san-pham", label: "Product" },
+      { href: "/nguyen-tac", label: "Principles" },
+      { href: "/nang-luc", label: "Capabilities" },
+      { href: "/quy-trinh", label: "Workflow" },
     ],
   },
 } as const;
 
 export function PublicNav() {
   const { locale } = usePreferences();
+  const pathname = usePathname();
   const copy = publicNavCopy[locale === "en" ? "en" : "vi"];
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const desktopLinksRef = useRef<HTMLDivElement>(null);
   const mobileNavigationRef = useRef<HTMLDivElement>(null);
-
-  const closeMenuAndFocusAnchor = (href: string) => {
-    setOpen(false);
-
-    window.requestAnimationFrame(() => {
-      const target = document.getElementById(href.slice(1));
-      if (!target) return;
-
-      const focusTarget = target.matches("h1, h2, h3")
-        ? target
-        : (target.querySelector<HTMLElement>("h1, h2, h3") ?? target);
-      const hadTabIndex = focusTarget.hasAttribute("tabindex");
-
-      if (!hadTabIndex) {
-        focusTarget.setAttribute("tabindex", "-1");
-      }
-
-      focusTarget.focus({ preventScroll: true });
-
-      if (!hadTabIndex) {
-        focusTarget.addEventListener(
-          "blur",
-          () => focusTarget.removeAttribute("tabindex"),
-          { once: true },
-        );
-      }
-    });
-  };
 
   useEffect(() => {
     let scrollFrame = 0;
@@ -159,13 +133,14 @@ export function PublicNav() {
 
         <div ref={desktopLinksRef} className="hidden items-center gap-7 md:flex">
           {copy.items.map((item) => (
-            <a
+            <Link
               key={item.href}
               href={item.href}
-              className="landing-nav-link inline-flex min-h-11 items-center text-base font-medium text-slate-400 transition-colors hover:text-slate-100"
+              aria-current={pathname === item.href ? "page" : undefined}
+              className={`landing-nav-link inline-flex min-h-11 items-center text-base font-medium transition-colors hover:text-slate-100 ${pathname === item.href ? "text-slate-100" : "text-slate-400"}`}
             >
               {item.label}
-            </a>
+            </Link>
           ))}
         </div>
 
@@ -206,14 +181,15 @@ export function PublicNav() {
         >
           <div className="mx-auto flex max-w-7xl flex-col gap-1">
             {copy.items.map((item) => (
-              <a
+              <Link
                 key={item.href}
                 href={item.href}
-                onClick={() => closeMenuAndFocusAnchor(item.href)}
-                className="flex min-h-12 items-center rounded-lg px-3 text-base font-medium text-slate-300 transition-colors hover:bg-slate-900 hover:text-slate-100"
+                aria-current={pathname === item.href ? "page" : undefined}
+                onClick={() => setOpen(false)}
+                className={`flex min-h-12 items-center rounded-lg px-3 text-base font-medium transition-colors hover:bg-slate-900 hover:text-slate-100 ${pathname === item.href ? "bg-slate-900 text-slate-100" : "text-slate-300"}`}
               >
                 {item.label}
-              </a>
+              </Link>
             ))}
             <Link
               href="/login"

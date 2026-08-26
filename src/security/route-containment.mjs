@@ -1,6 +1,10 @@
 const PUBLIC_APPLICATION_PATHS = new Set([
   "/",
   "/login",
+  "/san-pham",
+  "/nguyen-tac",
+  "/nang-luc",
+  "/quy-trinh",
   "/api/demo-leads",
 ]);
 

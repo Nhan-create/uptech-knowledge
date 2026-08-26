@@ -164,18 +164,20 @@ export function GoogleWorkspaceLogin({
 
       <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8 sm:py-7 lg:px-12">
         <Link
+          data-testid="login-header-brand"
           href="/"
           aria-label="UPTECH KNOWLEDGE - Trang chủ"
-          className="inline-flex min-h-11 items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="inline-flex min-h-11 items-center gap-3 rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 text-slate-100 shadow-lg shadow-slate-950/15 backdrop-blur-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Logo className="h-7 w-auto" />
-          <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-semibold tracking-[0.18em] text-slate-300 sm:inline">
+          <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-bold tracking-[0.18em] text-slate-100 sm:inline">
             KNOWLEDGE
           </span>
         </Link>
         <Link
+          data-testid="login-header-home"
           href="/"
-          className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-400 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 text-sm font-semibold text-slate-100 shadow-lg shadow-slate-950/15 backdrop-blur-md transition-[background-color,border-color] hover:border-slate-600 hover:bg-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
           Trang chủ
