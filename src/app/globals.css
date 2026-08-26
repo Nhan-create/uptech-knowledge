@@ -228,6 +228,21 @@ pre,
   filter: var(--logo-filter);
 }
 
+.login-brand-logo-base {
+  filter: none;
+}
+
+.login-brand-logo-accent {
+  clip-path: inset(18% 73% 51% 12%);
+  filter: brightness(0) saturate(100%) invert(47%) sepia(93%) saturate(2297%)
+    hue-rotate(211deg) brightness(102%) contrast(101%);
+}
+
+html[data-theme="light"] .login-brand-logo-base {
+  filter: brightness(0) saturate(100%) invert(8%) sepia(19%) saturate(1370%)
+    hue-rotate(185deg) brightness(95%) contrast(96%);
+}
+
 html[data-theme="light"] .text-white {
   color: var(--text-primary);
 }
