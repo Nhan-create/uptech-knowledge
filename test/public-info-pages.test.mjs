@@ -117,3 +117,80 @@ test("public information pages follow the current English preference", async (co
   assert.match(html, /Document comparison/);
   assert.match(html, /Sign in/);
 });
+
+test("home and demo request dialog fully follow the English preference", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/", baseUrl), {
+    headers: { cookie: "uptech-locale=en" },
+  });
+  assert.equal(response.status, 200);
+  const html = await response.text();
+
+  assert.match(html, /The knowledge brain for your enterprise/);
+  assert.match(html, /Search instantly, get grounded answers/);
+  assert.match(html, /Trust starts with visible evidence/);
+  assert.match(html, /From scattered documents to actionable answers/);
+  assert.match(html, /Request a demo/);
+  assert.match(html, /Register for a product demo/);
+  assert.match(html, /Company Workspace email/);
+  assert.match(html, /What would you like to achieve with UPTECH KNOWLEDGE\?/);
+  assert.doesNotMatch(html, /Bộ não tri thức dành cho doanh nghiệp/);
+});
+
+test("video-backed public pages preserve readable media text in every theme", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  for (const path of ["/", "/san-pham", "/nguyen-tac", "/nang-luc", "/quy-trinh"]) {
+    const response = await fetch(new URL(path, baseUrl), {
+      headers: { cookie: "uptech-theme=light" },
+    });
+    assert.equal(response.status, 200, path);
+    const html = await response.text();
+
+    assert.match(html, /data-media-surface="dark"/, path);
+  }
+});
+
+test("information pages explain detailed product use cases", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  for (const { path } of pages) {
+    const response = await fetch(new URL(path, baseUrl));
+    assert.equal(response.status, 200, path);
+    const html = await response.text();
+
+    assert.match(html, /data-testid="product-use-cases"/, path);
+    assert.match(html, /Tình huống sử dụng thực tế/, path);
+    assert.equal((html.match(/data-use-case=/g) ?? []).length, 3, path);
+  }
+});
+
+test("settings launcher keeps a balanced safe-area position", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set PUBLIC_INFO_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/", baseUrl));
+  assert.equal(response.status, 200);
+  const html = await response.text();
+
+  assert.match(
+    html,
+    /data-testid="settings-menu-root"[^>]+class="[^"]*settings-menu-position/,
+  );
+  assert.match(
+    html,
+    /data-testid="settings-menu-trigger"[^>]+class="[^"]*size-11[^"]*focus-visible:ring-2/,
+  );
+});

@@ -2,20 +2,45 @@
 
 import { useId, useRef } from "react";
 import { Check, ShieldCheck, X } from "lucide-react";
+import type { Locale } from "@/lib/preferences";
 
-const securityPoints = [
-  "Google trực tiếp xác minh danh tính của bạn.",
-  "UPTECH không nhận mật khẩu Google.",
-  "UPTECH chỉ yêu cầu tên, email và thông tin hồ sơ cơ bản.",
-  "Quyền truy cập được xác định bởi workspace của tổ chức.",
-  "Phiên đăng nhập có thể bị thu hồi khi quản trị viên vô hiệu hóa quyền truy cập.",
-] as const;
+const securityCopy = {
+  vi: {
+    trigger: "Bảo mật & quyền riêng tư",
+    title: "Bảo mật khi đăng nhập",
+    description: "Những điều bạn cần biết trước khi tiếp tục.",
+    close: "Đóng thông tin bảo mật",
+    understood: "Đã hiểu",
+    points: [
+      "Google trực tiếp xác minh danh tính của bạn.",
+      "UPTECH không nhận mật khẩu Google.",
+      "UPTECH chỉ yêu cầu tên, email và thông tin hồ sơ cơ bản.",
+      "Quyền truy cập được xác định bởi workspace của tổ chức.",
+      "Phiên đăng nhập có thể bị thu hồi khi quản trị viên vô hiệu hóa quyền truy cập.",
+    ],
+  },
+  en: {
+    trigger: "Security & privacy",
+    title: "Secure sign-in",
+    description: "What you should know before continuing.",
+    close: "Close security information",
+    understood: "Understood",
+    points: [
+      "Google verifies your identity directly.",
+      "UPTECH never receives your Google password.",
+      "UPTECH only requests your name, email, and basic profile information.",
+      "Your organization workspace determines access permissions.",
+      "A session can be revoked when an administrator disables access.",
+    ],
+  },
+} as const;
 
-export function SecurityPrivacyDisclosure() {
+export function SecurityPrivacyDisclosure({ locale }: { readonly locale: Locale }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const copy = securityCopy[locale];
 
   const closeDialog = () => dialogRef.current?.close();
 
@@ -29,7 +54,7 @@ export function SecurityPrivacyDisclosure() {
         className="inline-flex min-h-10 items-center gap-2 rounded-lg px-2 text-xs font-medium text-slate-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
       >
         <ShieldCheck aria-hidden="true" className="size-4 text-blue-300" />
-        Bảo mật &amp; quyền riêng tư
+        {copy.trigger}
       </button>
 
       <dialog
@@ -51,17 +76,17 @@ export function SecurityPrivacyDisclosure() {
               </span>
               <div>
                 <h2 id={titleId} className="text-lg font-semibold tracking-[-0.02em] text-slate-100">
-                  Bảo mật khi đăng nhập
+                  {copy.title}
                 </h2>
                 <p id={descriptionId} className="mt-1 text-sm leading-6 text-slate-400">
-                  Những điều bạn cần biết trước khi tiếp tục.
+                  {copy.description}
                 </p>
               </div>
             </div>
             <button
               type="button"
               onClick={closeDialog}
-              aria-label="Đóng thông tin bảo mật"
+              aria-label={copy.close}
               className="flex size-10 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
             >
               <X aria-hidden="true" className="size-5" />
@@ -69,7 +94,7 @@ export function SecurityPrivacyDisclosure() {
           </div>
 
           <ul className="mt-6 space-y-3.5">
-            {securityPoints.map((point) => (
+            {copy.points.map((point) => (
               <li key={point} className="flex items-start gap-3 text-sm leading-6 text-slate-300">
                 <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-400/10 text-emerald-300">
                   <Check aria-hidden="true" className="size-3" />
@@ -84,7 +109,7 @@ export function SecurityPrivacyDisclosure() {
             onClick={closeDialog}
             className="mt-7 inline-flex min-h-11 w-full items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-elevated)]"
           >
-            Đã hiểu
+            {copy.understood}
           </button>
         </div>
       </dialog>

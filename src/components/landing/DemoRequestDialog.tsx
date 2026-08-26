@@ -15,24 +15,97 @@ import {
   useRef,
   useState,
 } from "react";
+import { usePreferences } from "@/components/preferences/PreferencesProvider";
 
-const companySizes = [
-  { value: "1-10", label: "1–10 nhân sự" },
-  { value: "11-50", label: "11–50 nhân sự" },
-  { value: "51-200", label: "51–200 nhân sự" },
-  { value: "201-500", label: "201–500 nhân sự" },
-  { value: "501-1000", label: "501–1.000 nhân sự" },
-  { value: "1000+", label: "Trên 1.000 nhân sự" },
-] as const;
+const demoCopy = {
+  vi: {
+    trigger: "Dùng thử",
+    title: "Đăng ký dùng thử",
+    description: "Chia sẻ thông tin để đội ngũ UPTECH chuẩn bị buổi tư vấn phù hợp với doanh nghiệp của bạn.",
+    close: "Đóng cửa sổ đăng ký dùng thử",
+    closeTitle: "Đóng",
+    requiredNote: "Thông tin bắt buộc",
+    requiredSr: " (bắt buộc)",
+    fields: {
+      lastName: "Họ",
+      firstName: "Tên",
+      workEmail: "Email Google Workspace của công ty",
+      company: "Công ty",
+      companySize: "Quy mô công ty",
+      phone: "Số điện thoại",
+      country: "Quốc gia",
+      interest: "Điều gì khiến bạn quan tâm đến UPTECH KNOWLEDGE?",
+      website: "Trang web",
+    },
+    companySizePlaceholder: "Chọn quy mô công ty",
+    companySizes: ["1–10 nhân sự", "11–50 nhân sự", "51–200 nhân sự", "201–500 nhân sự", "501–1.000 nhân sự", "Trên 1.000 nhân sự"],
+    countries: ["Việt Nam", "Singapore", "Thái Lan", "Indonesia", "Malaysia", "Quốc gia khác"],
+    consent: "Tôi đồng ý để UPTECH liên hệ tư vấn về buổi dùng thử và xử lý thông tin đã cung cấp theo Chính sách quyền riêng tư.",
+    success: "Cảm ơn bạn! Thông tin của bạn đã được tiếp nhận!",
+    error: "Rất tiếc! Đã xảy ra lỗi khi gửi biểu mẫu.",
+    done: "Hoàn tất",
+    submitting: "Đang gửi thông tin...",
+    submit: "Gửi thông tin",
+    validation: {
+      firstName: "Vui lòng nhập tên.",
+      lastName: "Vui lòng nhập họ.",
+      workEmailRequired: "Vui lòng nhập email công việc.",
+      workEmailInvalid: "Email công việc chưa đúng định dạng.",
+      company: "Vui lòng nhập tên công ty.",
+      companySize: "Vui lòng chọn quy mô công ty.",
+      country: "Vui lòng chọn quốc gia.",
+      phoneRequired: "Vui lòng nhập số điện thoại.",
+      phoneInvalid: "Số điện thoại chưa đúng định dạng.",
+      interest: "Vui lòng chia sẻ lý do bạn quan tâm đến sản phẩm.",
+      consent: "Bạn cần đồng ý để chúng tôi liên hệ về buổi dùng thử.",
+    },
+  },
+  en: {
+    trigger: "Request a demo",
+    title: "Register for a product demo",
+    description: "Tell us about your organization so the UPTECH team can prepare a useful product consultation.",
+    close: "Close product demo registration",
+    closeTitle: "Close",
+    requiredNote: "Required information",
+    requiredSr: " (required)",
+    fields: {
+      lastName: "Last name",
+      firstName: "First name",
+      workEmail: "Company Workspace email",
+      company: "Company",
+      companySize: "Company size",
+      phone: "Phone number",
+      country: "Country",
+      interest: "What would you like to achieve with UPTECH KNOWLEDGE?",
+      website: "Website",
+    },
+    companySizePlaceholder: "Select company size",
+    companySizes: ["1–10 employees", "11–50 employees", "51–200 employees", "201–500 employees", "501–1,000 employees", "More than 1,000 employees"],
+    countries: ["Vietnam", "Singapore", "Thailand", "Indonesia", "Malaysia", "Other country"],
+    consent: "I agree that UPTECH may contact me about a product demo and process the information provided under its Privacy Policy.",
+    success: "Thank you! We have received your information.",
+    error: "We could not submit the form. Please try again.",
+    done: "Done",
+    submitting: "Submitting...",
+    submit: "Submit request",
+    validation: {
+      firstName: "Enter your first name.",
+      lastName: "Enter your last name.",
+      workEmailRequired: "Enter your work email.",
+      workEmailInvalid: "Enter a valid work email.",
+      company: "Enter your company name.",
+      companySize: "Select your company size.",
+      country: "Select your country.",
+      phoneRequired: "Enter your phone number.",
+      phoneInvalid: "Enter a valid phone number.",
+      interest: "Tell us what you would like to achieve with the product.",
+      consent: "Consent is required so we can contact you about the demo.",
+    },
+  },
+} as const;
 
-const countries = [
-  { value: "VN", label: "Việt Nam" },
-  { value: "SG", label: "Singapore" },
-  { value: "TH", label: "Thái Lan" },
-  { value: "ID", label: "Indonesia" },
-  { value: "MY", label: "Malaysia" },
-  { value: "OTHER", label: "Quốc gia khác" },
-] as const;
+const companySizeValues = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"] as const;
+const countryValues = ["VN", "SG", "TH", "ID", "MY", "OTHER"] as const;
 
 type SubmissionStatus = "idle" | "error" | "success";
 
@@ -78,40 +151,43 @@ function normalizeLead(lead: LeadFormValues): LeadFormValues {
   };
 }
 
-function validateLead(lead: LeadFormValues): LeadErrors {
+function validateLead(
+  lead: LeadFormValues,
+  messages: (typeof demoCopy)["vi"]["validation"] | (typeof demoCopy)["en"]["validation"],
+): LeadErrors {
   const values = normalizeLead(lead);
   const errors: LeadErrors = {};
 
-  if (!values.firstName) errors.firstName = "Vui lòng nhập tên.";
-  if (!values.lastName) errors.lastName = "Vui lòng nhập họ.";
+  if (!values.firstName) errors.firstName = messages.firstName;
+  if (!values.lastName) errors.lastName = messages.lastName;
 
   if (!values.workEmail) {
-    errors.workEmail = "Vui lòng nhập email công việc.";
+    errors.workEmail = messages.workEmailRequired;
   } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(values.workEmail)) {
-    errors.workEmail = "Email công việc chưa đúng định dạng.";
+    errors.workEmail = messages.workEmailInvalid;
   }
 
-  if (!values.company) errors.company = "Vui lòng nhập tên công ty.";
-  if (!values.companySize) errors.companySize = "Vui lòng chọn quy mô công ty.";
-  if (!values.country) errors.country = "Vui lòng chọn quốc gia.";
+  if (!values.company) errors.company = messages.company;
+  if (!values.companySize) errors.companySize = messages.companySize;
+  if (!values.country) errors.country = messages.country;
 
   const phoneDigits = values.phone.replace(/\D/g, "");
   if (!values.phone) {
-    errors.phone = "Vui lòng nhập số điện thoại.";
+    errors.phone = messages.phoneRequired;
   } else if (
     !/^[+()0-9.\s-]{7,32}$/.test(values.phone) ||
     phoneDigits.length < 7 ||
     phoneDigits.length > 15
   ) {
-    errors.phone = "Số điện thoại chưa đúng định dạng.";
+    errors.phone = messages.phoneInvalid;
   }
 
   if (!values.interest) {
-    errors.interest = "Vui lòng chia sẻ lý do bạn quan tâm đến sản phẩm.";
+    errors.interest = messages.interest;
   }
 
   if (!values.consent) {
-    errors.consent = "Bạn cần đồng ý để chúng tôi liên hệ về buổi dùng thử.";
+    errors.consent = messages.consent;
   }
 
   return errors;
@@ -123,9 +199,10 @@ type FieldGroupProps = Readonly<{
   id: string;
   label: string;
   required?: boolean;
+  requiredText: string;
 }>;
 
-function FieldGroup({ children, error, id, label, required = false }: FieldGroupProps) {
+function FieldGroup({ children, error, id, label, required = false, requiredText }: FieldGroupProps) {
   return (
     <div className="min-w-0">
       <label htmlFor={id} className="mb-2 block text-sm font-medium text-[var(--text-secondary)]">
@@ -133,7 +210,7 @@ function FieldGroup({ children, error, id, label, required = false }: FieldGroup
         {required ? (
           <>
             <span aria-hidden="true" className="ml-1 text-[var(--status-danger)]">*</span>
-            <span className="sr-only"> (bắt buộc)</span>
+            <span className="sr-only">{requiredText}</span>
           </>
         ) : null}
       </label>
@@ -149,10 +226,12 @@ function FieldGroup({ children, error, id, label, required = false }: FieldGroup
 }
 
 type InlineSubmissionStateProps = Readonly<{
+  errorMessage: string;
   status: SubmissionStatus;
+  successMessage: string;
 }>;
 
-function InlineSubmissionState({ status }: InlineSubmissionStateProps) {
+function InlineSubmissionState({ errorMessage, status, successMessage }: InlineSubmissionStateProps) {
   return (
     <div className="mt-4" aria-live="polite" aria-atomic="true">
       <p
@@ -161,14 +240,14 @@ function InlineSubmissionState({ status }: InlineSubmissionStateProps) {
         className="flex items-start gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm leading-6 text-[var(--status-success)]"
       >
         <CheckCircle2 aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        Cảm ơn bạn! Thông tin của bạn đã được tiếp nhận!
+        {successMessage}
       </p>
       <p
         hidden={status !== "error"}
         role="alert"
         className="rounded-xl border border-rose-500/35 bg-rose-500/10 px-4 py-3 text-sm leading-6 text-[var(--status-danger)]"
       >
-        Rất tiếc! Đã xảy ra lỗi khi gửi biểu mẫu.
+        {errorMessage}
       </p>
     </div>
   );
@@ -180,6 +259,8 @@ const inputClassName =
 const invalidInputClassName = " border-rose-500/70 focus:border-rose-500 focus:ring-rose-500/20";
 
 export function DemoRequestDialog() {
+  const { locale } = usePreferences();
+  const copy = demoCopy[locale];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
@@ -300,7 +381,7 @@ export function DemoRequestDialog() {
 
     if (activeRequestRef.current) return;
 
-    const fieldErrors = validateLead(lead);
+    const fieldErrors = validateLead(lead, copy.validation);
     setErrors(fieldErrors);
     setStatus("idle");
 
@@ -365,7 +446,7 @@ export function DemoRequestDialog() {
         onClick={openDialog}
         className="group inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/35 transition-[background-color,transform,box-shadow] hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-blue-950/45 active:translate-y-0 sm:w-auto motion-reduce:transform-none motion-reduce:transition-none"
       >
-        Dùng thử
+        {copy.trigger}
         <ArrowRight aria-hidden="true" className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transform-none" />
       </button>
 
@@ -379,10 +460,10 @@ export function DemoRequestDialog() {
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeDialog();
         }}
-        className="fixed inset-0 m-auto h-[min(54rem,calc(100dvh-1rem))] max-h-[calc(100dvh-1rem)] w-[min(48rem,calc(100vw-1rem))] max-w-none overflow-hidden rounded-2xl border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0 text-left text-[var(--text-primary)] shadow-[0_30px_100px_rgba(2,6,23,0.52)] backdrop:bg-slate-950/75 backdrop:backdrop-blur-md sm:max-h-[calc(100dvh-2rem)] sm:w-[min(48rem,calc(100vw-2rem))] sm:rounded-3xl"
+        className="fixed inset-0 m-auto h-[min(46rem,calc(100dvh-1rem))] max-h-[calc(100dvh-1rem)] w-[min(44rem,calc(100vw-1rem))] max-w-none overflow-hidden rounded-2xl border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0 text-left text-[var(--text-primary)] shadow-[0_30px_100px_rgba(2,6,23,0.52)] backdrop:bg-slate-950/75 backdrop:backdrop-blur-md sm:max-h-[calc(100dvh-2rem)] sm:w-[min(44rem,calc(100vw-2rem))] sm:rounded-3xl"
       >
         <div className="flex h-full min-h-0 flex-col">
-          <div className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 pb-4 pt-4 sm:px-8 sm:pb-5 sm:pt-5">
+          <div className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-4 sm:px-7">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--border-focus)]">
@@ -394,20 +475,20 @@ export function DemoRequestDialog() {
                   tabIndex={-1}
                   className="mt-1 text-xl font-semibold tracking-[-0.02em] outline-none sm:text-2xl"
                 >
-                  Đăng ký dùng thử
+                  {copy.title}
                 </h2>
                 <p
                   id={dialogDescriptionId}
                   className="mt-1.5 max-w-2xl text-sm leading-6 text-[var(--text-muted)]"
                 >
-                  Chia sẻ thông tin để đội ngũ UPTECH chuẩn bị buổi tư vấn phù hợp với doanh nghiệp của bạn.
+                  {copy.description}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={closeDialog}
-                aria-label="Đóng cửa sổ đăng ký dùng thử"
-                title="Đóng"
+                aria-label={copy.close}
+                title={copy.closeTitle}
                 className="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-xl text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <X aria-hidden="true" className="size-5" />
@@ -416,17 +497,18 @@ export function DemoRequestDialog() {
 
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-7">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6">
             <form noValidate onSubmit={submitLead} aria-busy={isSubmitting}>
                 <p className="mb-5 text-xs leading-5 text-[var(--text-muted)]">
-                  <span className="text-[var(--status-danger)]">*</span> Thông tin bắt buộc
+                  <span className="text-[var(--status-danger)]">*</span> {copy.requiredNote}
                 </p>
 
                 <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
                   <FieldGroup
                     id={fieldId("lastName")}
-                    label="Họ"
+                    label={copy.fields.lastName}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.lastName}
                   >
                     <input
@@ -447,8 +529,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("firstName")}
-                    label="Tên"
+                    label={copy.fields.firstName}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.firstName}
                   >
                     <input
@@ -468,8 +551,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("workEmail")}
-                    label="Email Google Workspace của công ty"
+                    label={copy.fields.workEmail}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.workEmail}
                   >
                     <input
@@ -490,8 +574,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("company")}
-                    label="Công ty"
+                    label={copy.fields.company}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.company}
                   >
                     <input
@@ -511,8 +596,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("companySize")}
-                    label="Quy mô công ty"
+                    label={copy.fields.companySize}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.companySize}
                   >
                     <select
@@ -525,10 +611,10 @@ export function DemoRequestDialog() {
                       aria-describedby={errors.companySize ? fieldId("companySize") + "-error" : undefined}
                       className={inputClassName + " cursor-pointer" + (errors.companySize ? invalidInputClassName : "")}
                     >
-                      <option value="">Chọn quy mô công ty</option>
-                      {companySizes.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
+                      <option value="">{copy.companySizePlaceholder}</option>
+                      {companySizeValues.map((value, index) => (
+                        <option key={value} value={value}>
+                          {copy.companySizes[index]}
                         </option>
                       ))}
                     </select>
@@ -536,8 +622,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("phone")}
-                    label="Số điện thoại"
+                    label={copy.fields.phone}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.phone}
                   >
                     <input
@@ -558,8 +645,9 @@ export function DemoRequestDialog() {
 
                   <FieldGroup
                     id={fieldId("country")}
-                    label="Quốc gia"
+                    label={copy.fields.country}
                     required
+                    requiredText={copy.requiredSr}
                     error={errors.country}
                   >
                     <select
@@ -573,9 +661,9 @@ export function DemoRequestDialog() {
                       aria-describedby={errors.country ? fieldId("country") + "-error" : undefined}
                       className={inputClassName + " cursor-pointer" + (errors.country ? invalidInputClassName : "")}
                     >
-                      {countries.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
+                      {countryValues.map((value, index) => (
+                        <option key={value} value={value}>
+                          {copy.countries[index]}
                         </option>
                       ))}
                     </select>
@@ -584,8 +672,9 @@ export function DemoRequestDialog() {
                   <div className="sm:col-span-2">
                     <FieldGroup
                       id={fieldId("interest")}
-                      label="Điều gì khiến bạn quan tâm đến UPTECH KNOWLEDGE?"
+                      label={copy.fields.interest}
                       required
+                      requiredText={copy.requiredSr}
                       error={errors.interest}
                     >
                       <textarea
@@ -605,7 +694,7 @@ export function DemoRequestDialog() {
                 </div>
 
                 <div hidden>
-                  <label htmlFor={fieldId("website")}>Trang web</label>
+                  <label htmlFor={fieldId("website")}>{copy.fields.website}</label>
                   <input
                     id={fieldId("website")}
                     name="website"
@@ -638,9 +727,9 @@ export function DemoRequestDialog() {
                       className="mt-0.5 size-5 shrink-0 cursor-pointer accent-blue-600"
                     />
                     <span id={fieldId("consent") + "-description"} className="text-xs leading-5 text-[var(--text-secondary)] sm:text-sm sm:leading-6">
-                      Tôi đồng ý để UPTECH liên hệ tư vấn về buổi dùng thử và xử lý thông tin đã cung cấp theo Chính sách quyền riêng tư.
+                      {copy.consent}
                       <span aria-hidden="true" className="ml-1 text-[var(--status-danger)]">*</span>
-                      <span className="sr-only"> (bắt buộc)</span>
+                      <span className="sr-only">{copy.requiredSr}</span>
                     </span>
                   </label>
                   <p
@@ -651,35 +740,41 @@ export function DemoRequestDialog() {
                   </p>
                 </div>
 
-                <InlineSubmissionState status={status} />
+                <InlineSubmissionState
+                  status={status}
+                  successMessage={copy.success}
+                  errorMessage={copy.error}
+                />
 
+                <div className="sticky bottom-0 -mx-4 mt-5 border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/95 px-4 pb-1 pt-4 backdrop-blur sm:-mx-7 sm:px-7">
                 {status === "success" ? (
                   <button
                     type="button"
                     onClick={closeDialog}
-                    className="mt-5 inline-flex min-h-12 w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 sm:w-auto"
+                    className="inline-flex min-h-12 w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 sm:w-auto"
                   >
-                    Hoàn tất
+                    {copy.done}
                   </button>
                 ) : (
                   <button
                     type="submit"
                     disabled={isSubmitting}
-                    className="mt-5 inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/20 transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 sm:w-auto"
+                    className="inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/20 transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 sm:w-auto"
                   >
                     {isSubmitting ? (
                       <>
                         <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
-                        Đang gửi thông tin...
+                        {copy.submitting}
                       </>
                     ) : (
                       <>
-                        Gửi thông tin
+                        {copy.submit}
                         <ArrowRight aria-hidden="true" className="size-4" />
                       </>
                     )}
                   </button>
                 )}
+                </div>
               </form>
           </div>
         </div>

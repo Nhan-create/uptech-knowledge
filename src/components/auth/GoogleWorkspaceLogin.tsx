@@ -5,6 +5,7 @@ import { ArrowLeft } from "lucide-react";
 import Logo from "@/components/Logo";
 import { GoogleLoginSubmitButton } from "@/components/auth/GoogleLoginSubmitButton";
 import { SecurityPrivacyDisclosure } from "@/components/auth/SecurityPrivacyDisclosure";
+import type { Locale } from "@/lib/preferences";
 
 type LoginState = Readonly<{
   title: string;
@@ -14,14 +15,17 @@ type LoginState = Readonly<{
   showAlternateAccountAction?: boolean;
 }>;
 
-const normalState: LoginState = Object.freeze({
-  title: "Đăng nhập vào workspace",
-  description: "Sử dụng tài khoản Workspace của bạn.",
-  actionLabel: "Tiếp tục với Google Workspace",
-  isError: false,
-});
+type LoginCopy = Readonly<{
+  normal: LoginState;
+  states: Readonly<Record<string, LoginState>>;
+  home: string;
+  homeLabel: string;
+  account: string;
+  passwordNotice: string;
+  alternateAccount: string;
+}>;
 
-const loginStates: Readonly<Record<string, LoginState>> = Object.freeze({
+const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
   personal_gmail: {
     title: "Tài khoản không hợp lệ",
     description: "Vui lòng nhập tài khoản Workspace, không phải tài khoản Google.",
@@ -115,19 +119,141 @@ const loginStates: Readonly<Record<string, LoginState>> = Object.freeze({
   },
 });
 
-function resolveLoginState(error?: string): LoginState {
-  if (error === undefined) return normalState;
-  return loginStates[error] ?? loginStates.login_failed;
+const englishStates: Readonly<Record<string, LoginState>> = Object.freeze({
+  personal_gmail: {
+    title: "Invalid account",
+    description: "Please use a Workspace account, not a personal Google account.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  personal_account: {
+    title: "Invalid account",
+    description: "Please use a Workspace account, not a personal Google account.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  unknown_workspace: {
+    title: "Workspace not found",
+    description:
+      "Your Google account was verified, but this organization has not been configured in UPTECH KNOWLEDGE.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  workspace_not_found: {
+    title: "Workspace not found",
+    description:
+      "Your Google account was verified, but this organization has not been configured in UPTECH KNOWLEDGE.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  access_required: {
+    title: "Access has not been granted",
+    description: "Contact your workspace administrator to request access to UPTECH KNOWLEDGE.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  not_provisioned: {
+    title: "Access has not been granted",
+    description: "Contact your workspace administrator to request access to UPTECH KNOWLEDGE.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  suspended: {
+    title: "Access suspended",
+    description:
+      "This account no longer has access to UPTECH KNOWLEDGE. Contact your organization administrator.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  session_expired: {
+    title: "Session expired",
+    description: "Sign in again to continue.",
+    actionLabel: "Continue with Google Workspace",
+    isError: false,
+  },
+  rate_limited: {
+    title: "Please try again later",
+    description: "Too many sign-in requests were received. Wait a few minutes and try again.",
+    actionLabel: "Try again",
+    isError: true,
+  },
+  temporarily_unavailable: {
+    title: "Sign-in is temporarily unavailable",
+    description: "The account verification service is temporarily unavailable. Please try again.",
+    actionLabel: "Try again",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+  provider_rejected: {
+    title: "Sign-in was not completed",
+    description: "The sign-in request was cancelled or declined. Try again when you are ready.",
+    actionLabel: "Try again",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+  active_authority: {
+    title: "Another sign-in session is active",
+    description:
+      "This browser already has another sign-in or authorization request. Sign out before switching accounts.",
+    actionLabel: "Try again",
+    isError: true,
+  },
+  login_failed: {
+    title: "Unable to sign in",
+    description: "An error occurred while verifying your account. Please try again.",
+    actionLabel: "Try again",
+    isError: true,
+    showAlternateAccountAction: true,
+  },
+});
+
+const loginCopy: Record<Locale, LoginCopy> = {
+  vi: {
+    normal: {
+      title: "Đăng nhập vào workspace",
+      description: "Sử dụng tài khoản Workspace của bạn.",
+      actionLabel: "Tiếp tục với Google Workspace",
+      isError: false,
+    },
+    states: vietnameseStates,
+    home: "Trang chủ",
+    homeLabel: "UPTECH KNOWLEDGE - Trang chủ",
+    account: "Tài khoản",
+    passwordNotice: "UPTECH không nhận hoặc lưu mật khẩu Google của bạn.",
+    alternateAccount: "Đăng nhập bằng tài khoản khác",
+  },
+  en: {
+    normal: {
+      title: "Sign in to your workspace",
+      description: "Use your Workspace account.",
+      actionLabel: "Continue with Google Workspace",
+      isError: false,
+    },
+    states: englishStates,
+    home: "Home",
+    homeLabel: "UPTECH KNOWLEDGE - Home",
+    account: "Account",
+    passwordNotice: "UPTECH never receives or stores your Google password.",
+    alternateAccount: "Sign in with another account",
+  },
+};
+
+function resolveLoginState(copy: LoginCopy, error?: string): LoginState {
+  if (error === undefined) return copy.normal;
+  return copy.states[error] ?? copy.states.login_failed;
 }
 
 export function GoogleWorkspaceLogin({
   error,
   account,
+  locale,
 }: {
   readonly error?: string;
   readonly account?: string;
+  readonly locale: Locale;
 }) {
-  const state = resolveLoginState(error);
+  const copy = loginCopy[locale];
+  const state = resolveLoginState(copy, error);
 
   return (
     <main
@@ -162,12 +288,16 @@ export function GoogleWorkspaceLogin({
         className="pointer-events-none absolute inset-0 -z-10 bg-white/25"
       />
 
-      <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between px-5 py-5 sm:px-8 sm:py-7 lg:px-12">
+      <header className="relative z-10 mx-auto w-full max-w-7xl px-4 pt-4 sm:px-7 sm:pt-6 lg:px-10">
+        <div
+          data-testid="login-header-shell"
+          className="flex items-center justify-between rounded-2xl border border-white/20 bg-slate-950/55 px-3 py-2 shadow-[0_16px_48px_rgba(2,6,23,0.28)] backdrop-blur-xl sm:px-4"
+        >
         <Link
           data-testid="login-header-brand"
           href="/"
-          aria-label="UPTECH KNOWLEDGE - Trang chủ"
-          className="inline-flex min-h-11 items-center gap-3 rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 text-slate-100 shadow-lg shadow-slate-950/15 backdrop-blur-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          aria-label={copy.homeLabel}
+          className="inline-flex min-h-11 items-center gap-3 rounded-xl px-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Logo className="h-7 w-auto" />
           <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-bold tracking-[0.18em] text-slate-100 sm:inline">
@@ -177,11 +307,12 @@ export function GoogleWorkspaceLogin({
         <Link
           data-testid="login-header-home"
           href="/"
-          className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 text-sm font-semibold text-slate-100 shadow-lg shadow-slate-950/15 backdrop-blur-md transition-[background-color,border-color] hover:border-slate-600 hover:bg-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <ArrowLeft aria-hidden="true" className="size-4" />
-          Trang chủ
+          {copy.home}
         </Link>
+        </div>
       </header>
 
       <section
@@ -237,7 +368,7 @@ export function GoogleWorkspaceLogin({
 
           {account !== undefined ? (
             <div className="mt-5 rounded-xl border border-slate-700/80 bg-slate-950/45 px-4 py-3 text-sm">
-              <p className="text-xs text-slate-400">Tài khoản</p>
+              <p className="text-xs text-slate-400">{copy.account}</p>
               <p className="mt-1 break-all font-medium text-slate-200">
                 {account}
               </p>
@@ -254,17 +385,17 @@ export function GoogleWorkspaceLogin({
             id="login-description"
             className="mt-4 text-center text-xs leading-5 text-slate-400"
           >
-            UPTECH không nhận hoặc lưu mật khẩu Google của bạn.
+            {copy.passwordNotice}
           </p>
 
           <div className="mt-5 flex flex-col items-center gap-3 border-t border-slate-800 pt-5">
-            <SecurityPrivacyDisclosure />
+            <SecurityPrivacyDisclosure locale={locale} />
             {state.showAlternateAccountAction ? (
               <Link
                 href="/login"
                 className="inline-flex min-h-10 items-center rounded-lg px-2 text-xs font-medium text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
               >
-                Đăng nhập bằng tài khoản khác
+                {copy.alternateAccount}
               </Link>
             ) : null}
           </div>
