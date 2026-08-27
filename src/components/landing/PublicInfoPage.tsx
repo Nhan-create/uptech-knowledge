@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, Check } from "lucide-react";
+import { Check } from "lucide-react";
 
 import Logo from "@/components/Logo";
 import { HeroBackgroundVideo } from "@/components/landing/HeroBackgroundVideo";
@@ -43,14 +43,7 @@ function PublicInfoView({
         <section className="px-4 pb-16 pt-32 sm:px-6 sm:pb-24 sm:pt-40 lg:px-8 lg:pt-44">
           <div className="mx-auto grid max-w-7xl gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center lg:gap-16">
             <div>
-              <Link
-                href="/"
-                className="inline-flex min-h-11 items-center gap-2 rounded-lg text-sm font-semibold text-blue-200 transition-colors hover:text-white"
-              >
-                <ArrowLeft aria-hidden="true" className="size-4" />
-                {content.secondaryCta}
-              </Link>
-              <p className="mt-7 text-xs font-bold uppercase tracking-[0.22em] text-blue-200">
+              <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-200">
                 {content.eyebrow}
               </p>
               <h1 className="landing-media-text mt-5 max-w-4xl text-balance text-4xl font-bold leading-[1.08] tracking-[-0.045em] text-white sm:text-5xl lg:text-6xl">
@@ -59,24 +52,6 @@ function PublicInfoView({
               <p className="landing-media-text mt-7 max-w-2xl text-pretty text-base font-medium leading-8 text-white/85 sm:text-lg">
                 {content.summary}
               </p>
-              <div className="mt-9 flex flex-col gap-3 sm:flex-row">
-                <Link
-                  href="/login"
-                  className="group inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/35 transition-[background-color,transform,box-shadow] hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-blue-950/45"
-                >
-                  {content.primaryCta}
-                  <ArrowRight
-                    aria-hidden="true"
-                    className="size-4 transition-transform group-hover:translate-x-0.5"
-                  />
-                </Link>
-                <Link
-                  href="/"
-                  className="inline-flex min-h-12 items-center justify-center rounded-xl border border-white/30 bg-slate-950/55 px-6 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:border-white/50 hover:bg-slate-950/70"
-                >
-                  {content.secondaryCta}
-                </Link>
-              </div>
             </div>
 
             <article
@@ -237,16 +212,6 @@ function PublicInfoView({
               <p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">
                 {content.ctaDescription}
               </p>
-              <Link
-                href="/login"
-                className="group mt-8 inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition-[background-color,transform] hover:-translate-y-0.5 hover:bg-blue-700"
-              >
-                {content.primaryCta}
-                <ArrowRight
-                  aria-hidden="true"
-                  className="size-4 transition-transform group-hover:translate-x-0.5"
-                />
-              </Link>
             </div>
           </div>
         </section>
@@ -268,20 +233,6 @@ function PublicInfoView({
             <p className="mt-4 max-w-lg text-sm leading-6 text-slate-400">
               {content.footerDescription}
             </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <Link
-              href="/"
-              className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-slate-300 transition-colors hover:text-white"
-            >
-              {content.secondaryCta}
-            </Link>
-            <Link
-              href="/login"
-              className="inline-flex min-h-11 items-center rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
-            >
-              {content.primaryCta}
-            </Link>
           </div>
         </div>
       </footer>

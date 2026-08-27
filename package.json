@@ -12,6 +12,7 @@
     "test:security": "node --experimental-strip-types --test src/security/route-containment.test.mjs src/server/**/*.test.ts src/worker/**/*.test.ts",
     "test:postgres": "node --experimental-strip-types --test test/integration/phase1-postgres.test.ts",
     "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts",
+    "test:postgres:a3": "node --experimental-strip-types --test test/integration/mobile-auth-a3-postgres.test.ts",
     "test:deploy-contract": "node --test test/production-deploy-contract.test.mjs"
   },
   "dependencies": {

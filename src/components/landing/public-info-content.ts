@@ -42,8 +42,6 @@ export type PublicInfoContent = Readonly<{
   proofTitle: string;
   proofDescription: string;
   proofPoints: readonly string[];
-  primaryCta: string;
-  secondaryCta: string;
   ctaTitle: string;
   ctaDescription: string;
   homeLabel: string;
@@ -109,8 +107,6 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Nhận câu trả lời kèm trích dẫn",
       "Mở nguồn, so sánh và tiếp tục xử lý",
     ],
-    primaryCta: "Dùng thử sản phẩm",
-    secondaryCta: "Về trang Home",
     ctaTitle: "Đưa tri thức quan trọng vào đúng lúc đội ngũ cần.",
     ctaDescription:
       "Đăng nhập để trải nghiệm cách UPTECH KNOWLEDGE biến tài liệu doanh nghiệp thành câu trả lời có thể kiểm chứng.",
@@ -176,8 +172,6 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Nguồn đi cùng câu trả lời",
       "Người dùng luôn có đường quay lại tài liệu gốc",
     ],
-    primaryCta: "Dùng thử sản phẩm",
-    secondaryCta: "Về trang Home",
     ctaTitle: "Đưa AI vào doanh nghiệp với một nền tảng đáng tin.",
     ctaDescription:
       "Trải nghiệm cách nguồn, quyền và trích dẫn được kết hợp trong cùng một luồng làm việc.",
@@ -243,8 +237,6 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Một luồng xuyên suốt từ Search đến Chat",
       "Một đường kiểm chứng rõ ràng tới nguồn gốc",
     ],
-    primaryCta: "Dùng thử năng lực AI",
-    secondaryCta: "Về trang Home",
     ctaTitle: "Khám phá bộ công cụ tri thức trong một trải nghiệm thống nhất.",
     ctaDescription:
       "Đăng nhập để thử Chat, Search, kho tri thức và công cụ tài liệu của UPTECH KNOWLEDGE.",
@@ -310,8 +302,6 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
       "Quyền được áp dụng trước khi truy xuất",
       "Câu trả lời dẫn trở lại đúng bằng chứng",
     ],
-    primaryCta: "Dùng thử quy trình",
-    secondaryCta: "Về trang Home",
     ctaTitle: "Cho đội ngũ một con đường ngắn hơn từ câu hỏi đến quyết định.",
     ctaDescription:
       "Đăng nhập để trải nghiệm luồng tìm kiếm, hỏi đáp và kiểm chứng của UPTECH KNOWLEDGE.",
@@ -380,8 +370,6 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
       "Receive answers with citations",
       "Open, compare, and continue from the source",
     ],
-    primaryCta: "Try the product",
-    secondaryCta: "Back to Home",
     ctaTitle: "Bring important knowledge to the moment your team needs it.",
     ctaDescription:
       "Sign in to experience how UPTECH KNOWLEDGE turns enterprise documents into verifiable answers.",
@@ -447,8 +435,6 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
       "Sources shown with answers",
       "A clear path back to the original document",
     ],
-    primaryCta: "Try the product",
-    secondaryCta: "Back to Home",
     ctaTitle: "Bring AI into the enterprise on a trustworthy foundation.",
     ctaDescription:
       "See how sources, permissions, and citations work together in one product flow.",
@@ -514,8 +500,6 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
       "One flow from Search to Chat",
       "One verifiable path back to evidence",
     ],
-    primaryCta: "Try AI capabilities",
-    secondaryCta: "Back to Home",
     ctaTitle: "Explore the knowledge toolkit in one connected experience.",
     ctaDescription:
       "Sign in to try Chat, Search, knowledge spaces, and document utilities.",
@@ -581,8 +565,6 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
       "Permissions applied before retrieval",
       "Answers lead back to the right evidence",
     ],
-    primaryCta: "Try the workflow",
-    secondaryCta: "Back to Home",
     ctaTitle: "Give teams a shorter path from question to decision.",
     ctaDescription:
       "Sign in to experience UPTECH KNOWLEDGE search, answers, and verification.",

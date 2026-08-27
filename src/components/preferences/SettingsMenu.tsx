@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   useCallback,
   useEffect,
@@ -59,24 +60,6 @@ const copy: Record<
     dark: "Dark",
   },
 };
-
-function GearIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 24 24"
-      fill="none"
-      className="size-5"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 15.25A3.25 3.25 0 1 0 12 8.75a3.25 3.25 0 0 0 0 6.5Z" />
-      <path d="M19.2 13.1c.04-.36.04-.74 0-1.1l1.73-1.35-1.8-3.12-2.04.82a8.24 8.24 0 0 0-.95-.55L15.83 5.6h-3.6l-.32 2.2c-.33.16-.65.34-.95.55l-2.04-.82-1.8 3.12L8.85 12c-.04.36-.04.74 0 1.1l-1.73 1.35 1.8 3.12 2.04-.82c.3.21.62.4.95.55l.32 2.2h3.6l.31-2.2c.34-.16.66-.34.96-.55l2.03.82 1.8-3.12-1.73-1.35Z" />
-    </svg>
-  );
-}
 
 function CloseIcon() {
   return (
@@ -335,7 +318,15 @@ export function SettingsMenu() {
         }}
         className={`relative flex size-11 cursor-pointer items-center justify-center rounded-full border transition-[background-color,border-color,color,box-shadow,transform] duration-150 hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-primary)] motion-reduce:transform-none motion-reduce:transition-none ${triggerClassName}`}
       >
-        <GearIcon />
+        <Image
+          aria-hidden="true"
+          src="/media/settings-gear.jpg"
+          alt=""
+          width={28}
+          height={28}
+          unoptimized
+          className="size-7 rounded-full object-cover"
+        />
         <span className="sr-only">{labels.open}</span>
       </button>
 

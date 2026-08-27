@@ -277,6 +277,37 @@ html[data-theme="light"] [data-media-surface="dark"] {
   --logo-filter: none;
 }
 
+/* Native dialogs stay descendants of their trigger in the DOM even while
+   displayed in the browser's top layer. Keep this form's palette tied to the
+   selected app theme instead of inheriting the dark marketing navigation. */
+.demo-request-dialog[data-color-scheme="light"] {
+  color-scheme: light;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-subtle: #eef3f9;
+  --border-subtle: rgba(71, 85, 105, 0.16);
+  --border-default: rgba(71, 85, 105, 0.26);
+  --border-focus: #2563eb;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --status-danger: #be123c;
+}
+
+.demo-request-dialog[data-color-scheme="dark"] {
+  color-scheme: dark;
+  --bg-surface: #0d1320;
+  --bg-elevated: #141d2e;
+  --bg-subtle: #0a1020;
+  --border-subtle: rgba(148, 163, 184, 0.14);
+  --border-default: rgba(148, 163, 184, 0.24);
+  --border-focus: #60a5fa;
+  --text-primary: #f8fafc;
+  --text-secondary: #a8b3c7;
+  --text-muted: #7f8ba3;
+  --status-danger: #f43f5e;
+}
+
 .settings-menu-position {
   bottom: max(1rem, env(safe-area-inset-bottom, 0px));
   right: max(1rem, env(safe-area-inset-right, 0px));

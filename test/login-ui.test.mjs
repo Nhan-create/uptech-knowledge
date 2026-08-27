@@ -72,16 +72,65 @@ test("login header navigation keeps strong contrast over the video", async (cont
     /<html[^>]+translate="no"/,
   );
   assert.match(html, /<header[^>]+data-media-surface="dark"/);
-  assert.match(
-    html,
-    /data-testid="login-header-brand"[^>]+translate="no"[^>]+class="[^"]*notranslate[^"]*bg-slate-950\/65[^"]*text-white/,
-  );
+  const brandStart = html.indexOf('data-testid="login-header-brand"');
+  const brandMarkup = html.slice(brandStart, html.indexOf("</a>", brandStart));
+  assert.notEqual(brandStart, -1);
+  assert.match(brandMarkup, /translate="no"/);
+  assert.match(brandMarkup, /text-white/);
+  assert.doesNotMatch(brandMarkup, /bg-slate|border-white|shadow-|backdrop-blur/);
   assert.match(
     html,
     /data-testid="login-header-home"[^>]+class="[^"]*bg-slate-950\/65[^"]*text-white/,
   );
+  const homeStart = html.indexOf('data-testid="login-header-home"');
+  const homeMarkup = html.slice(homeStart, html.indexOf("</a>", homeStart));
+  assert.notEqual(homeStart, -1);
+  assert.doesNotMatch(homeMarkup, /<svg/);
   assert.doesNotMatch(html, /data-testid="login-header-shell"/);
   assert.match(html, /translate="no"[^>]*>\s*UPTECH KNOWLEDGE\s*</);
+});
+
+test("login page omits the redundant Google password notice", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/login", baseUrl), {
+    headers: { cookie: "uptech-locale=en" },
+  });
+  assert.equal(response.status, 200);
+  const html = await response.text();
+
+  assert.doesNotMatch(
+    html,
+    /UPTECH never receives or stores your Google password\./,
+  );
+  assert.doesNotMatch(html, /aria-describedby="login-description"/);
+});
+
+test("login card links directly to terms and privacy in new tabs", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const response = await fetch(new URL("/login", baseUrl));
+  assert.equal(response.status, 200);
+  const html = await response.text();
+
+  for (const { href, label } of [
+    { href: "/dieu-khoan-su-dung", label: "Điều khoản sử dụng" },
+    { href: "/chinh-sach-bao-mat", label: "Chính sách bảo mật" },
+  ]) {
+    assert.match(
+      html,
+      new RegExp(
+        `<a(?=[^>]*href="${href}")(?=[^>]*target="_blank")(?=[^>]*rel="noopener noreferrer")[^>]*>${label}<\\/a>`,
+      ),
+    );
+  }
+  assert.doesNotMatch(html, /aria-haspopup="dialog"[^>]*>[^<]*Bảo mật &amp; quyền riêng tư/);
 });
 
 test("login page follows the English preference in normal and error states", async (context) => {
@@ -99,7 +148,8 @@ test("login page follows the English preference in normal and error states", asy
   assert.match(normalHtml, /Use your Workspace account\./);
   assert.match(normalHtml, />Continue with Google Workspace</);
   assert.match(normalHtml, />Home</);
-  assert.match(normalHtml, /Security &amp; privacy/);
+  assert.match(normalHtml, /Terms of Use/);
+  assert.match(normalHtml, /Privacy Policy/);
   assert.doesNotMatch(normalHtml, /Đăng nhập vào workspace/);
 
   const errorResponse = await fetch(

@@ -5,6 +5,8 @@ const PUBLIC_APPLICATION_PATHS = new Set([
   "/nguyen-tac",
   "/nang-luc",
   "/quy-trinh",
+  "/dieu-khoan-su-dung",
+  "/chinh-sach-bao-mat",
   "/api/demo-leads",
 ]);
 
@@ -13,9 +15,22 @@ const AUTH_INGRESS_PATHS = new Set([
   "/api/v1/auth/google/callback",
   "/api/v1/auth/session",
   "/api/v1/auth/logout",
+  "/api/v1/auth/mobile/google/transactions",
+  "/api/v1/auth/mobile/google/callback",
+  "/api/v1/auth/mobile/handoffs/exchange",
+  "/api/v1/auth/mobile/refresh",
+  "/api/v1/auth/mobile/session",
+  "/api/v1/auth/mobile/workspaces",
+  "/api/v1/auth/mobile/switch-workspace",
+  "/api/v1/auth/mobile/logout",
 ]);
 
 const PROTECTED_APPLICATION_PATHS = new Set(["/home"]);
+
+const MOBILE_ASSOCIATION_PATHS = new Set([
+  "/.well-known/assetlinks.json",
+  "/apple-app-site-association",
+]);
 
 const PUBLIC_ASSET_PATHS = new Set([
   "/favicon.ico",
@@ -50,7 +65,7 @@ function normalizePathname(pathname) {
  * route enforces the approved session contract. This policy must not become
  * the eventual authorization engine.
  */
-export function classifyUnconfiguredRoute(pathname) {
+export function classifyUnconfiguredRoute(pathname, method) {
   if (typeof pathname !== "string" || !pathname.startsWith("/")) {
     return "deny-unconfigured";
   }
@@ -63,6 +78,12 @@ export function classifyUnconfiguredRoute(pathname) {
 
   if (PROTECTED_APPLICATION_PATHS.has(pathname)) {
     return "allow-protected";
+  }
+
+  if (MOBILE_ASSOCIATION_PATHS.has(pathname)) {
+    return method === "GET" || method === "HEAD"
+      ? "allow-public"
+      : "deny-unconfigured";
   }
 
   const normalizedPathname = normalizePathname(pathname);

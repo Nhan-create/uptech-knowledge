@@ -42,7 +42,6 @@ export function GoogleLoginSubmitButton({
       type="submit"
       disabled={submitting}
       aria-busy={submitting}
-      aria-describedby="login-description"
       onClick={(event) => {
         if (submitStartedRef.current) {
           event.preventDefault();

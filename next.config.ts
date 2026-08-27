@@ -15,6 +15,30 @@ const nextConfig: NextConfig = {
   devIndicators: {
     position: "bottom-left",
   },
+  async headers() {
+    const associationHeaders = [
+      {
+        key: "Content-Type",
+        value: "application/json; charset=utf-8",
+      },
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      {
+        key: "Cache-Control",
+        value: "public, max-age=3600, must-revalidate",
+      },
+    ];
+
+    return [
+      {
+        source: "/.well-known/assetlinks.json",
+        headers: associationHeaders,
+      },
+      {
+        source: "/apple-app-site-association",
+        headers: associationHeaders,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

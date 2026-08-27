@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowRight, Menu, X } from "lucide-react";
+import { Menu, X } from "lucide-react";
 import Logo from "@/components/Logo";
+import { DemoRequestDialog } from "@/components/landing/DemoRequestDialog";
 import { usePreferences } from "@/components/preferences/PreferencesProvider";
 
 const publicNavCopy = {
@@ -12,7 +13,6 @@ const publicNavCopy = {
     ariaLabel: "Điều hướng chính",
     homeLabel: "UPTECH KNOWLEDGE - Trang chủ",
     signIn: "Đăng nhập",
-    mobileSignIn: "Đăng nhập / Xem demo",
     openMenu: "Mở menu",
     closeMenu: "Đóng menu",
     items: [
@@ -26,7 +26,6 @@ const publicNavCopy = {
     ariaLabel: "Primary navigation",
     homeLabel: "UPTECH KNOWLEDGE - Home",
     signIn: "Sign in",
-    mobileSignIn: "Sign in / View demo",
     openMenu: "Open menu",
     closeMenu: "Close menu",
     items: [
@@ -149,15 +148,16 @@ export function PublicNav() {
         </div>
 
         <div className="flex items-center gap-2">
+          <DemoRequestDialog
+            triggerTestId="public-nav-trial"
+            triggerClassName="landing-nav-cta hidden min-h-11 cursor-pointer items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-base font-semibold text-white transition-[background-color,box-shadow,transform] hover:-translate-y-0.5 hover:bg-blue-700 sm:inline-flex motion-reduce:transform-none"
+          />
           <Link
             href="/login"
-            className="landing-nav-cta group hidden min-h-11 items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-base font-semibold text-white transition-[background-color,box-shadow,transform] hover:-translate-y-0.5 hover:bg-blue-700 sm:inline-flex"
+            data-testid="public-nav-sign-in"
+            className="landing-nav-cta hidden min-h-11 items-center rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-2 text-base font-semibold text-slate-100 transition-[background-color,border-color,transform] hover:-translate-y-0.5 hover:border-slate-500 hover:bg-slate-800 sm:inline-flex motion-reduce:transform-none"
           >
             {copy.signIn}
-            <ArrowRight
-              aria-hidden="true"
-              className="size-3.5 transition-transform group-hover:translate-x-0.5"
-            />
           </Link>
           <button
             ref={menuButtonRef}
@@ -195,13 +195,17 @@ export function PublicNav() {
                 {item.label}
               </Link>
             ))}
+            <DemoRequestDialog
+              triggerTestId="public-mobile-nav-trial"
+              triggerClassName="mt-2 inline-flex min-h-12 w-full cursor-pointer items-center justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white transition-colors hover:bg-blue-700"
+            />
             <Link
               href="/login"
+              data-testid="public-mobile-nav-sign-in"
               onClick={() => setOpen(false)}
-              className="mt-2 inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-base font-semibold text-white transition-colors hover:bg-blue-700"
+              className="inline-flex min-h-12 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 px-4 text-base font-semibold text-slate-100 transition-colors hover:border-slate-500 hover:bg-slate-800"
             >
-              {copy.mobileSignIn}
-              <ArrowRight aria-hidden="true" className="size-4" />
+              {copy.signIn}
             </Link>
           </div>
         </div>

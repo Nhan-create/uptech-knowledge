@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import {
   ArrowRight,
+  ArrowUpRight,
   BookOpenCheck,
   Check,
   ChevronRight,
@@ -9,12 +10,13 @@ import {
   Files,
   FolderSearch2,
   LockKeyhole,
+  Mail,
   MessageSquareText,
+  Phone,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import Logo from "@/components/Logo";
-import { DemoRequestDialog } from "@/components/landing/DemoRequestDialog";
 import { HeroBackgroundVideo } from "@/components/landing/HeroBackgroundVideo";
 import { LandingMotionController } from "@/components/landing/LandingMotionController";
 import { PublicNav } from "@/components/landing/PublicNav";
@@ -23,6 +25,44 @@ import { LOCALE_COOKIE_NAME, parseLocale } from "@/lib/preferences";
 
 const trustIcons = [LockKeyhole, FileCheck2, ShieldCheck] as const;
 const capabilityIcons = [MessageSquareText, FolderSearch2, Files] as const;
+
+function FacebookIcon() {
+  return (
+    <svg data-brand="facebook" aria-hidden="true" viewBox="0 0 24 24" className="size-5 fill-current">
+      <path d="M24 12.073C24 5.446 18.627.073 12 .073S0 5.446 0 12.073c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.926-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.064 24 12.073Z" />
+    </svg>
+  );
+}
+
+function LinkedInIcon() {
+  return (
+    <svg data-brand="linkedin" aria-hidden="true" viewBox="0 0 24 24" className="size-5 fill-current">
+      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286ZM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065Zm1.782 13.019H3.555V9h3.564v11.452ZM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003Z" />
+    </svg>
+  );
+}
+
+function PartnerMarks({ label }: { readonly label: string }) {
+  return (
+    <div aria-label={label} className="flex flex-wrap items-center gap-x-7 gap-y-4 text-slate-500">
+      <span data-partner="aws" aria-label="AWS" className="font-sans text-3xl font-medium tracking-[-0.08em]">
+        aws
+      </span>
+      <span data-partner="google-cloud" aria-label="Google Cloud" className="inline-flex items-center gap-2">
+        <svg aria-hidden="true" viewBox="0 0 48 32" className="h-8 w-12 fill-current">
+          <path d="M32.7 9.2A12.2 12.2 0 0 0 10 13.6 9.2 9.2 0 0 0 10.2 32h22.3a11.5 11.5 0 0 0 .2-22.8ZM13.4 26a3.7 3.7 0 1 1 0-7.4h1.4l.5-1.4a6.2 6.2 0 0 1 11.8.9l.4 1.8h4.9a3.1 3.1 0 0 1 0 6.1h-19Z" />
+        </svg>
+      </span>
+      <span data-partner="microsoft" aria-label="Microsoft" className="grid grid-cols-2 gap-1">
+        <span className="size-3.5 bg-current" /><span className="size-3.5 bg-current" />
+        <span className="size-3.5 bg-current" /><span className="size-3.5 bg-current" />
+      </span>
+      <span data-partner="salesforce" aria-label="Salesforce" className="relative inline-flex h-9 w-14 items-center justify-center rounded-[50%] bg-slate-500 text-[7px] font-semibold text-slate-950">
+        salesforce
+      </span>
+    </div>
+  );
+}
 
 function ProductPreview({ copy }: { readonly copy: HomeContent["preview"] }) {
   return (
@@ -170,12 +210,6 @@ export default async function Home() {
               <p className="landing-hero-copy mx-auto mt-8 max-w-2xl text-pretty text-base leading-7 text-white/80 sm:text-lg sm:leading-8">
                 {copy.hero.description}
               </p>
-              <div className="landing-hero-actions mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
-                <DemoRequestDialog />
-                <Link href="/san-pham" className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/70 px-6 py-3 text-sm font-semibold text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800 sm:w-auto">
-                  {copy.hero.productCta}
-                </Link>
-              </div>
               <div className="landing-hero-trust mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-white/65 sm:text-sm">
                 {copy.hero.trust.map((item) => (
                   <span key={item} className="landing-trust-item inline-flex items-center gap-1.5">
@@ -269,10 +303,6 @@ export default async function Home() {
                   <p className="mt-5 max-w-md text-sm leading-7 text-slate-400 sm:text-base">
                     {copy.workflowSection.description}
                   </p>
-                  <Link href="/login" className="group mt-8 inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-blue-300 transition-colors hover:text-blue-200">
-                    {copy.hero.productCta}
-                    <ArrowRight aria-hidden="true" className="size-4 transition-transform group-hover:translate-x-1" />
-                  </Link>
                 </div>
               </div>
               <ol className="grid auto-rows-fr gap-4 sm:grid-cols-2">
@@ -307,23 +337,109 @@ export default async function Home() {
       </main>
 
       <footer lang={locale} className="relative z-10 border-t border-slate-800/80 bg-slate-950/65 px-4 py-10 backdrop-blur-[2px] sm:px-6 lg:px-8">
-        <div className="mx-auto flex max-w-7xl flex-col gap-7 sm:flex-row sm:items-end sm:justify-between">
+        <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.9fr)] lg:gap-20">
           <div>
-            <Link href="/" aria-label={footerCopy.homeLabel} className="inline-flex min-h-11 items-center gap-3.5">
-              <Logo className="h-7 w-auto sm:h-8" />
-              <span className="border-l border-slate-700 pl-3.5 text-xs font-bold tracking-[0.2em] text-slate-200">KNOWLEDGE</span>
+            <Link href="/" aria-label={footerCopy.homeLabel} className="inline-flex min-h-12 items-center">
+              <Logo className="h-10 w-auto sm:h-11" />
             </Link>
-            <p className="mt-4 max-w-md text-sm leading-6 text-slate-400">{footerCopy.description}</p>
+
+            <address className="mt-7 flex flex-col items-start gap-2 not-italic text-sm text-slate-300 sm:text-base">
+              <a href="tel:+84968726135" className="inline-flex min-h-11 items-center gap-3 transition-colors hover:text-white">
+                <Phone aria-hidden="true" className="size-4.5 text-slate-400" />
+                {footerCopy.phone}
+              </a>
+              <a href="mailto:contact@uptech.vn" className="inline-flex min-h-11 items-center gap-3 transition-colors hover:text-white">
+                <Mail aria-hidden="true" className="size-4.5 text-slate-400" />
+                {footerCopy.email}
+              </a>
+            </address>
+
+            <p className="mt-6 max-w-lg text-sm leading-7 text-slate-400 sm:text-base">
+              {footerCopy.companyDescription}
+            </p>
+            <div className="mt-7">
+              <PartnerMarks label={footerCopy.partnersLabel} />
+            </div>
+
+            <div className="mt-6 flex flex-wrap gap-x-5 gap-y-1">
+              <Link
+                href="/dieu-khoan-su-dung"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-11 items-center text-sm font-medium text-slate-300 underline decoration-slate-600 underline-offset-4 transition-colors hover:text-slate-100 hover:decoration-slate-300"
+              >
+                {footerCopy.terms}
+              </Link>
+              <Link
+                href="/chinh-sach-bao-mat"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-11 items-center text-sm font-medium text-slate-300 underline decoration-slate-600 underline-offset-4 transition-colors hover:text-slate-100 hover:decoration-slate-300"
+              >
+                {footerCopy.privacy}
+              </Link>
+            </div>
           </div>
-          <nav
-            aria-label={footerCopy.navigationLabel}
-            className="flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-400"
-          >
-            <Link href="/san-pham" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.product}</Link>
-            <Link href="/nguyen-tac" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.principles}</Link>
-            <Link href="/quy-trinh" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.workflow}</Link>
-            <Link href="/login" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.signIn}</Link>
-          </nav>
+
+          <div className="flex flex-col gap-9">
+            <div>
+              <p className="text-sm font-bold uppercase tracking-[0.08em] text-slate-100">
+                {footerCopy.socialLabel}
+              </p>
+              <div className="mt-4 flex gap-3">
+                <a
+                  href="https://www.linkedin.com/company/uptechvn/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={footerCopy.linkedinLabel}
+                  className="inline-flex size-12 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-300 transition-[border-color,background-color,color,transform] hover:-translate-y-0.5 hover:border-sky-500/70 hover:bg-sky-500/10 hover:text-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 motion-reduce:transform-none"
+                >
+                  <LinkedInIcon />
+                </a>
+                <a
+                  href="https://www.facebook.com/uptech.vn/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={footerCopy.facebookLabel}
+                  className="inline-flex size-12 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-300 transition-[border-color,background-color,color,transform] hover:-translate-y-0.5 hover:border-blue-500/70 hover:bg-blue-500/10 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 motion-reduce:transform-none"
+                >
+                  <FacebookIcon />
+                </a>
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-[0.08em] text-slate-100 sm:text-base">
+                {footerCopy.newsletterTitle}
+              </h2>
+              <form action="mailto:contact@uptech.vn" method="post" encType="text/plain" className="mt-4 flex min-h-14 max-w-xl border border-slate-700 bg-slate-950/55 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20">
+                <label htmlFor="footer-newsletter-email" className="sr-only">{footerCopy.newsletterPlaceholder}</label>
+                <input
+                  id="footer-newsletter-email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  placeholder={footerCopy.newsletterPlaceholder}
+                  className="min-w-0 flex-1 bg-transparent px-4 text-sm text-slate-100 outline-none placeholder:text-slate-500 sm:text-base"
+                />
+                <button type="submit" aria-label={footerCopy.newsletterSubmit} className="inline-flex size-14 shrink-0 cursor-pointer items-center justify-center text-slate-400 transition-colors hover:bg-blue-500/10 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500">
+                  <ArrowUpRight aria-hidden="true" className="size-5" />
+                </button>
+              </form>
+              <p className="mt-3 text-sm leading-6 text-slate-400">{footerCopy.newsletterDescription}</p>
+            </div>
+
+            <nav
+              aria-label={footerCopy.navigationLabel}
+              className="flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-400"
+            >
+              <Link href="/san-pham" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.product}</Link>
+              <Link href="/nguyen-tac" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.principles}</Link>
+              <Link href="/quy-trinh" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.workflow}</Link>
+              <Link href="/login" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.signIn}</Link>
+            </nav>
+          </div>
         </div>
         <div className="mx-auto mt-8 flex max-w-7xl flex-col gap-2 border-t border-slate-800 pt-6 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
           <p>{footerCopy.prototype}</p>

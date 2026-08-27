@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  ArrowRight,
   CheckCircle2,
   LoaderCircle,
   X,
@@ -258,8 +257,16 @@ const inputClassName =
 
 const invalidInputClassName = " border-rose-500/70 focus:border-rose-500 focus:ring-rose-500/20";
 
-export function DemoRequestDialog() {
-  const { locale } = usePreferences();
+type DemoRequestDialogProps = Readonly<{
+  triggerClassName?: string;
+  triggerTestId?: string;
+}>;
+
+export function DemoRequestDialog({
+  triggerClassName,
+  triggerTestId,
+}: DemoRequestDialogProps = {}) {
+  const { locale, theme } = usePreferences();
   const copy = demoCopy[locale];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -442,16 +449,20 @@ export function DemoRequestDialog() {
       <button
         ref={triggerRef}
         type="button"
+        data-testid={triggerTestId}
         aria-haspopup="dialog"
         onClick={openDialog}
-        className="group inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/35 transition-[background-color,transform,box-shadow] hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-blue-950/45 active:translate-y-0 sm:w-auto motion-reduce:transform-none motion-reduce:transition-none"
+        className={
+          triggerClassName ??
+          "inline-flex min-h-12 w-full cursor-pointer items-center justify-center rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-950/35 transition-[background-color,transform,box-shadow] hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-blue-950/45 active:translate-y-0 sm:w-auto motion-reduce:transform-none motion-reduce:transition-none"
+        }
       >
         {copy.trigger}
-        <ArrowRight aria-hidden="true" className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transform-none" />
       </button>
 
       <dialog
         ref={dialogRef}
+        data-color-scheme={theme}
         aria-labelledby={dialogTitleId}
         aria-describedby={dialogDescriptionId}
         aria-modal="true"
@@ -460,7 +471,7 @@ export function DemoRequestDialog() {
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeDialog();
         }}
-        className="fixed inset-0 m-auto h-[min(46rem,calc(100dvh-1rem))] max-h-[calc(100dvh-1rem)] w-[min(44rem,calc(100vw-1rem))] max-w-none overflow-hidden rounded-2xl border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0 text-left text-[var(--text-primary)] shadow-[0_30px_100px_rgba(2,6,23,0.52)] backdrop:bg-slate-950/75 backdrop:backdrop-blur-md sm:max-h-[calc(100dvh-2rem)] sm:w-[min(44rem,calc(100vw-2rem))] sm:rounded-3xl"
+        className="demo-request-dialog fixed inset-0 m-auto h-[min(46rem,calc(100dvh-1rem))] max-h-[calc(100dvh-1rem)] w-[min(44rem,calc(100vw-1rem))] max-w-none overflow-hidden rounded-2xl border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0 text-left text-[var(--text-primary)] shadow-[0_30px_100px_rgba(2,6,23,0.52)] backdrop:bg-slate-950/75 backdrop:backdrop-blur-md sm:max-h-[calc(100dvh-2rem)] sm:w-[min(44rem,calc(100vw-2rem))] sm:rounded-3xl"
       >
         <div className="flex h-full min-h-0 flex-col">
           <div className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-4 sm:px-7">
@@ -767,10 +778,7 @@ export function DemoRequestDialog() {
                         {copy.submitting}
                       </>
                     ) : (
-                      <>
-                        {copy.submit}
-                        <ArrowRight aria-hidden="true" className="size-4" />
-                      </>
+                      copy.submit
                     )}
                   </button>
                 )}

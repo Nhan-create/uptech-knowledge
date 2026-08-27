@@ -16,6 +16,10 @@ test("allows only the explicitly public application paths", () => {
     "/nang-luc/",
     "/quy-trinh",
     "/quy-trinh/",
+    "/dieu-khoan-su-dung",
+    "/dieu-khoan-su-dung/",
+    "/chinh-sach-bao-mat",
+    "/chinh-sach-bao-mat/",
     "/api/demo-leads",
     "/api/demo-leads/",
   ]) {
@@ -33,6 +37,14 @@ test("allows only the exact approved auth ingress paths", () => {
     "/api/v1/auth/google/callback",
     "/api/v1/auth/session",
     "/api/v1/auth/logout",
+    "/api/v1/auth/mobile/google/transactions",
+    "/api/v1/auth/mobile/google/callback",
+    "/api/v1/auth/mobile/handoffs/exchange",
+    "/api/v1/auth/mobile/refresh",
+    "/api/v1/auth/mobile/session",
+    "/api/v1/auth/mobile/workspaces",
+    "/api/v1/auth/mobile/switch-workspace",
+    "/api/v1/auth/mobile/logout",
   ]) {
     assert.equal(
       classifyUnconfiguredRoute(pathname),
@@ -64,6 +76,8 @@ test("does not normalize or prefix-match the auth ingress surface", () => {
     "/api/v1/auth/logout/",
     "/api/v1/auth/google/transaction",
     "/api/v1/auth/google/callback?code=provider-code",
+    "/api/v1/auth/mobile/refresh/",
+    "/api/v1/auth/mobile/session/extra",
   ]) {
     assert.equal(
       classifyUnconfiguredRoute(pathname),
@@ -85,6 +99,24 @@ test("allows only the explicit public asset surface", () => {
       classifyUnconfiguredRoute(pathname),
       "allow-public",
       pathname,
+    );
+  }
+});
+
+test("allows exact mobile association documents for GET and HEAD only", () => {
+  for (const pathname of [
+    "/.well-known/assetlinks.json",
+    "/apple-app-site-association",
+  ]) {
+    assert.equal(classifyUnconfiguredRoute(pathname, "GET"), "allow-public");
+    assert.equal(classifyUnconfiguredRoute(pathname, "HEAD"), "allow-public");
+    assert.equal(
+      classifyUnconfiguredRoute(pathname, "POST"),
+      "deny-unconfigured",
+    );
+    assert.equal(
+      classifyUnconfiguredRoute(`${pathname}/`, "GET"),
+      "deny-unconfigured",
     );
   }
 });

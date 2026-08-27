@@ -13,6 +13,21 @@ const SAFE_PROBLEM_DEFINITIONS = Object.freeze({
     title: "Unauthenticated",
     detail: "Authentication is required.",
   },
+  ACCESS_TOKEN_EXPIRED: {
+    status: 401,
+    title: "Access token expired",
+    detail: "The access token must be refreshed.",
+  },
+  SESSION_REVOKED: {
+    status: 401,
+    title: "Session revoked",
+    detail: "The session is no longer active.",
+  },
+  SESSION_EXPIRED: {
+    status: 401,
+    title: "Session expired",
+    detail: "The session has expired.",
+  },
   FORBIDDEN: {
     status: 403,
     title: "Forbidden",

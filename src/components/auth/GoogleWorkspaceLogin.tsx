@@ -1,6 +1,5 @@
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowLeft } from "lucide-react";
 
 import Logo from "@/components/Logo";
 import { GoogleLoginSubmitButton } from "@/components/auth/GoogleLoginSubmitButton";
@@ -21,7 +20,6 @@ type LoginCopy = Readonly<{
   home: string;
   homeLabel: string;
   account: string;
-  passwordNotice: string;
   alternateAccount: string;
 }>;
 
@@ -219,7 +217,6 @@ const loginCopy: Record<Locale, LoginCopy> = {
     home: "Trang chủ",
     homeLabel: "UPTECH KNOWLEDGE - Trang chủ",
     account: "Tài khoản",
-    passwordNotice: "UPTECH không nhận hoặc lưu mật khẩu Google của bạn.",
     alternateAccount: "Đăng nhập bằng tài khoản khác",
   },
   en: {
@@ -233,7 +230,6 @@ const loginCopy: Record<Locale, LoginCopy> = {
     home: "Home",
     homeLabel: "UPTECH KNOWLEDGE - Home",
     account: "Account",
-    passwordNotice: "UPTECH never receives or stores your Google password.",
     alternateAccount: "Sign in with another account",
   },
 };
@@ -298,7 +294,7 @@ export function GoogleWorkspaceLogin({
           translate="no"
           href="/"
           aria-label={copy.homeLabel}
-          className="notranslate inline-flex min-h-12 items-center gap-3 rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="notranslate inline-flex min-h-12 items-center gap-3 text-white transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Logo className="h-7 w-auto" />
           <span className="hidden border-l border-slate-700 pl-3 text-[11px] font-bold tracking-[0.18em] text-slate-100 sm:inline">
@@ -308,9 +304,8 @@ export function GoogleWorkspaceLogin({
         <Link
           data-testid="login-header-home"
           href="/"
-          className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-sm font-semibold text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="inline-flex min-h-12 items-center rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-sm font-semibold text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
-          <ArrowLeft aria-hidden="true" className="size-4" />
           {copy.home}
         </Link>
         </div>
@@ -381,13 +376,6 @@ export function GoogleWorkspaceLogin({
               <GoogleLoginSubmitButton label={state.actionLabel} />
             </form>
           </div>
-
-          <p
-            id="login-description"
-            className="mt-4 text-center text-xs leading-5 text-slate-400"
-          >
-            {copy.passwordNotice}
-          </p>
 
           <div className="mt-5 flex flex-col items-center gap-3 border-t border-slate-800 pt-5">
             <SecurityPrivacyDisclosure locale={locale} />
