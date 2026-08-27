@@ -127,7 +127,7 @@ export function PublicNav() {
           translate="no"
           href="/"
           aria-label={copy.homeLabel}
-          className="notranslate inline-flex min-h-12 items-center gap-4 rounded-lg"
+          className="notranslate inline-flex min-h-12 items-center gap-4 border-0 bg-transparent p-0 shadow-none"
         >
           <Logo className="h-10 w-auto sm:h-12" />
           <span className="landing-brand-word hidden border-l-2 border-slate-700/80 pl-4 text-base font-bold tracking-[0.24em] text-slate-100 sm:inline">

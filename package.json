@@ -4,13 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/production-deploy-contract.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test:security": "node --experimental-strip-types --test src/security/route-containment.test.mjs src/server/**/*.test.ts src/worker/**/*.test.ts",
     "test:postgres": "node --experimental-strip-types --test test/integration/phase1-postgres.test.ts",
-    "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts"
+    "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts",
+    "test:deploy-contract": "node --test test/production-deploy-contract.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.0",

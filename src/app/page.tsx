@@ -172,9 +172,9 @@ export default async function Home() {
               </p>
               <div className="landing-hero-actions mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
                 <DemoRequestDialog />
-                <a href="#product" className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/70 px-6 py-3 text-sm font-semibold text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800 sm:w-auto">
+                <Link href="/san-pham" className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/70 px-6 py-3 text-sm font-semibold text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800 sm:w-auto">
                   {copy.hero.productCta}
-                </a>
+                </Link>
               </div>
               <div className="landing-hero-trust mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-white/65 sm:text-sm">
                 {copy.hero.trust.map((item) => (
@@ -319,9 +319,9 @@ export default async function Home() {
             aria-label={footerCopy.navigationLabel}
             className="flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-400"
           >
-            <a href="#product" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.product}</a>
-            <a href="#trust" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.principles}</a>
-            <a href="#workflow" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.workflow}</a>
+            <Link href="/san-pham" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.product}</Link>
+            <Link href="/nguyen-tac" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.principles}</Link>
+            <Link href="/quy-trinh" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.workflow}</Link>
             <Link href="/login" className="inline-flex min-h-11 items-center transition-colors hover:text-slate-100">{footerCopy.signIn}</Link>
           </nav>
         </div>
