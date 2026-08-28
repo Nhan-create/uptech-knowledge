@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { MobileSessionServiceError } from "./session-service.ts";
-import { createMobileRouteHandlers } from "./route-handlers.ts";
+import {
+  createMobileGoogleTransactionPost,
+  createMobileRouteHandlers,
+} from "./route-handlers.ts";
 
 const requestId = "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21";
 const proof = (byte: number) => Buffer.alloc(32, byte).toString("base64url");
@@ -32,6 +35,37 @@ function handlers(overrides: Record<string, unknown> = {}) {
     },
   } as never);
 }
+
+test("transaction route converts runtime initialization failure to a redacted no-store 503 problem", async () => {
+  const post = createMobileGoogleTransactionPost({
+    createRuntime() {
+      throw new Error("client-secret=sensitive-runtime-value");
+    },
+    clientIp() {
+      return "203.0.113.1";
+    },
+  });
+  const response = await post(new Request("https://api.example.test/transactions", {
+    method: "POST",
+    headers: { "x-uptech-request-id": requestId },
+  }));
+  const body = await response.text();
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("content-type"), "application/problem+json");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-request-id"), requestId);
+  assert.deepEqual(JSON.parse(body), {
+    type: "urn:uptech:problem:provider_unavailable",
+    title: "Provider unavailable",
+    status: 503,
+    code: "PROVIDER_UNAVAILABLE",
+    detail: "A required provider is unavailable.",
+    request_id: requestId,
+  });
+  assert.equal(body.includes("sensitive-runtime-value"), false);
+  assert.equal(body.includes("stack"), false);
+});
 
 test("malformed transaction is admitted and redacted exactly once while valid input is not double-counted", async () => {
   let rejected = 0;

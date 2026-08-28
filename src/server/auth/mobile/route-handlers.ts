@@ -33,6 +33,12 @@ interface MobileSessionRouteService {
       | { readonly outcome: "DENIED" }>;
 }
 
+interface MobileGoogleTransactionRuntime {
+  readonly config: { readonly appReturnUri: string };
+  readonly googleService: MobileGoogleRouteService;
+  readonly sessionService: MobileSessionRouteService;
+}
+
 function isValidationError(error: unknown): boolean {
   return error instanceof SyntaxError || error instanceof TypeError ||
     (error instanceof Error && error.name === "MobileProtocolError");
@@ -150,4 +156,25 @@ export function createMobileRouteHandlers(dependencies: {
       }
     },
   });
+}
+
+export function createMobileGoogleTransactionPost(dependencies: {
+  readonly createRuntime: () => MobileGoogleTransactionRuntime;
+  readonly clientIp: (headers: Headers) => string;
+}) {
+  return async (request: Request): Promise<Response> => {
+    const requestId = requestIdFromHeaders(request.headers);
+    try {
+      const runtime = dependencies.createRuntime();
+      const response = await createMobileRouteHandlers({
+        appReturnUri: runtime.config.appReturnUri,
+        clientIp: dependencies.clientIp,
+        googleService: runtime.googleService,
+        sessionService: runtime.sessionService,
+      }).googleTransaction(request);
+      return response;
+    } catch {
+      return mobileProblem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
 }
