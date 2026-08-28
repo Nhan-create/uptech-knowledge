@@ -31,15 +31,19 @@
   \echo 'runtime_android_release_cert_sha256 is required'
   \quit 3
 \endif
+-- Android is always seeded. iOS is opt-in and needs real deployment values
+-- only when runtime_ios_enabled=true.
+\if :{?runtime_ios_enabled}
+\else
+  \set runtime_ios_enabled false
+\endif
 \if :{?runtime_ios_bundle_id}
 \else
-  \echo 'runtime_ios_bundle_id is required'
-  \quit 3
+  \set runtime_ios_bundle_id ''
 \endif
 \if :{?runtime_ios_team_id}
 \else
-  \echo 'runtime_ios_team_id is required'
-  \quit 3
+  \set runtime_ios_team_id ''
 \endif
 
 BEGIN;
@@ -52,6 +56,7 @@ CREATE TEMPORARY TABLE expected_mobile_registry_seed (
   pkce_key_version uptech.google_auth_ascii_identifier_v1,
   android_application_id uptech.google_auth_ascii_identifier_v1,
   android_release_cert_sha256 uptech.google_auth_ascii_identifier_v1,
+  ios_enabled boolean NOT NULL,
   ios_bundle_id uptech.google_auth_ascii_identifier_v1,
   ios_team_id uptech.google_auth_ascii_identifier_v1
 ) ON COMMIT DROP;
@@ -63,10 +68,11 @@ INSERT INTO expected_mobile_registry_seed VALUES (
   $4::uptech.google_auth_ascii_identifier_v1,
   $5::uptech.google_auth_ascii_identifier_v1,
   $6::uptech.google_auth_ascii_identifier_v1,
-  $7::uptech.google_auth_ascii_identifier_v1,
-  $8::uptech.google_auth_ascii_identifier_v1
+  NULLIF($7::text,'')::boolean,
+  NULLIF($8::text,'')::uptech.google_auth_ascii_identifier_v1,
+  NULLIF($9::text,'')::uptech.google_auth_ascii_identifier_v1
 )
-\bind :runtime_environment_id :runtime_mobile_google_client_id :runtime_mobile_google_audience :runtime_mobile_pkce_key_version :runtime_android_application_id :runtime_android_release_cert_sha256 :runtime_ios_bundle_id :runtime_ios_team_id
+\bind :runtime_environment_id :runtime_mobile_google_client_id :runtime_mobile_google_audience :runtime_mobile_pkce_key_version :runtime_android_application_id :runtime_android_release_cert_sha256 :runtime_ios_enabled :runtime_ios_bundle_id :runtime_ios_team_id
 \g
 
 DO $seed$
@@ -75,6 +81,20 @@ BEGIN
     JOIN pg_temp.expected_mobile_registry_seed x ON x.environment_name=e.environment_name
     WHERE e.is_active) THEN
     RAISE EXCEPTION 'mobile registry environment is not the active approved environment';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_temp.expected_mobile_registry_seed x
+    WHERE x.ios_enabled AND (x.ios_bundle_id IS NULL OR x.ios_team_id IS NULL
+      OR x.ios_team_id !~ '^[A-Z0-9]{10}$')) THEN
+    RAISE EXCEPTION 'enabled iOS registry requires a bundle ID and a real-format Team ID';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_temp.expected_mobile_registry_seed x
+    WHERE NOT x.ios_enabled AND (x.ios_bundle_id IS NOT NULL OR x.ios_team_id IS NOT NULL)) THEN
+    RAISE EXCEPTION 'iOS registry values require runtime_ios_enabled=true';
+  END IF;
+  IF NOT (SELECT ios_enabled FROM pg_temp.expected_mobile_registry_seed)
+    AND EXISTS (SELECT 1 FROM uptech.mobile_google_configuration_registry c
+      WHERE c.platform='IOS' AND c.is_enabled) THEN
+    RAISE EXCEPTION 'enabled iOS mobile registry exists while iOS is disabled';
   END IF;
   IF EXISTS (SELECT 1 FROM uptech.mobile_google_configuration_registry c
     JOIN pg_temp.expected_mobile_registry_seed x ON true
@@ -88,7 +108,7 @@ BEGIN
         AND c.android_application_id=x.android_application_id
         AND c.android_release_cert_sha256=x.android_release_cert_sha256)
        OR (c.platform='IOS' AND c.configuration_key='GOOGLE_MOBILE_IOS_V1'
-        AND c.ios_bundle_id=x.ios_bundle_id AND c.ios_team_id=x.ios_team_id))
+         AND x.ios_enabled AND c.ios_bundle_id=x.ios_bundle_id AND c.ios_team_id=x.ios_team_id))
       AND c.is_enabled)) THEN
     RAISE EXCEPTION 'immutable mobile Google registry conflicts with deployment input';
   END IF;
@@ -118,16 +138,18 @@ SELECT x.environment_name,'IOS','GOOGLE_MOBILE_IOS_V1',x.client_id,x.audience,
   ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],x.pkce_key_version,
   x.ios_bundle_id,x.ios_team_id,true
 FROM pg_temp.expected_mobile_registry_seed x
+WHERE x.ios_enabled
 ON CONFLICT (environment_name,platform) DO NOTHING;
 
 DO $verify$
 BEGIN
   IF (SELECT count(*) FROM uptech.mobile_google_configuration_registry c
     JOIN pg_temp.expected_mobile_registry_seed x ON c.environment_name=x.environment_name
-    WHERE c.is_enabled) <> 2 THEN
-    RAISE EXCEPTION 'exact Android and iOS mobile registry rows were not seeded';
+    WHERE c.is_enabled) <> CASE WHEN (SELECT ios_enabled FROM pg_temp.expected_mobile_registry_seed)
+      THEN 2 ELSE 1 END THEN
+    RAISE EXCEPTION 'exact enabled Android and optional iOS mobile registry rows were not seeded';
   END IF;
 END $verify$;
 
 COMMIT;
-\echo 'Immutable Android and iOS mobile Google registry rows are present and exact.'
+\echo 'Immutable Android and explicitly enabled iOS mobile Google registry rows are present and exact.'

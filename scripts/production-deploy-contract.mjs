@@ -40,6 +40,75 @@ async function hasNonEmptyFile(relativePath) {
   }
 }
 
+async function pathExists(relativePath) {
+  try {
+    await stat(resolve(root, relativePath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readJson(relativePath) {
+  const source = await readSource(relativePath);
+  if (!source) return null;
+  try {
+    return JSON.parse(source);
+  } catch {
+    return null;
+  }
+}
+
+const androidFingerprintPattern = /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/;
+const iosTeamIdPattern = /^[A-Z0-9]{10}$/;
+
+function configuredAndroidFingerprint() {
+  const fingerprint = process.env.UPTECH_ANDROID_APP_LINKS_SHA256?.trim() ?? "";
+  return androidFingerprintPattern.test(fingerprint) ? fingerprint : null;
+}
+
+function iosUniversalLinksEnabled() {
+  const value = process.env.UPTECH_IOS_UNIVERSAL_LINKS_ENABLED?.trim();
+  if (!value || value === "false") return false;
+  if (value === "true") return true;
+  errors.push("iOS universal links flag must be true or false");
+  return false;
+}
+
+function validAssetLinks(value, fingerprint) {
+  if (!Array.isArray(value) || value.length !== 1) return false;
+  const [statement] = value;
+  const target = statement && typeof statement === "object" ? statement.target : null;
+  return Object.keys(statement ?? {}).sort().join(",") === "relation,target" &&
+    Array.isArray(statement.relation) &&
+    statement.relation.length === 1 &&
+    statement.relation[0] === "delegate_permission/common.handle_all_urls" &&
+    target && typeof target === "object" &&
+    Object.keys(target).sort().join(",") ===
+      "namespace,package_name,sha256_cert_fingerprints" &&
+    target.namespace === "android_app" &&
+    target.package_name === "vn.uptech.uptech_knowledge_mobile" &&
+    Array.isArray(target.sha256_cert_fingerprints) &&
+    target.sha256_cert_fingerprints.length === 1 &&
+    target.sha256_cert_fingerprints[0] === fingerprint;
+}
+
+function validAppleAssociation(value, teamId) {
+  const appId = `${teamId}.vn.uptech.uptechKnowledgeMobile`;
+  const applinks = value && typeof value === "object" ? value.applinks : null;
+  if (!applinks || typeof applinks !== "object") return false;
+  if (!Array.isArray(applinks.details) || applinks.details.length !== 1) return false;
+  const [detail] = applinks.details;
+  return Object.keys(value).join(",") === "applinks" &&
+    Object.keys(applinks).sort().join(",") === "apps,details" &&
+    Array.isArray(applinks.apps) && applinks.apps.length === 0 &&
+    detail && typeof detail === "object" &&
+    Object.keys(detail).sort().join(",") === "appID,paths" &&
+    detail.appID === appId &&
+    Array.isArray(detail.paths) && detail.paths.length === 1 &&
+    detail.paths[0] === "/auth/mobile/callback";
+}
+
 const [publicNav, homePage, loginPage] = await Promise.all([
   readSource("src/components/landing/PublicNav.tsx"),
   readSource("src/app/page.tsx"),
@@ -86,6 +155,32 @@ const hasLoginMedia =
 
 if (!hasLoginMarkup || !hasLoginMedia) {
   errors.push("login background video contract is incomplete");
+}
+
+const androidFingerprint = configuredAndroidFingerprint();
+if (!androidFingerprint) {
+  errors.push("Android release fingerprint is missing or invalid");
+}
+const assetLinks = await readJson("public/.well-known/assetlinks.json");
+if (androidFingerprint && !validAssetLinks(assetLinks, androidFingerprint)) {
+  errors.push("Android assetlinks association is incomplete");
+}
+
+if (iosUniversalLinksEnabled()) {
+  const teamId = process.env.UPTECH_IOS_TEAM_ID?.trim() ?? "";
+  if (!iosTeamIdPattern.test(teamId)) {
+    errors.push("iOS Team ID is missing or invalid");
+  } else {
+    const appleAssociation = await readJson("public/apple-app-site-association");
+    if (!validAppleAssociation(appleAssociation, teamId)) {
+      errors.push("iOS universal links association is incomplete");
+    }
+  }
+} else if ((await Promise.all([
+  "public/.well-known/apple-app-site-association",
+  "public/apple-app-site-association",
+].map(pathExists))).some(Boolean)) {
+  errors.push("iOS universal links association must be absent when disabled");
 }
 
 if (errors.length > 0) {

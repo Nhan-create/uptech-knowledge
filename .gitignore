@@ -21,6 +21,11 @@
 # production
 /build
 
+# production-build association artifacts (generated from deployment metadata)
+/public/.well-known/assetlinks.json
+/public/.well-known/apple-app-site-association
+/public/apple-app-site-association
+
 # misc
 .DS_Store
 *.pem

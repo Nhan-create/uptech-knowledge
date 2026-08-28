@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "node scripts/production-deploy-contract.mjs",
+    "prebuild": "node scripts/generate-mobile-association-artifacts.mjs && node scripts/production-deploy-contract.mjs",
+    "generate:mobile-associations": "node scripts/generate-mobile-association-artifacts.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -13,7 +14,7 @@
     "test:postgres": "node --experimental-strip-types --test test/integration/phase1-postgres.test.ts",
     "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts",
     "test:postgres:a3": "node --experimental-strip-types --test test/integration/mobile-auth-a3-postgres.test.ts",
-    "test:deploy-contract": "node --test test/production-deploy-contract.test.mjs"
+    "test:deploy-contract": "node --test test/production-deploy-contract.test.mjs test/mobile-google-registry-deploy-contract.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.0",

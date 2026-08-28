@@ -170,6 +170,18 @@ async function exchange(fixture: Awaited<ReturnType<typeof seedHandoff>>) {
   return { ...row, access, refresh };
 }
 
+async function nativeFamily(workspaceId: string, sessionId: string, access: Buffer, refresh: Buffer) {
+  const [family] = await asRole<{session_status:string;token_count:number;token_statuses:string[]}>(
+    "uptech_migration_owner", `
+      SELECT s.status::text session_status,count(*)::int token_count,
+        array_agg(t.token_status::text ORDER BY t.token_kind) token_statuses
+      FROM uptech.sessions s JOIN uptech.session_tokens t
+        ON t.workspace_id=s.workspace_id AND t.session_id=s.id
+      WHERE s.workspace_id=$1 AND s.id=$2 AND t.token_hash IN ($3,$4)
+      GROUP BY s.status`, [workspaceId,sessionId,access,refresh]);
+  return family;
+}
+
 async function completeCallback(input: { workspaceId: string; domain: string; email: string; subject: string }) {
   const transaction=randomUUID(); transactionIds.push(transaction);
   const completion=randomBytes(32); const nonce=randomBytes(32); const handoff=randomBytes(32);
@@ -449,6 +461,70 @@ test("refresh rejects a NULL idempotency key before mutating the token family", 
   assert.equal(after.version,before.version);
 });
 
+test("workspace switch rotates once, replays exactly, denies mismatches and old credentials, and inherits absolute expiry", async () => {
+  const targetWorkspace=randomUUID(); const targetMembership=randomUUID();
+  await asRole("uptech_migration_owner", `
+    INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
+      VALUES($1,'ACTIVE','INVITE_ONLY',1);
+    INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status,authz_version)
+      VALUES($1,$2,$3,'MEMBER','ACTIVE',1)`, [targetWorkspace,targetMembership,ids.user]);
+
+  const issued=await exchange(await seedHandoff()); assert.equal(issued.outcome,"ISSUED"); assert.ok(issued.session_id);
+  const absoluteExpiry=new Date(Date.now()+5*60_000);
+  await asRole("uptech_migration_owner", `UPDATE uptech.sessions
+    SET idle_expires_at=$3,absolute_expires_at=$3
+    WHERE workspace_id=$1 AND id=$2`, [ids.workspace,issued.session_id,absoluteExpiry]);
+
+  const successorAccess=randomBytes(32); const successorRefresh=randomBytes(32);
+  const capsule=randomBytes(115); const idempotencyKey="a3-switch-retry";
+  const switchSql=`SELECT r.outcome::text,r.replay_capsule,r.access_expires_at,r.refresh_expires_at
+    FROM uptech.switch_mobile_workspace_v1($1,$2,$3,$4,$5,$6,$7,$8) r`;
+  const args=[issued.access,targetWorkspace,installation,successorAccess,successorRefresh,
+    capsule,idempotencyKey,randomUUID()];
+  const [rotated]=await api<{outcome:string;replay_capsule:Buffer|null;access_expires_at:Date;refresh_expires_at:Date}>(
+    switchSql,args);
+  const [replay]=await api<{outcome:string;replay_capsule:Buffer|null;access_expires_at:Date;refresh_expires_at:Date}>(
+    switchSql,args);
+  const [mismatch]=await api<{outcome:string}>(switchSql,
+    [issued.access,targetWorkspace,installation,successorAccess,successorRefresh,capsule,"different",randomUUID()]);
+
+  assert.equal(rotated.outcome,"ROTATED"); assert.equal(rotated.replay_capsule,null);
+  assert.equal(replay.outcome,"REPLAY"); assert.deepEqual(replay.replay_capsule,capsule);
+  assert.equal(mismatch.outcome,"DENIED");
+  assert.equal(rotated.refresh_expires_at.getTime(),absoluteExpiry.getTime());
+  assert.ok(rotated.access_expires_at.getTime()<=absoluteExpiry.getTime());
+  assert.equal(replay.refresh_expires_at.getTime(),absoluteExpiry.getTime());
+
+  assert.deepEqual(await nativeFamily(ids.workspace,issued.session_id,issued.access,issued.refresh),{
+    session_status:"REVOKED",token_count:2,token_statuses:["REVOKED","REVOKED"],
+  });
+
+  const [successor]=await asRole<{absolute_expires_at:Date;max_token_expiry:Date}>("uptech_migration_owner", `
+    SELECT s.absolute_expires_at,max(t.expires_at) max_token_expiry
+    FROM uptech.sessions s JOIN uptech.session_tokens t
+      ON t.workspace_id=s.workspace_id AND t.session_id=s.id
+    WHERE s.workspace_id=$1 AND t.token_hash IN ($2,$3)
+    GROUP BY s.absolute_expires_at`, [targetWorkspace,successorAccess,successorRefresh]);
+  assert.equal(successor.absolute_expires_at.getTime(),absoluteExpiry.getTime());
+  assert.ok(successor.max_token_expiry.getTime()<=absoluteExpiry.getTime());
+
+  assert.equal((await api<{outcome:string}>(`SELECT r.outcome::text
+    FROM uptech.authenticate_mobile_access_v1($1) r`,[issued.access]))[0].outcome,"SESSION_REVOKED");
+  const [oldRefresh]=await api<{outcome:string}>(`SELECT r.outcome::text FROM uptech.rotate_mobile_refresh_v1(
+    $1,$2,$3,$4,$5,$6,$7) r`,[issued.refresh,installation,randomBytes(32),randomBytes(32),
+    randomBytes(115),"old-after-switch",randomUUID()]);
+  assert.equal(oldRefresh.outcome,"FAMILY_REVOKED");
+
+  const expired=await exchange(await seedHandoff()); assert.equal(expired.outcome,"ISSUED");
+  await asRole("uptech_migration_owner", `UPDATE uptech.sessions
+    SET created_at=clock_timestamp()-interval '1 day',last_seen_at=clock_timestamp()-interval '1 hour',
+      idle_expires_at=clock_timestamp()-interval '1 second',absolute_expires_at=clock_timestamp()-interval '1 second'
+    WHERE workspace_id=$1 AND id=$2`, [ids.workspace,expired.session_id]);
+  const [expiredSwitch]=await api<{outcome:string}>(switchSql,[expired.access,targetWorkspace,installation,
+    randomBytes(32),randomBytes(32),randomBytes(115),"expired-switch",randomUUID()]);
+  assert.equal(expiredSwitch.outcome,"DENIED");
+});
+
 test("logout and membership removal immediately deny old access", async () => {
   const first=await exchange(await seedHandoff()); assert.equal(first.outcome,"ISSUED");
   assert.equal((await api<{outcome:string}>(`SELECT uptech.revoke_mobile_session_v1($1,$2)::text outcome`,
@@ -456,8 +532,44 @@ test("logout and membership removal immediately deny old access", async () => {
   assert.equal((await api<{outcome:string}>(`SELECT r.outcome::text FROM uptech.authenticate_mobile_access_v1($1) r`,
     [first.access]))[0].outcome,"SESSION_REVOKED");
   const second=await exchange(await seedHandoff()); assert.equal(second.outcome,"ISSUED");
-  await asRole("uptech_migration_owner",`UPDATE uptech.workspace_memberships SET status='DEPROVISIONED',authz_version=authz_version+1
-    WHERE workspace_id=$1 AND id=$2`,[ids.workspace,ids.membership]);
-  assert.equal((await api<{outcome:string}>(`SELECT r.outcome::text FROM uptech.authenticate_mobile_access_v1($1) r`,
-    [second.access]))[0].outcome,"SESSION_REVOKED");
+  const [membershipBefore]=await asRole<{status:string;authz_version:number}>("uptech_migration_owner", `
+    SELECT status::text,authz_version FROM uptech.workspace_memberships WHERE workspace_id=$1 AND id=$2`,
+    [ids.workspace,ids.membership]);
+  assert.ok(membershipBefore);
+  try {
+    await asRole("uptech_migration_owner",`UPDATE uptech.workspace_memberships SET status='DEPROVISIONED',authz_version=authz_version+1
+      WHERE workspace_id=$1 AND id=$2`,[ids.workspace,ids.membership]);
+    assert.equal((await api<{outcome:string}>(`SELECT r.outcome::text FROM uptech.authenticate_mobile_access_v1($1) r`,
+      [second.access]))[0].outcome,"SESSION_REVOKED");
+  } finally {
+    await asRole("uptech_migration_owner",`UPDATE uptech.workspace_memberships SET status=$3,
+      authz_version=$4 WHERE workspace_id=$1 AND id=$2`,
+      [ids.workspace,ids.membership,membershipBefore.status,membershipBefore.authz_version]);
+  }
+});
+
+test("logout revokes the exact old access and refresh credentials without issuing a successor token family", async () => {
+  const issued=await exchange(await seedHandoff()); assert.equal(issued.outcome,"ISSUED"); assert.ok(issued.session_id);
+  assert.equal((await api<{outcome:string}>(`SELECT uptech.revoke_mobile_session_v1($1,$2)::text outcome`,
+    [issued.access,randomUUID()]))[0].outcome,"REVOKED");
+  assert.deepEqual(await nativeFamily(ids.workspace,issued.session_id,issued.access,issued.refresh),{
+    session_status:"REVOKED",token_count:2,token_statuses:["REVOKED","REVOKED"],
+  });
+
+  const successorAccess=randomBytes(32); const successorRefresh=randomBytes(32);
+  const [oldAccess]=await api<{outcome:string}>(`
+    SELECT r.outcome::text FROM uptech.authenticate_mobile_access_v1($1) r`,[issued.access]);
+  const [oldRefresh]=await api<{outcome:string}>(`
+    SELECT r.outcome::text FROM uptech.rotate_mobile_refresh_v1($1,$2,$3,$4,$5,$6,$7) r`,
+    [issued.refresh,installation,successorAccess,successorRefresh,randomBytes(115),"logout-old-refresh",randomUUID()]);
+  const [candidateTokens]=await asRole<{count:number}>("uptech_migration_owner", `
+    SELECT count(*)::int count FROM uptech.session_tokens WHERE token_hash IN ($1,$2)`,
+    [successorAccess,successorRefresh]);
+
+  assert.equal(oldAccess.outcome,"SESSION_REVOKED");
+  assert.equal(oldRefresh.outcome,"FAMILY_REVOKED");
+  assert.equal(candidateTokens.count,0);
+  assert.deepEqual(await nativeFamily(ids.workspace,issued.session_id,issued.access,issued.refresh),{
+    session_status:"REVOKED",token_count:2,token_statuses:["REVOKED","REVOKED"],
+  });
 });
