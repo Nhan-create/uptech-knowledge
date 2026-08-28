@@ -1,7 +1,55 @@
 \set ON_ERROR_STOP on
 
--- Run only against a disposable database after A1, A2, and A3 migrations.
+-- Run only against a disposable database after A1, A2, A3, and corrective migration 0005.
 BEGIN;
+
+CREATE TEMP TABLE a3_expected_sessions_policy
+  (LIKE uptech.sessions)
+  ON COMMIT DROP;
+CREATE POLICY a3_expected_sessions_api_scope ON a3_expected_sessions_policy
+  TO uptech_api_runtime
+  USING (
+    client_type='WEB'
+    AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+    AND id::text=NULLIF(current_setting('app.session_id',true),'')
+    AND EXISTS (
+      SELECT 1 FROM uptech.workspaces AS context_workspace
+      WHERE context_workspace.workspace_id=a3_expected_sessions_policy.workspace_id
+    )
+  )
+  WITH CHECK (
+    client_type='WEB'
+    AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+    AND id::text=NULLIF(current_setting('app.session_id',true),'')
+    AND EXISTS (
+      SELECT 1 FROM uptech.workspaces AS context_workspace
+      WHERE context_workspace.workspace_id=a3_expected_sessions_policy.workspace_id
+    )
+  );
+
+CREATE TEMP TABLE a3_expected_session_tokens_policy
+  (LIKE uptech.session_tokens)
+  ON COMMIT DROP;
+CREATE POLICY a3_expected_session_tokens_api_scope ON a3_expected_session_tokens_policy
+  TO uptech_api_runtime
+  USING (
+    client_type='WEB'
+    AND session_id::text=NULLIF(current_setting('app.session_id',true),'')
+    AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+    AND EXISTS (
+      SELECT 1 FROM uptech.workspaces AS context_workspace
+      WHERE context_workspace.workspace_id=a3_expected_session_tokens_policy.workspace_id
+    )
+  )
+  WITH CHECK (
+    client_type='WEB'
+    AND session_id::text=NULLIF(current_setting('app.session_id',true),'')
+    AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+    AND EXISTS (
+      SELECT 1 FROM uptech.workspaces AS context_workspace
+      WHERE context_workspace.workspace_id=a3_expected_session_tokens_policy.workspace_id
+    )
+  );
 
 DO $verify$
 DECLARE
@@ -21,6 +69,7 @@ DECLARE
     to_regprocedure('uptech.revoke_mobile_session_v1(uptech.google_auth_hash32_v1,uuid)')
   ]::regprocedure[];
   relation text;
+  column_acl record;
 BEGIN
   IF array_position(pretenant, NULL::regprocedure) IS NOT NULL OR cardinality(pretenant) <> 5 THEN
     RAISE EXCEPTION 'one or more exact A3 pre-tenant overloads are missing';
@@ -77,6 +126,94 @@ BEGIN
       OR has_table_privilege('uptech_api_runtime','uptech.'||relation,'SELECT,INSERT,UPDATE,DELETE')
       OR has_table_privilege('uptech_worker_runtime','uptech.'||relation,'SELECT,INSERT,UPDATE,DELETE') THEN
       RAISE EXCEPTION 'runtime direct table privilege exists on %', relation;
+    END IF;
+  END LOOP;
+
+  IF EXISTS (
+    SELECT 1
+    FROM (VALUES
+      ('sessions','sessions_api_scope','a3_expected_sessions_policy','a3_expected_sessions_api_scope'),
+      ('session_tokens','session_tokens_api_scope','a3_expected_session_tokens_policy',
+        'a3_expected_session_tokens_api_scope')
+    ) AS expected(relation_name,policy_name,reference_relation_name,reference_policy_name)
+    JOIN pg_class c ON c.relname=expected.relation_name
+    JOIN pg_namespace n ON n.oid=c.relnamespace AND n.nspname='uptech'
+    LEFT JOIN pg_policy p ON p.polrelid=c.oid AND p.polname=expected.policy_name
+    LEFT JOIN pg_class reference_relation
+      ON reference_relation.relnamespace=pg_my_temp_schema()
+      AND reference_relation.relname=expected.reference_relation_name
+    LEFT JOIN pg_policy reference_policy
+      ON reference_policy.polrelid=reference_relation.oid
+      AND reference_policy.polname=expected.reference_policy_name
+    WHERE NOT (c.relrowsecurity AND c.relforcerowsecurity)
+      OR p.oid IS NULL
+      OR reference_policy.oid IS NULL
+      OR p.polcmd<>'*'
+      OR NOT p.polpermissive
+      OR p.polroles<>ARRAY['uptech_api_runtime'::regrole::oid]
+      OR regexp_replace(pg_get_expr(p.polqual,p.polrelid),
+          '\m'||expected.relation_name||'\M','__a3_target_relation__','g')
+        IS DISTINCT FROM regexp_replace(pg_get_expr(reference_policy.polqual,reference_policy.polrelid),
+          '\m'||expected.reference_relation_name||'\M','__a3_target_relation__','g')
+      OR regexp_replace(pg_get_expr(p.polwithcheck,p.polrelid),
+          '\m'||expected.relation_name||'\M','__a3_target_relation__','g')
+        IS DISTINCT FROM regexp_replace(
+          pg_get_expr(reference_policy.polwithcheck,reference_policy.polrelid),
+          '\m'||expected.reference_relation_name||'\M','__a3_target_relation__','g')
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_policy p
+    JOIN pg_class c ON c.oid=p.polrelid
+    JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='uptech' AND c.relname IN ('sessions','session_tokens')
+      AND (0=ANY(p.polroles) OR 'uptech_api_runtime'::regrole::oid=ANY(p.polroles))
+      AND NOT (
+        (c.relname='sessions' AND p.polname='sessions_api_scope')
+        OR (c.relname='session_tokens' AND p.polname='session_tokens_api_scope')
+      )
+  ) THEN
+    RAISE EXCEPTION 'shared session runtime policy differs from the exact Web-session boundary';
+  END IF;
+
+  FOR column_acl IN
+    SELECT table_name,column_name
+    FROM information_schema.columns
+    WHERE table_schema='uptech' AND table_name IN ('sessions','session_tokens')
+  LOOP
+    IF has_column_privilege('uptech_api_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'SELECT') <>
+      ((column_acl.table_name='sessions' AND column_acl.column_name=ANY(ARRAY[
+        'workspace_id','id','user_id','membership_id','client_type','status','security_version',
+        'idle_expires_at','absolute_expires_at','revoked_at']))
+       OR (column_acl.table_name='session_tokens' AND column_acl.column_name=ANY(ARRAY[
+        'workspace_id','id','session_id','client_type','token_kind','token_status',
+        'session_security_version','rotation_version','issued_at','expires_at',
+        'became_previous_at','previous_valid_until','revoked_at'])))
+      OR has_column_privilege('uptech_api_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'UPDATE') <>
+      ((column_acl.table_name='sessions' AND column_acl.column_name=ANY(ARRAY[
+        'status','security_version','current_rotation_version','last_seen_at','idle_expires_at',
+        'revoked_at','revocation_reason']))
+       OR (column_acl.table_name='session_tokens' AND column_acl.column_name=ANY(ARRAY[
+        'token_status','became_previous_at','previous_valid_until','revoked_at'])))
+      OR has_column_privilege('uptech_api_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'INSERT')
+      OR has_column_privilege('uptech_worker_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'SELECT')
+      OR has_column_privilege('uptech_worker_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'INSERT')
+      OR has_column_privilege('uptech_worker_runtime','uptech.'||column_acl.table_name,
+        column_acl.column_name,'UPDATE')
+      OR EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        CROSS JOIN LATERAL aclexplode(COALESCE(a.attacl,'{}'::aclitem[])) acl
+        WHERE a.attrelid=('uptech.'||column_acl.table_name)::regclass
+          AND a.attname=column_acl.column_name AND acl.grantee=0
+          AND acl.privilege_type IN ('SELECT','INSERT','UPDATE','REFERENCES')
+      ) THEN
+      RAISE EXCEPTION 'wrong shared session column ACL: %.%',
+        column_acl.table_name,column_acl.column_name;
     END IF;
   END LOOP;
 
@@ -206,22 +343,83 @@ VALUES
   'a3000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000001',
   'a3000000-0000-4000-8000-000000000004','NATIVE','ACTIVE',1,1,1,1,
   decode(repeat('30',32),'hex'),clock_timestamp()-interval '8 days',clock_timestamp()-interval '8 days',
-  clock_timestamp()-interval '1 second',clock_timestamp()+interval '22 days');
+  clock_timestamp()-interval '1 second',clock_timestamp()+interval '22 days'),
+ ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000013',
+  'a3000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000001',
+  'a3000000-0000-4000-8000-000000000004','WEB','ACTIVE',1,1,1,1,
+  decode(repeat('40',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '1 hour',
+  clock_timestamp()+interval '1 day'),
+ ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000014',
+  'a3000000-0000-4000-8000-000000000002','a3000000-0000-4000-8000-000000000001',
+  'a3000000-0000-4000-8000-000000000004','WEB','ACTIVE',1,1,1,1,
+  decode(repeat('50',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '1 hour',
+  clock_timestamp()+interval '1 day');
 INSERT INTO uptech.session_tokens(workspace_id,id,session_id,client_type,token_kind,token_hash,
-  session_security_version,rotation_version,issued_at,expires_at)
+  csrf_token_hash,session_security_version,rotation_version,issued_at,expires_at)
 VALUES
  ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000007',
-  'a3000000-0000-4000-8000-000000000005','NATIVE','NATIVE_ACCESS',decode(repeat('21',32),'hex'),1,1,
+  'a3000000-0000-4000-8000-000000000005','NATIVE','NATIVE_ACCESS',decode(repeat('21',32),'hex'),NULL,1,1,
   clock_timestamp(),clock_timestamp()+interval '15 minutes'),
  ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000008',
-  'a3000000-0000-4000-8000-000000000005','NATIVE','NATIVE_REFRESH',decode(repeat('22',32),'hex'),1,1,
+  'a3000000-0000-4000-8000-000000000005','NATIVE','NATIVE_REFRESH',decode(repeat('22',32),'hex'),NULL,1,1,
   clock_timestamp(),clock_timestamp()+interval '30 days'),
  ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000009',
-  'a3000000-0000-4000-8000-000000000006','NATIVE','NATIVE_ACCESS',decode(repeat('31',32),'hex'),1,1,
-  clock_timestamp(),clock_timestamp()+interval '15 minutes');
+  'a3000000-0000-4000-8000-000000000006','NATIVE','NATIVE_ACCESS',decode(repeat('31',32),'hex'),NULL,1,1,
+  clock_timestamp(),clock_timestamp()+interval '15 minutes'),
+ ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000015',
+  'a3000000-0000-4000-8000-000000000013','WEB','WEB_SESSION',decode(repeat('41',32),'hex'),
+  decode(repeat('42',32),'hex'),1,1,clock_timestamp(),clock_timestamp()+interval '1 hour'),
+ ('a3000000-0000-4000-8000-000000000003','a3000000-0000-4000-8000-000000000016',
+  'a3000000-0000-4000-8000-000000000014','WEB','WEB_SESSION',decode(repeat('51',32),'hex'),
+  decode(repeat('52',32),'hex'),1,1,clock_timestamp(),clock_timestamp()+interval '1 hour');
 
 RESET ROLE;
 SET LOCAL ROLE uptech_api_runtime;
+
+DO $direct_policy_verify$
+DECLARE affected bigint;
+BEGIN
+  PERFORM set_config('app.workspace_id','a3000000-0000-4000-8000-000000000003',true);
+  PERFORM set_config('app.actor_id','a3000000-0000-4000-8000-000000000001',true);
+  PERFORM set_config('app.membership_id','a3000000-0000-4000-8000-000000000004',true);
+  PERFORM set_config('app.session_id','a3000000-0000-4000-8000-000000000013',true);
+
+  IF (SELECT count(id) FROM uptech.sessions
+      WHERE id IN ('a3000000-0000-4000-8000-000000000005',
+        'a3000000-0000-4000-8000-000000000013','a3000000-0000-4000-8000-000000000014'))<>1
+    OR (SELECT count(id) FROM uptech.session_tokens
+      WHERE id IN ('a3000000-0000-4000-8000-000000000007',
+        'a3000000-0000-4000-8000-000000000015','a3000000-0000-4000-8000-000000000016'))<>1 THEN
+    RAISE EXCEPTION 'Web context can read a native or different Web session';
+  END IF;
+
+  UPDATE uptech.sessions SET status='REVOKED',revoked_at=clock_timestamp(),
+    revocation_reason='USER_LOGOUT',security_version=security_version+1
+    WHERE id IN ('a3000000-0000-4000-8000-000000000005','a3000000-0000-4000-8000-000000000014');
+  GET DIAGNOSTICS affected=ROW_COUNT;
+  IF affected<>0 THEN RAISE EXCEPTION 'Web context updated a native or different Web session'; END IF;
+  UPDATE uptech.session_tokens SET token_status='REVOKED',revoked_at=clock_timestamp()
+    WHERE id IN ('a3000000-0000-4000-8000-000000000007','a3000000-0000-4000-8000-000000000016');
+  GET DIAGNOSTICS affected=ROW_COUNT;
+  IF affected<>0 THEN RAISE EXCEPTION 'Web context updated a native or different Web token'; END IF;
+
+  UPDATE uptech.session_tokens SET token_status='REVOKED',revoked_at=clock_timestamp()
+    WHERE id='a3000000-0000-4000-8000-000000000015';
+  GET DIAGNOSTICS affected=ROW_COUNT;
+  IF affected<>1 THEN RAISE EXCEPTION 'current Web token is not updateable'; END IF;
+  UPDATE uptech.sessions SET status='REVOKED',revoked_at=clock_timestamp(),
+    revocation_reason='USER_LOGOUT',security_version=security_version+1
+    WHERE id='a3000000-0000-4000-8000-000000000013';
+  GET DIAGNOSTICS affected=ROW_COUNT;
+  IF affected<>1 THEN RAISE EXCEPTION 'current Web session is not updateable'; END IF;
+
+  PERFORM set_config('app.session_id','a3000000-0000-4000-8000-000000000005',true);
+  IF EXISTS (SELECT id FROM uptech.sessions WHERE id='a3000000-0000-4000-8000-000000000005')
+    OR EXISTS (SELECT id FROM uptech.session_tokens WHERE id='a3000000-0000-4000-8000-000000000007') THEN
+    RAISE EXCEPTION 'native context bypassed the Web client-type policy';
+  END IF;
+END
+$direct_policy_verify$;
 
 DO $session_verify$
 DECLARE auth uptech.mobile_auth_result_v1; rotated uptech.mobile_refresh_result_v1;

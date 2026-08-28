@@ -42,6 +42,98 @@ async function api<Row extends QueryResultRow>(text: string, values: readonly un
   return asRole<Row>("uptech_api_runtime", text, values);
 }
 
+async function asApiSession<Row extends QueryResultRow>(workspaceId: string, sessionId: string, text: string,
+  values: readonly unknown[] = []): Promise<Row[]> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE uptech_api_runtime");
+    await client.query("SELECT set_config('app.workspace_id',$1,true)", [workspaceId]);
+    await client.query("SELECT set_config('app.actor_id',$1,true)", [ids.user]);
+    await client.query("SELECT set_config('app.membership_id',$1,true)", [ids.membership]);
+    await client.query("SELECT set_config('app.session_id',$1,true)", [sessionId]);
+    const result = await client.query<Row>(text, [...values]);
+    await client.query("COMMIT");
+    return result.rows;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+}
+
+async function assertExactWebSessionPolicies(): Promise<void> {
+  await asRole("uptech_migration_owner", `
+    CREATE TEMP TABLE a3_expected_sessions_policy (LIKE uptech.sessions) ON COMMIT DROP;
+    CREATE POLICY a3_expected_sessions_api_scope ON a3_expected_sessions_policy
+      TO uptech_api_runtime
+      USING (
+        client_type='WEB'
+        AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+        AND id::text=NULLIF(current_setting('app.session_id',true),'')
+        AND EXISTS (SELECT 1 FROM uptech.workspaces AS context_workspace
+          WHERE context_workspace.workspace_id=a3_expected_sessions_policy.workspace_id)
+      )
+      WITH CHECK (
+        client_type='WEB'
+        AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+        AND id::text=NULLIF(current_setting('app.session_id',true),'')
+        AND EXISTS (SELECT 1 FROM uptech.workspaces AS context_workspace
+          WHERE context_workspace.workspace_id=a3_expected_sessions_policy.workspace_id)
+      );
+    CREATE TEMP TABLE a3_expected_session_tokens_policy (LIKE uptech.session_tokens) ON COMMIT DROP;
+    CREATE POLICY a3_expected_session_tokens_api_scope ON a3_expected_session_tokens_policy
+      TO uptech_api_runtime
+      USING (
+        client_type='WEB'
+        AND session_id::text=NULLIF(current_setting('app.session_id',true),'')
+        AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+        AND EXISTS (SELECT 1 FROM uptech.workspaces AS context_workspace
+          WHERE context_workspace.workspace_id=a3_expected_session_tokens_policy.workspace_id)
+      )
+      WITH CHECK (
+        client_type='WEB'
+        AND session_id::text=NULLIF(current_setting('app.session_id',true),'')
+        AND workspace_id::text=NULLIF(current_setting('app.workspace_id',true),'')
+        AND EXISTS (SELECT 1 FROM uptech.workspaces AS context_workspace
+          WHERE context_workspace.workspace_id=a3_expected_session_tokens_policy.workspace_id)
+      );
+    DO $exact_policy$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM (VALUES
+          ('sessions','sessions_api_scope','a3_expected_sessions_policy','a3_expected_sessions_api_scope'),
+          ('session_tokens','session_tokens_api_scope','a3_expected_session_tokens_policy',
+            'a3_expected_session_tokens_api_scope')
+        ) expected(relation_name,policy_name,reference_relation_name,reference_policy_name)
+        JOIN pg_class relation ON relation.relname=expected.relation_name
+        JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace AND namespace.nspname='uptech'
+        LEFT JOIN pg_policy policy
+          ON policy.polrelid=relation.oid AND policy.polname=expected.policy_name
+        LEFT JOIN pg_class reference_relation
+          ON reference_relation.relnamespace=pg_my_temp_schema()
+          AND reference_relation.relname=expected.reference_relation_name
+        LEFT JOIN pg_policy reference_policy
+          ON reference_policy.polrelid=reference_relation.oid
+          AND reference_policy.polname=expected.reference_policy_name
+        WHERE policy.oid IS NULL OR reference_policy.oid IS NULL
+          OR regexp_replace(pg_get_expr(policy.polqual,policy.polrelid),
+              '\\m'||expected.relation_name||'\\M','__a3_target_relation__','g')
+            IS DISTINCT FROM regexp_replace(
+              pg_get_expr(reference_policy.polqual,reference_policy.polrelid),
+              '\\m'||expected.reference_relation_name||'\\M','__a3_target_relation__','g')
+          OR regexp_replace(pg_get_expr(policy.polwithcheck,policy.polrelid),
+              '\\m'||expected.relation_name||'\\M','__a3_target_relation__','g')
+            IS DISTINCT FROM regexp_replace(
+              pg_get_expr(reference_policy.polwithcheck,reference_policy.polrelid),
+              '\\m'||expected.reference_relation_name||'\\M','__a3_target_relation__','g')
+      ) THEN
+        RAISE EXCEPTION 'shared session policy differs from exact reference parse tree';
+      END IF;
+    END
+    $exact_policy$;`);
+}
+
 async function seedHandoff(input: { expiresAt?: Date; verifier?: Buffer; installation?: Buffer } = {}) {
   const transaction = randomUUID();
   transactionIds.push(transaction);
@@ -127,31 +219,152 @@ after(async () => {
   await pool.end();
 });
 
-test("A3 catalog grants expose only API routines and force owner-only RLS on tenant state", async () => {
-  const [row] = await asRole<{bad_functions:number;bad_tables:number;bad_rls:number}>("uptech_migration_owner", `
+test("A3 catalog grants expose only API routines and keep shared session policies Web-only", async () => {
+  await assertExactWebSessionPolicies();
+  const [row] = await asRole<{bad_functions:number;bad_tables:number;bad_rls:number;
+    bad_session_policies:number;bad_session_column_acls:number}>("uptech_migration_owner", `
     WITH routines AS (SELECT unnest(ARRAY[
       'uptech.rotate_mobile_refresh_v1(uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,bytea,uptech.google_auth_ascii_identifier_v1,uuid)'::regprocedure,
       'uptech.authenticate_mobile_access_v1(uptech.google_auth_hash32_v1)'::regprocedure,
       'uptech.list_mobile_workspaces_v1(uptech.google_auth_hash32_v1)'::regprocedure,
       'uptech.switch_mobile_workspace_v1(uptech.google_auth_hash32_v1,uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,bytea,uptech.google_auth_ascii_identifier_v1,uuid)'::regprocedure,
       'uptech.revoke_mobile_session_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure]) oid),
-    relations AS (SELECT unnest(ARRAY['mobile_google_transactions','mobile_handoffs','sessions','session_tokens',
-      'mobile_refresh_replay_receipts','mobile_workspace_switch_replay_receipts','invitations']) name)
-    SELECT (SELECT count(*) FROM routines WHERE NOT has_function_privilege('uptech_api_runtime',oid,'EXECUTE')
+    relations AS (SELECT unnest(ARRAY['mobile_google_configuration_registry','mobile_google_transactions',
+      'mobile_handoffs','mobile_refresh_replay_receipts','mobile_workspace_switch_replay_receipts',
+      'invitations','users','identities','sessions','session_tokens','platform_audit_events']) name),
+    expected_session_policies(relation_name,policy_name) AS (VALUES
+      ('sessions','sessions_api_scope'),('session_tokens','session_tokens_api_scope')),
+    session_columns AS (SELECT table_name,column_name FROM information_schema.columns
+      WHERE table_schema='uptech' AND table_name IN ('sessions','session_tokens'))
+    SELECT (SELECT count(*)::int FROM routines WHERE NOT has_function_privilege('uptech_api_runtime',oid,'EXECUTE')
       OR has_function_privilege('uptech_worker_runtime',oid,'EXECUTE') OR EXISTS(SELECT 1 FROM pg_proc p
       CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a
       WHERE p.oid=routines.oid AND a.grantee=0 AND a.privilege_type='EXECUTE')) bad_functions,
-      (SELECT count(*) FROM relations WHERE has_table_privilege('uptech_api_runtime','uptech.'||name,'SELECT,INSERT,UPDATE,DELETE')
+      (SELECT count(*)::int FROM relations WHERE has_table_privilege('uptech_api_runtime','uptech.'||name,'SELECT,INSERT,UPDATE,DELETE')
        OR has_table_privilege('uptech_worker_runtime','uptech.'||name,'SELECT,INSERT,UPDATE,DELETE')
        OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
          CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) a
          WHERE n.nspname='uptech' AND c.relname=relations.name AND a.grantee=0
-           AND a.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE'))) bad_tables,
-      (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            AND a.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE'))) bad_tables,
+      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='uptech' AND c.relname IN
           ('mobile_refresh_replay_receipts','mobile_workspace_switch_replay_receipts','invitations')
-          AND NOT (c.relrowsecurity AND c.relforcerowsecurity)) bad_rls`);
-  assert.deepEqual(row,{bad_functions:0,bad_tables:0,bad_rls:0});
+          AND NOT (c.relrowsecurity AND c.relforcerowsecurity)) bad_rls,
+      ((SELECT count(*)::int FROM expected_session_policies expected
+          JOIN pg_class c ON c.relname=expected.relation_name
+          JOIN pg_namespace n ON n.oid=c.relnamespace AND n.nspname='uptech'
+          LEFT JOIN pg_policy p ON p.polrelid=c.oid AND p.polname=expected.policy_name
+          WHERE NOT (c.relrowsecurity AND c.relforcerowsecurity) OR p.oid IS NULL OR p.polcmd<>'*'
+            OR NOT p.polpermissive OR p.polroles<>ARRAY['uptech_api_runtime'::regrole::oid])
+        + (SELECT count(*)::int FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid
+          JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='uptech' AND c.relname IN ('sessions','session_tokens')
+            AND (0=ANY(p.polroles) OR 'uptech_api_runtime'::regrole::oid=ANY(p.polroles))
+            AND NOT ((c.relname='sessions' AND p.polname='sessions_api_scope')
+              OR (c.relname='session_tokens' AND p.polname='session_tokens_api_scope'))))
+        bad_session_policies,
+      (SELECT count(*)::int FROM session_columns c WHERE
+        has_column_privilege('uptech_api_runtime','uptech.'||c.table_name,c.column_name,'SELECT') <>
+          ((c.table_name='sessions' AND c.column_name=ANY(ARRAY['workspace_id','id','user_id',
+            'membership_id','client_type','status','security_version','idle_expires_at',
+            'absolute_expires_at','revoked_at']))
+           OR (c.table_name='session_tokens' AND c.column_name=ANY(ARRAY['workspace_id','id',
+            'session_id','client_type','token_kind','token_status','session_security_version',
+            'rotation_version','issued_at','expires_at','became_previous_at','previous_valid_until','revoked_at'])))
+        OR has_column_privilege('uptech_api_runtime','uptech.'||c.table_name,c.column_name,'UPDATE') <>
+          ((c.table_name='sessions' AND c.column_name=ANY(ARRAY['status','security_version',
+            'current_rotation_version','last_seen_at','idle_expires_at','revoked_at','revocation_reason']))
+           OR (c.table_name='session_tokens' AND c.column_name=ANY(ARRAY['token_status',
+            'became_previous_at','previous_valid_until','revoked_at'])))
+        OR has_column_privilege('uptech_api_runtime','uptech.'||c.table_name,c.column_name,'INSERT')
+        OR has_column_privilege('uptech_worker_runtime','uptech.'||c.table_name,c.column_name,'SELECT')
+        OR has_column_privilege('uptech_worker_runtime','uptech.'||c.table_name,c.column_name,'INSERT')
+        OR has_column_privilege('uptech_worker_runtime','uptech.'||c.table_name,c.column_name,'UPDATE'))
+        bad_session_column_acls`);
+  assert.deepEqual(row,{bad_functions:0,bad_tables:0,bad_rls:0,bad_session_policies:0,
+    bad_session_column_acls:0});
+});
+
+test("shared Web session grants cannot read, update, or insert Native credentials", async () => {
+  const webSession=randomUUID(); const otherWebSession=randomUUID(); const nativeSession=randomUUID();
+  const webToken=randomUUID(); const otherWebToken=randomUUID(); const nativeToken=randomUUID();
+  await asRole("uptech_migration_owner", `
+    INSERT INTO uptech.sessions(workspace_id,id,identity_id,user_id,membership_id,client_type,status,
+      user_security_version,identity_security_version,workspace_security_version,membership_authz_version,
+      device_binding_hash,created_at,last_seen_at,idle_expires_at,absolute_expires_at)
+    VALUES
+      ($1,$2,$3,$4,$5,'WEB','ACTIVE',1,1,1,1,$6,clock_timestamp(),clock_timestamp(),
+        clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day'),
+      ($1,$7,$3,$4,$5,'NATIVE','ACTIVE',1,1,1,1,$8,clock_timestamp(),clock_timestamp(),
+        clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day'),
+      ($1,$9,$3,$4,$5,'WEB','ACTIVE',1,1,1,1,$10,clock_timestamp(),clock_timestamp(),
+        clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day')`,
+    [ids.workspace,webSession,ids.identity,ids.user,ids.membership,randomBytes(32),nativeSession,
+      randomBytes(32),otherWebSession,randomBytes(32)]);
+  await asRole("uptech_migration_owner", `
+    INSERT INTO uptech.session_tokens(workspace_id,id,session_id,client_type,token_kind,token_hash,
+      csrf_token_hash,session_security_version,rotation_version,issued_at,expires_at)
+    VALUES
+      ($1,$2,$5,'WEB','WEB_SESSION',$8,$9,1,1,clock_timestamp(),clock_timestamp()+interval '1 hour'),
+      ($1,$3,$6,'NATIVE','NATIVE_ACCESS',$10,NULL,1,1,clock_timestamp(),clock_timestamp()+interval '15 minutes'),
+      ($1,$4,$7,'WEB','WEB_SESSION',$11,$12,1,1,clock_timestamp(),clock_timestamp()+interval '1 hour')`,
+    [ids.workspace,webToken,nativeToken,otherWebToken,webSession,nativeSession,otherWebSession,
+      randomBytes(32),randomBytes(32),randomBytes(32),randomBytes(32),randomBytes(32)]);
+
+  const sessions=await asApiSession<{id:string}>(ids.workspace,webSession,
+    "SELECT id FROM uptech.sessions WHERE id=ANY($1::uuid[]) ORDER BY id",
+    [[webSession,nativeSession,otherWebSession]]);
+  const tokens=await asApiSession<{id:string}>(ids.workspace,webSession,
+    "SELECT id FROM uptech.session_tokens WHERE id=ANY($1::uuid[]) ORDER BY id",
+    [[webToken,nativeToken,otherWebToken]]);
+  assert.deepEqual(sessions.map(({id})=>id),[webSession]);
+  assert.deepEqual(tokens.map(({id})=>id),[webToken]);
+
+  const nativeContextSessions=await asApiSession<{id:string}>(ids.workspace,nativeSession,
+    "SELECT id FROM uptech.sessions WHERE id=$1",[nativeSession]);
+  const nativeContextTokens=await asApiSession<{id:string}>(ids.workspace,nativeSession,
+    "SELECT id FROM uptech.session_tokens WHERE id=$1",[nativeToken]);
+  assert.deepEqual(nativeContextSessions,[]);
+  assert.deepEqual(nativeContextTokens,[]);
+
+  const nativeUpdate=await asApiSession<{id:string}>(ids.workspace,webSession, `UPDATE uptech.sessions
+    SET status='REVOKED',revoked_at=transaction_timestamp(),revocation_reason='USER_LOGOUT',
+      security_version=security_version+1 WHERE workspace_id=$1 AND id=$2 RETURNING id`,
+    [ids.workspace,nativeSession]);
+  const otherWebUpdate=await asApiSession<{id:string}>(ids.workspace,webSession, `UPDATE uptech.sessions
+    SET status='REVOKED',revoked_at=transaction_timestamp(),revocation_reason='USER_LOGOUT',
+      security_version=security_version+1 WHERE workspace_id=$1 AND id=$2 RETURNING id`,
+    [ids.workspace,otherWebSession]);
+  const inaccessibleTokenUpdate=await asApiSession<{id:string}>(ids.workspace,webSession,
+    `UPDATE uptech.session_tokens SET token_status='REVOKED',revoked_at=transaction_timestamp()
+      WHERE workspace_id=$1 AND id=ANY($2::uuid[]) RETURNING id`,
+    [ids.workspace,[nativeToken,otherWebToken]]);
+  const nativeContextUpdate=await asApiSession<{id:string}>(ids.workspace,nativeSession,
+    `UPDATE uptech.session_tokens SET token_status='REVOKED',revoked_at=transaction_timestamp()
+      WHERE workspace_id=$1 AND id=$2 RETURNING id`,[ids.workspace,nativeToken]);
+  assert.deepEqual(nativeUpdate,[]);
+  assert.deepEqual(otherWebUpdate,[]);
+  assert.deepEqual(inaccessibleTokenUpdate,[]);
+  assert.deepEqual(nativeContextUpdate,[]);
+
+  const revokedWebToken=await asApiSession<{id:string}>(ids.workspace,webSession, `UPDATE uptech.session_tokens
+    SET token_status='REVOKED',revoked_at=transaction_timestamp()
+    WHERE workspace_id=$1 AND id=$2 RETURNING id`,[ids.workspace,webToken]);
+  const revokedWebSession=await asApiSession<{id:string}>(ids.workspace,webSession, `UPDATE uptech.sessions
+    SET status='REVOKED',revoked_at=transaction_timestamp(),revocation_reason='USER_LOGOUT',
+      security_version=security_version+1 WHERE workspace_id=$1 AND id=$2 RETURNING id`,
+    [ids.workspace,webSession]);
+  assert.deepEqual(revokedWebToken,[{id:webToken}]);
+  assert.deepEqual(revokedWebSession,[{id:webSession}]);
+
+  await assert.rejects(asApiSession(ids.workspace,webSession, `INSERT INTO uptech.sessions(
+    workspace_id,id,identity_id,user_id,membership_id,client_type,status,user_security_version,
+    identity_security_version,workspace_security_version,membership_authz_version,device_binding_hash,
+    created_at,last_seen_at,idle_expires_at,absolute_expires_at)
+    VALUES($1,$2,$3,$4,$5,'NATIVE','ACTIVE',1,1,1,1,$6,clock_timestamp(),clock_timestamp(),
+      clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day')`,
+    [ids.workspace,randomUUID(),ids.identity,ids.user,ids.membership,randomBytes(32)]),
+  (error:unknown)=>(error as {code?:string}).code==="42501");
 });
 
 test("handoff is single-winner and wrong verifier, installation, or expiry issues no session", async () => {
