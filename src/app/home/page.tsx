@@ -3,15 +3,9 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import Logo from "@/components/Logo";
-import { loadWebSessionRuntimeConfig } from "@/server/auth/google/config";
-import {
-  authenticateWebSession,
-  WebSessionAuthenticationError,
-} from "@/server/auth/web-session";
-import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import { requestIdFromHeaders } from "@/server/http/problem";
-import { classifyRequestCredential } from "@/server/http/request-security";
 import { logAuthOperation } from "@/server/auth/operational-log";
+import { resolveWebRouteAuthority } from "@/server/auth/web-route-authority";
 
 import { LogoutButton } from "./LogoutButton";
 
@@ -21,22 +15,11 @@ export const dynamic = "force-dynamic";
 export default async function AuthenticatedHomePage() {
   const requestHeaders = await headers();
   const operationRequestId = requestIdFromHeaders(requestHeaders);
-  const credential = classifyRequestCredential(requestHeaders);
-  if (!credential.ok || credential.kind !== "cookie") {
-    redirect("/login");
-  }
-  try {
-    const config = loadWebSessionRuntimeConfig();
-    await authenticateWebSession(
-      requestHeaders,
-      config.sessionPepper,
-      getRuntimeDatabasePool(config.databaseUrl),
-    );
-  } catch (error) {
-    if (error instanceof WebSessionAuthenticationError) {
-      redirect("/login?error=session_expired");
-    }
-    throw error;
+  const authority = await resolveWebRouteAuthority(requestHeaders, "HOME");
+  if (authority === "ADMIN") redirect("/admin");
+  if (authority === "LOGIN") redirect("/login?error=session_expired");
+  if (authority !== "ALLOW") {
+    throw new Error("Unexpected home route authority");
   }
 
   logAuthOperation({

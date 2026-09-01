@@ -17,6 +17,7 @@
     "test:postgres": "node --experimental-strip-types --test test/integration/phase1-postgres.test.ts",
     "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts",
     "test:postgres:a3": "node --experimental-strip-types --test test/integration/mobile-auth-a3-postgres.test.ts",
+    "test:postgres:enterprise": "node --experimental-strip-types --test test/integration/enterprise-login-postgres.test.ts",
     "test:deploy-contract": "node --test test/production-deploy-contract.test.mjs test/mobile-google-registry-deploy-contract.test.mjs test/safe-google-access-states-deploy-contract.test.mjs"
   },
   "dependencies": {

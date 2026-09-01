@@ -103,6 +103,34 @@ test("allows only the explicit public asset surface", () => {
   }
 });
 
+test("allows only the exact existing admin routes through to the admin layout guard", () => {
+  for (const pathname of [
+    "/admin",
+    "/admin/users",
+    "/admin/billing",
+    "/admin/connectors",
+    "/admin/permissions",
+    "/admin/audit-logs",
+    "/admin/settings",
+  ]) {
+    assert.equal(classifyUnconfiguredRoute(pathname), "allow-protected", pathname);
+  }
+
+  for (const pathname of [
+    "/admin/",
+    "/admin/users/",
+    "/admin/users/extra",
+    "/admin?bypass=true",
+    "/admin/platform",
+  ]) {
+    assert.equal(
+      classifyUnconfiguredRoute(pathname),
+      "deny-unconfigured",
+      pathname,
+    );
+  }
+});
+
 test("allows exact mobile association documents for GET and HEAD only", () => {
   for (const pathname of [
     "/.well-known/assetlinks.json",
@@ -128,8 +156,6 @@ test("allows exact mobile association documents for GET and HEAD only", () => {
 
 test("denies every current workspace and admin route", () => {
   for (const pathname of [
-    "/admin",
-    "/admin/users",
     "/chat",
     "/dashboard",
     "/documents",
@@ -138,6 +164,7 @@ test("denies every current workspace and admin route", () => {
     "/notifications",
     "/profile",
     "/search",
+    "/rag",
     "/utility",
   ]) {
     assert.equal(

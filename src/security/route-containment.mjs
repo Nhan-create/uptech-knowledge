@@ -25,7 +25,16 @@ const AUTH_INGRESS_PATHS = new Set([
   "/api/v1/auth/mobile/logout",
 ]);
 
-const PROTECTED_APPLICATION_PATHS = new Set(["/home"]);
+const PROTECTED_APPLICATION_PATHS = new Set([
+  "/home",
+  "/admin",
+  "/admin/users",
+  "/admin/billing",
+  "/admin/connectors",
+  "/admin/permissions",
+  "/admin/audit-logs",
+  "/admin/settings",
+]);
 
 const MOBILE_ASSOCIATION_PATHS = new Set([
   "/.well-known/assetlinks.json",
