@@ -29,6 +29,7 @@ const PROTECTED_APPLICATION_PATHS = new Set(["/home"]);
 
 const MOBILE_ASSOCIATION_PATHS = new Set([
   "/.well-known/assetlinks.json",
+  "/.well-known/apple-app-site-association",
   "/apple-app-site-association",
 ]);
 

@@ -1,5 +1,3 @@
-import { domainToASCII } from "node:url";
-
 export const GOOGLE_ISSUER = "https://accounts.google.com";
 export const GOOGLE_LOGIN_SCOPE = "openid email profile";
 export const GOOGLE_LOGIN_PURPOSE = "WEB_LOGIN";
@@ -15,7 +13,6 @@ export interface GoogleLoginRuntimeConfig {
   readonly redirectUri: string;
   readonly clientId: string;
   readonly clientSecret: string;
-  readonly workspaceDomainHint: string | null;
   readonly environmentId: string;
   readonly databaseUrl: string;
   readonly rateHmacKey: Uint8Array;
@@ -46,19 +43,6 @@ function requireValue(
   throw new GoogleLoginConfigurationError(
     `Required deployment configuration is missing: ${names.join(" or ")}`,
   );
-}
-
-function optionalValue(
-  environment: Environment,
-  ...names: readonly string[]
-): string | undefined {
-  for (const name of names) {
-    const value = environment[name]?.trim();
-    if (value !== undefined && value.length > 0) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 function requireOrigin(value: string, production: boolean): string {
@@ -155,27 +139,6 @@ function requireKeyVersion(value: string): string {
   return value;
 }
 
-function normalizeDomainHint(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  const ascii = domainToASCII(value.toLowerCase());
-  if (
-    ascii.length < 1 ||
-    ascii.length > 253 ||
-    ascii.startsWith(".") ||
-    ascii.endsWith(".") ||
-    ascii.split(".").some((label) =>
-      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label),
-    )
-  ) {
-    throw new GoogleLoginConfigurationError(
-      "Google Workspace domain hint is invalid",
-    );
-  }
-  return ascii;
-}
-
 export function loadGoogleLoginRuntimeConfig(
   environment: Environment = process.env,
 ): GoogleLoginRuntimeConfig {
@@ -197,9 +160,6 @@ export function loadGoogleLoginRuntimeConfig(
       "UPTECH_GOOGLE_LOGIN_WEB_CLIENT_ID",
     ),
     clientSecret: requireValue(environment, "GOOGLE_CLIENT_SECRET"),
-    workspaceDomainHint: normalizeDomainHint(
-      optionalValue(environment, "GOOGLE_WORKSPACE_DOMAIN"),
-    ),
     environmentId: requireEnvironmentId(
       requireValue(environment, "UPTECH_ENVIRONMENT_ID", "VERCEL_ENV"),
     ),

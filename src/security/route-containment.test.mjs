@@ -106,6 +106,7 @@ test("allows only the explicit public asset surface", () => {
 test("allows exact mobile association documents for GET and HEAD only", () => {
   for (const pathname of [
     "/.well-known/assetlinks.json",
+    "/.well-known/apple-app-site-association",
     "/apple-app-site-association",
   ]) {
     assert.equal(classifyUnconfiguredRoute(pathname, "GET"), "allow-public");
@@ -116,6 +117,10 @@ test("allows exact mobile association documents for GET and HEAD only", () => {
     );
     assert.equal(
       classifyUnconfiguredRoute(`${pathname}/`, "GET"),
+      "deny-unconfigured",
+    );
+    assert.equal(
+      classifyUnconfiguredRoute(`${pathname}/extra`, "GET"),
       "deny-unconfigured",
     );
   }

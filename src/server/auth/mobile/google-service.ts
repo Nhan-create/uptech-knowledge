@@ -13,6 +13,8 @@ import {
 } from "../google/crypto.ts";
 import {
   googleOidcClient,
+  GoogleOidcProviderRejectedError,
+  GoogleOidcProviderUnavailableError,
   type GoogleOidcClient,
 } from "../google/oidc.ts";
 import type { VerifiedGoogleClaims } from "../google/claims.ts";
@@ -28,9 +30,12 @@ export type MobileAuthUiCategory =
   | "UNKNOWN_WORKSPACE"
   | "USER_NOT_PROVISIONED"
   | "USER_SUSPENDED"
+  | "WORKSPACE_SUSPENDED"
   | "SESSION_REVOKED"
   | "SESSION_EXPIRED"
   | "POLICY_OR_DEVICE_BLOCKED"
+  | "GOOGLE_CANCELLED"
+  | "PROVIDER_UNAVAILABLE"
   | "OFFLINE"
   | "AUTH_ERROR";
 
@@ -75,7 +80,15 @@ export interface MobileGoogleRepository {
     readonly claims: VerifiedGoogleClaims; readonly handoffHash: Uint8Array;
     readonly requestId: string }): Promise<
       | { readonly outcome: "NORMAL"; readonly appReturnUri: string }
-      | { readonly outcome: "DENIED"; readonly category: MobileAuthUiCategory }>;
+      | { readonly outcome: "DENIAL_HANDOFF"; readonly appReturnUri: string;
+          readonly category: MobileAuthUiCategory }
+      | { readonly outcome: "DENIED" }>;
+  completeDenial(input: { readonly completionHandleHash: Uint8Array;
+    readonly handoffHash: Uint8Array; readonly rejectionClass: string;
+    readonly category: MobileAuthUiCategory; readonly requestId: string }): Promise<
+      | { readonly outcome: "DENIAL_HANDOFF"; readonly appReturnUri: string;
+          readonly category: MobileAuthUiCategory }
+      | { readonly outcome: "DENIED" }>;
   reject(input: { readonly platform: MobilePlatform | null; readonly networkHmac: Uint8Array;
     readonly completionHandleHash: Uint8Array | null;
     readonly rejectionClass: string; readonly requestId: string }): Promise<"RECORDED" | "RATE_LIMITED">;
@@ -87,7 +100,6 @@ function oidcConfig(config: MobileAuthConfig): GoogleLoginRuntimeConfig {
     redirectUri: config.callbackUri,
     clientId: config.clientId,
     clientSecret: config.clientSecret,
-    workspaceDomainHint: null,
     environmentId: config.environmentId,
     databaseUrl: config.databaseUrl,
     rateHmacKey: config.rateHmacKey,
@@ -204,18 +216,32 @@ export function createMobileGoogleService(dependencies: {
       const consumed = await repository.consume({ networkHmac, stateHash: hashProof(state),
         completionHandleHash, requestId: input.requestId });
       if (consumed.outcome !== "RESERVED") return consumed;
-      const rejectBound = async (
+      const completeBoundDenial = async (
         rejectionClass: string,
-        category?: MobileAuthUiCategory,
+        category: MobileAuthUiCategory = "AUTH_ERROR",
       ) => {
-        await repository.reject({ platform: consumed.platform, networkHmac,
-          completionHandleHash, rejectionClass, requestId: input.requestId });
-        return category === undefined
-          ? { outcome: "DENIED" as const }
-          : { outcome: "DENIED" as const, category };
+        const handoffCode = issueOpaqueProof();
+        const completed = await repository.completeDenial({
+          completionHandleHash,
+          handoffHash: hashProof(handoffCode),
+          rejectionClass,
+          category,
+          requestId: input.requestId,
+        });
+        if (
+          completed.outcome !== "DENIAL_HANDOFF" ||
+          completed.appReturnUri !== config.appReturnUri
+        ) {
+          return { outcome: "DENIED" as const };
+        }
+        return {
+          outcome: "HANDOFF" as const,
+          handoffCode,
+          appReturnUri: completed.appReturnUri,
+        };
       };
       if (consumed.pkceKeyVersion !== config.pkceKeyVersion) {
-        return rejectBound("PROTOCOL_INVALID");
+        return completeBoundDenial("PROTOCOL_INVALID");
       }
       let canonicalAad: Uint8Array;
       try {
@@ -226,10 +252,10 @@ export function createMobileGoogleService(dependencies: {
           stateHash: hashProof(state),
         });
       } catch {
-        return rejectBound("PROTOCOL_INVALID");
+        return completeBoundDenial("PROTOCOL_INVALID");
       }
       if (!Buffer.from(canonicalAad).equals(Buffer.from(consumed.associatedData))) {
-        return rejectBound("PROTOCOL_INVALID");
+        return completeBoundDenial("PROTOCOL_INVALID");
       }
       let material: { readonly pkceVerifier: string; readonly nonce: string };
       try {
@@ -239,10 +265,10 @@ export function createMobileGoogleService(dependencies: {
           canonicalAad,
         );
       } catch {
-        return rejectBound("PROTOCOL_INVALID");
+        return completeBoundDenial("PROTOCOL_INVALID");
       }
       if (!Buffer.from(hashProof(material.nonce)).equals(Buffer.from(consumed.expectedNonceHash))) {
-        return rejectBound("PROTOCOL_INVALID");
+        return completeBoundDenial("PROTOCOL_INVALID");
       }
       let claims: VerifiedGoogleClaims;
       try {
@@ -252,21 +278,30 @@ export function createMobileGoogleService(dependencies: {
         claims = verifyGoogleWorkspaceClaims({ claims: idToken,
           expectedClientId: config.clientId, expectedNonce: material.nonce });
       } catch (error) {
-        return rejectBound(
-          "CLAIMS_INVALID",
+        const rejectionClass = error instanceof GoogleOidcProviderUnavailableError
+          ? "PROVIDER_UNAVAILABLE"
+          : error instanceof GoogleOidcProviderRejectedError
+            ? "PROVIDER_REJECTED"
+            : "CLAIMS_INVALID";
+        return completeBoundDenial(
+          rejectionClass,
           error instanceof GoogleWorkspaceAccountRequiredError
             ? "PERSONAL_GOOGLE_ACCOUNT"
-            : undefined,
+            : error instanceof GoogleOidcProviderRejectedError
+              ? "GOOGLE_CANCELLED"
+              : error instanceof GoogleOidcProviderUnavailableError
+                ? "PROVIDER_UNAVAILABLE"
+                : "AUTH_ERROR",
         );
       }
       const handoffCode = issueOpaqueProof();
       const completed = await repository.complete({ completionHandleHash, claims,
         handoffHash: hashProof(handoffCode), requestId: input.requestId });
-      if (completed.outcome !== "NORMAL") {
-        return rejectBound("IDENTITY_INELIGIBLE", completed.category);
-      }
-      if (completed.appReturnUri !== config.appReturnUri) {
-        return rejectBound("PROTOCOL_INVALID");
+      if (
+        completed.outcome === "DENIED" ||
+        completed.appReturnUri !== config.appReturnUri
+      ) {
+        return { outcome: "DENIED" as const };
       }
       return { outcome: "HANDOFF" as const, handoffCode,
         appReturnUri: completed.appReturnUri };

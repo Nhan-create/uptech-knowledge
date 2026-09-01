@@ -1,15 +1,12 @@
 import { trustedVercelClientIp } from "@/server/auth/google/crypto";
+import { MOBILE_APP_RETURN_URI } from "@/server/auth/mobile/config";
 import { createMobileAuthRuntime } from "@/server/auth/mobile/runtime";
-import { createMobileRouteHandlers } from "@/server/auth/mobile/route-handlers";
+import { createMobileGoogleCallbackGet } from "@/server/auth/mobile/route-handlers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export async function GET(request: Request) {
-  const context = createMobileAuthRuntime();
-  return createMobileRouteHandlers({
-    appReturnUri: context.config.appReturnUri,
-    clientIp: trustedVercelClientIp,
-    googleService: context.googleService,
-    sessionService: context.sessionService,
-  }).googleCallback(request);
-}
+export const GET = createMobileGoogleCallbackGet({
+  appReturnUri: MOBILE_APP_RETURN_URI,
+  createRuntime: createMobileAuthRuntime,
+  clientIp: trustedVercelClientIp,
+});

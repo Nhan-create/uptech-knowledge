@@ -9,6 +9,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import { clientNetworkHmac } from "../google/crypto.ts";
+import type { MobileAuthUiCategory } from "./google-service.ts";
 
 export class MobileSessionServiceError extends Error {
   override readonly name = "MobileSessionServiceError";
@@ -56,15 +57,16 @@ export interface MobileSessionRepository {
     readonly refreshTokenHash: Uint8Array;
     readonly requestId: string;
   }): Promise<
-    | {
+      | {
         readonly outcome: "ISSUED";
         readonly sessionId: string;
         readonly accessExpiresAt: Date;
         readonly refreshExpiresAt: Date;
         readonly activeWorkspaceId: string;
-        readonly memberships: readonly MobileMembershipSummary[];
-      }
-    | { readonly outcome: "RATE_LIMITED" | "DENIED" }
+          readonly memberships: readonly MobileMembershipSummary[];
+        }
+      | { readonly outcome: "ACCESS_DENIED"; readonly category: MobileAuthUiCategory }
+      | { readonly outcome: "RATE_LIMITED" | "DENIED" }
   >;
   refresh(input: {
     readonly predecessorRefreshHash: Uint8Array;

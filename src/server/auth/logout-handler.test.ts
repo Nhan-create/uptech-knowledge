@@ -8,7 +8,7 @@ import {
 } from "./web-session.ts";
 import { WEB_SESSION_COOKIE_NAME } from "../sessions/session-security.ts";
 
-const APP_ORIGIN = "https://knowledge.example.com";
+const APP_ORIGIN = "https://tenant-a.example";
 const SESSION = Object.freeze({ marker: "authenticated-session" });
 
 function handlerWith(input: {
@@ -22,7 +22,7 @@ function handlerWith(input: {
       input.calls.push("config");
       return {
         appOrigin: APP_ORIGIN,
-        databaseUrl: "postgresql://runtime.invalid/uptech",
+        databaseUrl: "postgresql://unknown.example/uptech",
         sessionPepper: new Uint8Array(32),
       };
     },

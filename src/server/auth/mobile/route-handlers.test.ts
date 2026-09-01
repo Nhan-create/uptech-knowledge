@@ -3,13 +3,15 @@ import { test } from "node:test";
 
 import { MobileSessionServiceError } from "./session-service.ts";
 import {
+  createMobileGoogleCallbackGet,
+  createMobileHandoffExchangePost,
   createMobileGoogleTransactionPost,
   createMobileRouteHandlers,
 } from "./route-handlers.ts";
 
 const requestId = "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21";
 const proof = (byte: number) => Buffer.alloc(32, byte).toString("base64url");
-const jsonRequest = (path: string, body: unknown) => new Request(`https://api.example.test${path}`, {
+const jsonRequest = (path: string, body: unknown) => new Request(`https://tenant-a.example${path}`, {
   method: "POST",
   headers: { "content-type": "application/json", "x-uptech-request-id": requestId },
   body: JSON.stringify(body),
@@ -45,7 +47,7 @@ test("transaction route converts runtime initialization failure to a redacted no
       return "203.0.113.1";
     },
   });
-  const response = await post(new Request("https://api.example.test/transactions", {
+  const response = await post(new Request("https://tenant-a.example/transactions", {
     method: "POST",
     headers: { "x-uptech-request-id": requestId },
   }));
@@ -63,6 +65,55 @@ test("transaction route converts runtime initialization failure to a redacted no
     detail: "A required provider is unavailable.",
     request_id: requestId,
   });
+  assert.equal(body.includes("sensitive-runtime-value"), false);
+  assert.equal(body.includes("stack"), false);
+});
+
+test("callback runtime failure returns without an unauthenticated denial category", async () => {
+  const get = createMobileGoogleCallbackGet({
+    appReturnUri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+    createRuntime() {
+      throw new Error("client-secret=sensitive-runtime-value");
+    },
+    clientIp() {
+      return "203.0.113.1";
+    },
+  });
+  const response = await get(new Request(
+    `https://uptech-knowledge-sigma.vercel.app/api/v1/auth/mobile/google/callback?code=secret&state=${proof(9)}`,
+    { headers: { "x-uptech-request-id": requestId } },
+  ));
+  const location = new URL(response.headers.get("location") ?? "");
+
+  assert.equal(response.status, 303);
+  assert.equal(location.pathname, "/auth/mobile/callback");
+  assert.deepEqual([...location.searchParams.keys()], ["request_id"]);
+  assert.equal(location.searchParams.get("request_id"), requestId);
+  assert.equal(location.href.includes("secret"), false);
+  assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
+});
+
+test("handoff exchange runtime failure is a redacted no-store 503 with request ID", async () => {
+  const post = createMobileHandoffExchangePost({
+    createRuntime() {
+      throw new Error("database-credential=sensitive-runtime-value");
+    },
+    clientIp() {
+      return "203.0.113.1";
+    },
+  });
+  const response = await post(new Request("https://tenant-a.example/handoffs/exchange", {
+    method: "POST",
+    headers: { "x-uptech-request-id": requestId },
+  }));
+  const body = await response.text();
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("content-type"), "application/problem+json");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-request-id"), requestId);
+  assert.equal(response.headers.get("x-uptech-mobile-handoff-outcome"), null);
+  assert.equal(JSON.parse(body).code, "PROVIDER_UNAVAILABLE");
   assert.equal(body.includes("sensitive-runtime-value"), false);
   assert.equal(body.includes("stack"), false);
 });
@@ -108,32 +159,98 @@ test("handoff denial is 401 and never serializes candidate credentials", async (
     handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
   }));
   assert.equal(response.status, 401);
+  assert.equal(response.headers.get("x-uptech-mobile-handoff-outcome"), null);
   const text = await response.text();
   assert.equal(text.includes("access_token"), false);
   assert.equal(text.includes("refresh_token"), false);
   assert.equal(JSON.parse(text).code, "UNAUTHENTICATED");
 });
 
-test("masked callback redirect contains only its safe category and required hardening headers", async () => {
+test("authenticated denial handoff returns its canonical safe problem and request ID", async () => {
+  const response = await handlers({ sessionService: {
+    async exchangeHandoff() {
+      return { outcome: "ACCESS_DENIED", category: "UNKNOWN_WORKSPACE" } as const;
+    },
+  } }).handoffExchange(jsonRequest("/handoffs/exchange", {
+    handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+  }));
+
+  assert.equal(response.status, 403);
+  assert.equal(
+    response.headers.get("x-uptech-mobile-handoff-outcome"),
+    "ACCESS_DENIED",
+  );
+  assert.deepEqual(await response.json(), {
+    type: "urn:uptech:problem:unknown_workspace",
+    title: "Unknown workspace",
+    status: 403,
+    code: "UNKNOWN_WORKSPACE",
+    detail: "The organization is not registered.",
+    request_id: requestId,
+  });
+});
+
+test("consumed provider-unavailable denial is marked but an ordinary 503 is not", async () => {
+  const authenticated = await handlers({ sessionService: {
+    async exchangeHandoff() {
+      return { outcome: "ACCESS_DENIED", category: "PROVIDER_UNAVAILABLE" } as const;
+    },
+  } }).handoffExchange(jsonRequest("/handoffs/exchange", {
+    handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+  }));
+  const ordinary = await handlers({ sessionService: {
+    async exchangeHandoff() {
+      throw new Error("transient runtime failure");
+    },
+  } }).handoffExchange(jsonRequest("/handoffs/exchange", {
+    handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+  }));
+
+  assert.equal(authenticated.status, 503);
+  assert.equal(
+    authenticated.headers.get("x-uptech-mobile-handoff-outcome"),
+    "ACCESS_DENIED",
+  );
+  assert.equal((await authenticated.json()).code, "PROVIDER_UNAVAILABLE");
+  assert.equal(ordinary.status, 503);
+  assert.equal(ordinary.headers.get("x-uptech-mobile-handoff-outcome"), null);
+  assert.equal((await ordinary.json()).code, "PROVIDER_UNAVAILABLE");
+});
+
+test("unbound callback denial never puts an authoritative category in the App Link", async () => {
   const response = await handlers({ googleService: {
     async callback() { return { outcome: "DENIED", category: "UNKNOWN_WORKSPACE" } as const; },
-  } }).googleCallback(new Request(`https://api.example.test/callback?code=secret&state=${proof(4)}`, {
+  } }).googleCallback(new Request(`https://tenant-a.example/callback?code=secret&state=${proof(4)}`, {
     headers: { "x-uptech-request-id": requestId },
   }));
   const location = new URL(response.headers.get("location") ?? "");
   assert.equal(response.status, 303);
-  assert.deepEqual([...location.searchParams.keys()].sort(), ["error", "request_id"]);
-  assert.equal(location.searchParams.get("error"), "UNKNOWN_WORKSPACE");
+  assert.deepEqual([...location.searchParams.keys()], ["request_id"]);
   assert.equal(location.href.includes("secret"), false);
   assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
   assert.equal(response.headers.get("pragma"), "no-cache");
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
 });
 
+test("callback App Link exposes only a one-time handoff and safe request ID", async () => {
+  const handoff = proof(7);
+  const response = await handlers({ googleService: {
+    async callback() { return { outcome: "HANDOFF", handoffCode: handoff } as const; },
+  } }).googleCallback(new Request(`https://tenant-a.example/callback?code=secret&state=${proof(4)}`, {
+    headers: { "x-uptech-request-id": requestId },
+  }));
+  const location = new URL(response.headers.get("location") ?? "");
+
+  assert.deepEqual([...location.searchParams.keys()].sort(), ["handoff", "request_id"]);
+  assert.equal(location.searchParams.get("handoff"), handoff);
+  assert.equal(location.searchParams.get("request_id"), requestId);
+  assert.equal(location.href.includes("secret"), false);
+});
+
 test("workspace denial returns the fixed top-level session-revoked problem document", async () => {
   const response = await handlers({ sessionService: {
     async listWorkspaces() { throw new MobileSessionServiceError("denied", "SESSION_REVOKED"); },
-  } }).workspaces(new Request("https://api.example.test/workspaces", {
+  } }).workspaces(new Request("https://tenant-a.example/workspaces", {
     headers: { authorization: `Bearer ${proof(5)}`, "x-uptech-request-id": requestId },
   }));
   assert.equal(response.status, 401);
@@ -146,7 +263,7 @@ test("workspace denial returns the fixed top-level session-revoked problem docum
 test("workspace access expiry returns the refreshable fixed problem document", async () => {
   const response = await handlers({ sessionService: {
     async listWorkspaces() { throw new MobileSessionServiceError("expired", "ACCESS_TOKEN_EXPIRED"); },
-  } }).workspaces(new Request("https://api.example.test/workspaces", {
+  } }).workspaces(new Request("https://tenant-a.example/workspaces", {
     headers: { authorization: `Bearer ${proof(5)}`, "x-uptech-request-id": requestId },
   }));
   assert.equal(response.status, 401);
@@ -160,7 +277,7 @@ test("workspace switch rejects a malformed target UUID as HTTP 400 before servic
   let calls = 0;
   const response = await handlers({ sessionService: {
     async switchWorkspace() { calls += 1; return { outcome: "ROTATED" } as never; },
-  } }).switchWorkspace(new Request("https://api.example.test/switch-workspace", {
+  } }).switchWorkspace(new Request("https://tenant-a.example/switch-workspace", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${proof(5)}`,
       "idempotency-key": "switch-1", "x-uptech-request-id": requestId },

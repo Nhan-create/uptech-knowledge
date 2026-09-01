@@ -19,13 +19,11 @@ test("mobile callback success redirects with only handoff and request ID", () =>
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
 });
 
-test("mobile callback denial redirects with only a fixed safe category and request ID", () => {
+test("unbound mobile callback denial carries no client-authoritative category", () => {
   const response = mobileCallbackRedirect(appReturn, requestId, {
     outcome: "DENIED",
-    category: "AUTH_ERROR",
   });
   const location = new URL(response.headers.get("location") ?? "");
-  assert.deepEqual([...location.searchParams.keys()].sort(), ["error", "request_id"]);
-  assert.equal(location.searchParams.get("error"), "AUTH_ERROR");
+  assert.deepEqual([...location.searchParams.keys()], ["request_id"]);
   assert.equal(location.href.includes("token"), false);
 });

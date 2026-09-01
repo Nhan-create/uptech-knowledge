@@ -21,8 +21,10 @@ function GoogleMark() {
 
 export function GoogleLoginSubmitButton({
   label = "Tiếp tục với Google Workspace",
+  loadingLabel = "Đang chuyển đến Google…",
 }: {
   readonly label?: string;
+  readonly loadingLabel?: string;
 }) {
   const submitStartedRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -62,7 +64,7 @@ export function GoogleLoginSubmitButton({
         )}
       </span>
       <span className="min-w-0">
-        {submitting ? "Đang chuyển đến Google…" : label}
+        {submitting ? loadingLabel : label}
       </span>
     </button>
   );

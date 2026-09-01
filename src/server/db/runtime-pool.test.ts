@@ -5,7 +5,7 @@ import { DatabaseConfigurationError } from "./core.ts";
 import { runtimePoolConfig } from "./runtime-pool.ts";
 
 test("runtime PostgreSQL connections pin the exact API capability role", () => {
-  const url = "postgresql://deployment_login@db.example/uptech";
+  const url = "postgresql://deployment_login@unknown.example/uptech";
   const config = runtimePoolConfig(url);
 
   assert.equal(config.connectionString, url);
@@ -19,9 +19,9 @@ test("runtime PostgreSQL configuration rejects incomplete connection targets", (
   for (const url of [
     "",
     "not-a-url",
-    "https://db.example/uptech",
+    "https://unknown.example/uptech",
     "postgresql:///uptech",
-    "postgresql://db.example",
+    "postgresql://unknown.example",
   ]) {
     assert.throws(() => runtimePoolConfig(url), DatabaseConfigurationError);
   }

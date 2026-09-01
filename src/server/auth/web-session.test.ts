@@ -21,7 +21,7 @@ import {
 
 const SESSION_PEPPER = new Uint8Array(32).fill(0x6a);
 const REQUEST_ID = "00000000-0000-4000-8000-000000000021";
-const APP_ORIGIN = "https://knowledge.uptech.example";
+const APP_ORIGIN = "https://tenant-a.example";
 
 function queryResult<T extends QueryResultRow>(rows: T[], rowCount = rows.length) {
   return {
@@ -193,7 +193,9 @@ test("rejects missing, bearer, conflicting, onboarding, native, and CSRF-mismatc
           queryResult([authenticatedRow(Buffer.alloc(32, 0xff))]),
       } as never,
     ),
-    WebSessionIntegrityError,
+    (error: unknown) =>
+      error instanceof WebSessionIntegrityError &&
+      error instanceof WebSessionAuthenticationError,
   );
 });
 
@@ -214,7 +216,7 @@ test("requires same-origin CSRF proof for cookie-authenticated mutations", async
 
   for (const headers of [
     {
-      origin: "https://attacker.example",
+      origin: "https://tenant-b.example",
       "sec-fetch-site": "cross-site",
       "x-csrf-token": csrfCredential,
     },

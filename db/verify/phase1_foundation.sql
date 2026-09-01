@@ -429,9 +429,9 @@ VALUES
     'CaseSensitiveSubjectOne',
     'ACTIVE',
     1,
-    'owner-one@example.test',
+      'owner-one@tenant-a.example',
     true,
-    'example.test',
+    'tenant-a.example',
     transaction_timestamp()
   ),
   (
@@ -442,9 +442,9 @@ VALUES
     'CaseSensitiveSubjectTwo',
     'ACTIVE',
     1,
-    'owner-two@other.test',
+    'owner-two@tenant-b.example',
     true,
-    'other.test',
+    'tenant-b.example',
     transaction_timestamp()
   );
 

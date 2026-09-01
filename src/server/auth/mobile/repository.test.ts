@@ -37,6 +37,78 @@ test("mobile repository maps a fixed exchange result without accepting authority
   assert.equal(valuesSeen[0].some((value) => value === "OWNER"), false);
 });
 
+test("mobile repository preserves only an authenticated one-time denial category", async () => {
+  const repository = createMobileSessionRepository({
+    async query() {
+      return {
+        rows: [{
+          outcome: "ACCESS_DENIED",
+          session_id: null,
+          access_expires_at: null,
+          refresh_expires_at: null,
+          active_workspace_id: null,
+          memberships: null,
+          denial_category: "UNKNOWN_WORKSPACE",
+        }],
+      } as never;
+    },
+  } as never);
+
+  assert.deepEqual(await repository.exchangeHandoff({
+    networkHmac: bytes(0), handoffHash: bytes(1), appExchangeChallenge: bytes(2),
+    installationBinding: bytes(3), accessTokenHash: bytes(4), refreshTokenHash: bytes(5),
+    requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  }), { outcome: "ACCESS_DENIED", category: "UNKNOWN_WORKSPACE" });
+});
+
+test("mobile repository rejects denial output that carries session authority", async () => {
+  const repository = createMobileSessionRepository({
+    async query() {
+      return {
+        rows: [{
+          outcome: "ACCESS_DENIED",
+          session_id: "7df575e1-c7c4-4774-b5d6-c69ef1bbcc40",
+          access_expires_at: null,
+          refresh_expires_at: null,
+          active_workspace_id: null,
+          memberships: null,
+          denial_category: "UNKNOWN_WORKSPACE",
+        }],
+      } as never;
+    },
+  } as never);
+
+  await assert.rejects(repository.exchangeHandoff({
+    networkHmac: bytes(0), handoffHash: bytes(1), appExchangeChallenge: bytes(2),
+    installationBinding: bytes(3), accessTokenHash: bytes(4), refreshTokenHash: bytes(5),
+    requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  }), /Denial handoff returned session authority/);
+});
+
+test("mobile repository rejects an arbitrary authenticated denial category", async () => {
+  const repository = createMobileSessionRepository({
+    async query() {
+      return {
+        rows: [{
+          outcome: "ACCESS_DENIED",
+          session_id: null,
+          access_expires_at: null,
+          refresh_expires_at: null,
+          active_workspace_id: null,
+          memberships: null,
+          denial_category: "OWNER",
+        }],
+      } as never;
+    },
+  } as never);
+
+  await assert.rejects(repository.exchangeHandoff({
+    networkHmac: bytes(0), handoffHash: bytes(1), appExchangeChallenge: bytes(2),
+    installationBinding: bytes(3), accessTokenHash: bytes(4), refreshTokenHash: bytes(5),
+    requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  }), /Invalid mobile denial category/);
+});
+
 test("mobile repository preserves only an authenticated refresh replay capsule", async () => {
   const capsule = Uint8Array.from(Buffer.alloc(115, 7));
   const repository = createMobileSessionRepository({

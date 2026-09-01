@@ -128,7 +128,7 @@ SELECT
   'GOOGLE_WEB_LOGIN_V1', environment_row.environment_name, 'WEB_LOGIN',
   'a2-verify.apps.googleusercontent.com',
   'a2-verify.apps.googleusercontent.com', 'GOOGLE_WEB_LOGIN_V1',
-  'https://a2-verify.test/api/v1/auth/google/callback',
+  'https://tenant-a.example/api/v1/auth/google/callback',
   ARRAY['openid', 'email', 'profile']::text[],
   ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
   'a2-verify-kms-v1', true
@@ -145,14 +145,14 @@ INSERT INTO uptech.workspaces (
 INSERT INTO uptech.workspace_domain_locators (
   normalized_domain, workspace_id, status, verified_at
 ) VALUES (
-  'a2-verify.test', 'a2000000-0000-0000-0000-000000000001',
+  'tenant-a.example', 'a2000000-0000-0000-0000-000000000001',
   'VERIFIED', pg_catalog.clock_timestamp()
 );
 
 SELECT uptech.create_initial_owner_bootstrap_v1(
   'a2000000-0000-0000-0000-000000000002',
   'a2000000-0000-0000-0000-000000000001',
-  'a2-verify.test', 'owner@a2-verify.test',
+  'tenant-a.example', 'owner@tenant-a.example',
   pg_catalog.clock_timestamp() + interval '1 hour',
   'a2000000-0000-0000-0000-000000000003'
 );
@@ -199,7 +199,7 @@ BEGIN
     pg_catalog.decode(pg_catalog.repeat('b7', 32), 'hex'),
     ROW(
       'https://accounts.google.com', 'A2VerifiedOwnerSubject',
-      'owner@a2-verify.test', true, 'a2-verify.test',
+      'owner@tenant-a.example', true, 'tenant-a.example',
       pg_catalog.clock_timestamp() - interval '1 second',
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1', NULL,

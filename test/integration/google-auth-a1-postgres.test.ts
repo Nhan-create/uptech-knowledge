@@ -249,7 +249,7 @@ async function seedImmutableRegistry(): Promise<void> {
          'a1-web.apps.googleusercontent.com',
          'a1-web.apps.googleusercontent.com',
          'GOOGLE_WEB_LOGIN_V1',
-         'https://a1.example.test/api/v1/auth/google/callback',
+      'https://tenant-a.example/api/v1/auth/google/callback',
          ARRAY['openid', 'email', 'profile']::text[],
          ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
          $2::uptech.google_auth_ascii_identifier_v1,
@@ -271,7 +271,7 @@ async function seedImmutableRegistry(): Promise<void> {
          'a1-android.apps.googleusercontent.com',
          'a1-web.apps.googleusercontent.com',
          'GOOGLE_WEB_LOGIN_V1',
-         'https://a1.example.test/api/v1/auth/google/native/android',
+      'https://tenant-a.example/api/v1/auth/google/native/android',
          ARRAY['openid', 'email', 'profile']::text[],
          ARRAY[
            'GOOGLE_NATIVE_ANDROID_LOGIN_V1'::uptech.google_auth_configuration_key_v1
@@ -295,7 +295,7 @@ async function seedImmutableRegistry(): Promise<void> {
          'a1-ios.apps.googleusercontent.com',
          'a1-web.apps.googleusercontent.com',
          'GOOGLE_WEB_LOGIN_V1',
-         'https://a1.example.test/api/v1/auth/google/native/ios',
+      'https://tenant-a.example/api/v1/auth/google/native/ios',
          ARRAY['openid', 'email', 'profile']::text[],
          ARRAY[
            'GOOGLE_NATIVE_IOS_LOGIN_V1'::uptech.google_auth_configuration_key_v1
@@ -490,18 +490,21 @@ async function completeWeb(input: {
   sessionTokenHash: Buffer;
   csrfTokenHash: Buffer;
   onboardingTokenHash: Buffer | null;
-  requestId?: string;
+  requestId?: string | null;
 }): Promise<{
   outcome: "NORMAL" | "ONBOARDING" | "DENIED";
+  access_state: "UNKNOWN_WORKSPACE" | "USER_NOT_PROVISIONED" | "USER_SUSPENDED" | "WORKSPACE_SUSPENDED" | null;
   allowed_operations: string[] | null;
 }> {
   assert.ok(api !== undefined);
   const result = await api.query<{
     outcome: "NORMAL" | "ONBOARDING" | "DENIED";
+    access_state: "UNKNOWN_WORKSPACE" | "USER_NOT_PROVISIONED" | "USER_SUSPENDED" | "WORKSPACE_SUSPENDED" | null;
     allowed_operations: string[] | null;
   }>(
     `SELECT
        result.outcome::text AS outcome,
+       result.access_state::text AS access_state,
        result.allowed_operations
      FROM uptech.complete_web_google_login_v1(
        $1::uptech.google_auth_hash32_v1,
@@ -536,68 +539,7 @@ async function completeWeb(input: {
       input.sessionTokenHash,
       input.csrfTokenHash,
       input.onboardingTokenHash,
-      input.requestId ?? randomUUID(),
-    ],
-  );
-  return result.rows[0];
-}
-
-async function completeNative(input: {
-  completionHash: Buffer;
-  claims: VerifiedClaims;
-  accessTokenHash: Buffer;
-  refreshTokenHash: Buffer;
-  deviceBindingHash: Buffer;
-  onboardingTokenHash: Buffer | null;
-  requestId?: string;
-}): Promise<{
-  outcome: "NORMAL" | "ONBOARDING" | "DENIED";
-  allowed_operations: string[] | null;
-}> {
-  assert.ok(api !== undefined);
-  const result = await api.query<{
-    outcome: "NORMAL" | "ONBOARDING" | "DENIED";
-    allowed_operations: string[] | null;
-  }>(
-    `SELECT
-       result.outcome::text AS outcome,
-       result.allowed_operations
-     FROM uptech.complete_native_google_login_v1(
-       $1::uptech.google_auth_hash32_v1,
-       ROW(
-         $2::uptech.google_auth_issuer_v1,
-         $3::uptech.google_provider_subject_v1,
-         $4::uptech.google_normalized_email_v1,
-         true,
-         $5::uptech.google_normalized_domain_v1,
-         $6::timestamptz,
-         $7::timestamptz,
-         $8::uptech.google_auth_configuration_key_v1,
-         $9::uptech.google_auth_configuration_key_v1,
-         $10::uptech.google_auth_hash32_v1
-       )::uptech.google_verified_claims_assertion_v1,
-       $11::uptech.google_auth_hash32_v1,
-       $12::uptech.google_auth_hash32_v1,
-       $13::uptech.google_auth_hash32_v1,
-       $14::uptech.google_auth_hash32_v1,
-       $15::uuid
-     ) AS result`,
-    [
-      input.completionHash,
-      input.claims.issuer,
-      input.claims.subject,
-      input.claims.email,
-      input.claims.domain,
-      input.claims.issuedAt,
-      input.claims.expiresAt,
-      input.claims.audience,
-      input.claims.authorizedParty,
-      input.claims.webNonceHash,
-      input.accessTokenHash,
-      input.refreshTokenHash,
-      input.deviceBindingHash,
-      input.onboardingTokenHash,
-      input.requestId ?? randomUUID(),
+      input.requestId === undefined ? randomUUID() : input.requestId,
     ],
   );
   return result.rows[0];
@@ -652,6 +594,72 @@ async function seedWorkspace(
     );
   });
   return workspaceId;
+}
+
+async function ensureFixedExampleWorkspace(
+  domain: "tenant-a.example" | "tenant-b.example",
+  provisioningPolicy: "DOMAIN_AUTO_PROVISION",
+): Promise<string> {
+  return withMigrationOwner(async (client) => {
+    await client.query(
+      `SELECT pg_catalog.pg_advisory_xact_lock(
+         pg_catalog.hashtextextended('uptech-example-domain:' || $1, 0)
+       )`,
+      [domain],
+    );
+    const existing = await client.query<{ workspace_id: string }>(
+      `SELECT workspace_id::text
+       FROM uptech.workspace_domain_locators
+       WHERE normalized_domain = $1::uptech.google_normalized_domain_v1`,
+      [domain],
+    );
+    if (existing.rowCount === 1) {
+      await client.query(
+        `UPDATE uptech.workspaces
+         SET status = 'ACTIVE', provisioning_policy = $2::text
+         WHERE workspace_id = $1::uuid`,
+        [existing.rows[0].workspace_id, provisioningPolicy],
+      );
+      return existing.rows[0].workspace_id;
+    }
+
+    const workspaceId = randomUUID();
+    await client.query(
+      `INSERT INTO uptech.workspaces
+         (workspace_id, status, provisioning_policy)
+       VALUES ($1::uuid, 'ACTIVE', $2::text)`,
+      [workspaceId, provisioningPolicy],
+    );
+    await client.query(
+      `INSERT INTO uptech.workspace_domain_locators
+         (normalized_domain, workspace_id, status, verified_at)
+       VALUES ($1::uptech.google_normalized_domain_v1, $2::uuid,
+               'VERIFIED', clock_timestamp())`,
+      [domain, workspaceId],
+    );
+    return workspaceId;
+  });
+}
+
+async function acquireFixedExampleDomainLock(): Promise<() => Promise<void>> {
+  assert.ok(admin !== undefined);
+  const client = await admin.connect();
+  await client.query(
+    `SELECT pg_catalog.pg_advisory_lock(
+       pg_catalog.hashtextextended('uptech-fixed-example-domains-v1', 0)
+     )`,
+  );
+  return async () => {
+    try {
+      await client.query(
+        `SELECT pg_catalog.pg_advisory_unlock(
+           pg_catalog.hashtextextended('uptech-fixed-example-domains-v1', 0)
+         )`,
+      );
+    } finally {
+      client.release();
+    }
+  };
 }
 
 async function alignAwayFromDatabaseMinuteBoundary(): Promise<void> {
@@ -726,16 +734,21 @@ after(async () => {
   }
 });
 
-test("A1 routines are API-execute-only and both runtime roles lack direct pre-tenant table access", async () => {
+test("current Google completion boundaries are API-only while obsolete native completion has no runtime execute", async () => {
+  const obsoleteNativeCompletion =
+    "uptech.complete_native_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)";
   const signatures = [
     "uptech.begin_google_login_transaction_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_web_pkce_envelope_v1,uuid)",
     "uptech.begin_google_login_transaction_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_native_transaction_handle_hash_v1,uptech.google_native_s256_hash_v1,uuid)",
     "uptech.consume_google_login_transaction_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)",
     "uptech.consume_google_login_transaction_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_native_transaction_handle_hash_v1,uptech.google_native_s256_hash_v1,uptech.google_auth_hash32_v1,uuid)",
     "uptech.complete_web_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)",
-    "uptech.complete_native_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)",
+    obsoleteNativeCompletion,
     "uptech.record_google_login_rejection_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_auth_rejection_class_v1,uuid)",
     "uptech.record_google_login_rejection_v1(uptech.google_auth_hash32_v1,uptech.google_auth_rejection_class_v1,uuid)",
+    "uptech.complete_mobile_google_callback_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)",
+    "uptech.complete_mobile_google_denial_v1(uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_rejection_class_v1,uptech.mobile_auth_ui_category_v1,uuid)",
+    "uptech.exchange_mobile_handoff_v2(uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)",
   ];
   const privileges = await migrationRows<{
     signature: string;
@@ -767,9 +780,13 @@ test("A1 routines are API-execute-only and both runtime roles lack direct pre-te
      FROM unnest($1::text[]) AS signatures(signature)`,
     [signatures],
   );
-  assert.equal(privileges.length, 8);
+  assert.equal(privileges.length, signatures.length);
   for (const privilege of privileges) {
-    assert.equal(privilege.api_execute, true, privilege.signature);
+    assert.equal(
+      privilege.api_execute,
+      privilege.signature !== obsoleteNativeCompletion,
+      privilege.signature,
+    );
     assert.equal(privilege.worker_execute, false, privilege.signature);
     assert.equal(privilege.public_execute, false, privilege.signature);
   }
@@ -1135,7 +1152,7 @@ test("row-lock waits cannot reserve or complete after database expiry", async ()
   ]);
 });
 
-test("native matrix masks wrong purpose, platform, configuration, nonce shape, and S256 proof", async () => {
+test("legacy native ingress masks wrong purpose, protocol family, and S256 proof", async () => {
   const android = newNativeTransaction("NATIVE_ANDROID_LOGIN");
   assert.equal(await beginNative(android), "CREATED");
   assert.equal(
@@ -1197,117 +1214,15 @@ test("native matrix masks wrong purpose, platform, configuration, nonce shape, a
     ).outcome,
     "DENIED",
   );
-  assert.equal(
-    (
-      await completeNative({
-        completionHash: androidCompletion,
-        claims: newClaims({
-          subject: `android-audience-${randomUUID()}`,
-          domain: androidDomain,
-          webNonceHash: null,
-          audience: "GOOGLE_NATIVE_ANDROID_LOGIN_V1",
-          authorizedParty: "GOOGLE_NATIVE_ANDROID_LOGIN_V1",
-        }),
-        accessTokenHash: hash32(),
-        refreshTokenHash: hash32(),
-        deviceBindingHash: hash32(),
-        onboardingTokenHash: hash32(),
-      })
-    ).outcome,
-    "DENIED",
+  assert.ok(api !== undefined);
+  await api.query(
+    `SELECT uptech.record_google_login_rejection_v1(
+       $1::uptech.google_auth_hash32_v1,
+       'PROTOCOL_INVALID'::uptech.google_auth_rejection_class_v1,
+       $2::uuid
+     )`,
+    [androidCompletion, randomUUID()],
   );
-
-  const iosWrongAzp = newNativeTransaction("NATIVE_IOS_LOGIN");
-  assert.equal(await beginNative(iosWrongAzp), "CREATED");
-  const iosWrongAzpCompletion = hash32();
-  assert.equal(
-    await consumeNative({
-      purpose: iosWrongAzp.purpose,
-      networkHash: hash32(),
-      handleHash: iosWrongAzp.handleHash,
-      verifierHash: iosWrongAzp.challengeHash,
-      completionHash: iosWrongAzpCompletion,
-    }),
-    "RESERVED",
-  );
-  assert.equal(
-    (
-      await completeNative({
-        completionHash: iosWrongAzpCompletion,
-        claims: newClaims({
-          subject: `ios-azp-${randomUUID()}`,
-          domain: normalizedTestDomain("native-ios-azp"),
-          webNonceHash: null,
-          authorizedParty: "GOOGLE_NATIVE_ANDROID_LOGIN_V1",
-        }),
-        accessTokenHash: hash32(),
-        refreshTokenHash: hash32(),
-        deviceBindingHash: hash32(),
-        onboardingTokenHash: hash32(),
-      })
-    ).outcome,
-    "DENIED",
-  );
-
-  const androidWrongNonce = newNativeTransaction("NATIVE_ANDROID_LOGIN");
-  assert.equal(await beginNative(androidWrongNonce), "CREATED");
-  const androidWrongNonceCompletion = hash32();
-  assert.equal(
-    await consumeNative({
-      purpose: androidWrongNonce.purpose,
-      networkHash: hash32(),
-      handleHash: androidWrongNonce.handleHash,
-      verifierHash: androidWrongNonce.challengeHash,
-      completionHash: androidWrongNonceCompletion,
-    }),
-    "RESERVED",
-  );
-  assert.equal(
-    (
-      await completeNative({
-        completionHash: androidWrongNonceCompletion,
-        claims: newClaims({
-          subject: `android-nonce-${randomUUID()}`,
-          domain: normalizedTestDomain("native-android-nonce"),
-          webNonceHash: hash32(),
-          authorizedParty: "GOOGLE_NATIVE_ANDROID_LOGIN_V1",
-        }),
-        accessTokenHash: hash32(),
-        refreshTokenHash: hash32(),
-        deviceBindingHash: hash32(),
-        onboardingTokenHash: hash32(),
-      })
-    ).outcome,
-    "DENIED",
-  );
-
-  const iosSuccess = newNativeTransaction("NATIVE_IOS_LOGIN");
-  assert.equal(await beginNative(iosSuccess), "CREATED");
-  const iosSuccessCompletion = hash32();
-  assert.equal(
-    await consumeNative({
-      purpose: iosSuccess.purpose,
-      networkHash: hash32(),
-      handleHash: iosSuccess.handleHash,
-      verifierHash: iosSuccess.challengeHash,
-      completionHash: iosSuccessCompletion,
-    }),
-    "RESERVED",
-  );
-  const success = await completeNative({
-    completionHash: iosSuccessCompletion,
-    claims: newClaims({
-      subject: `ios-success-${randomUUID()}`,
-      domain: normalizedTestDomain("native-ios-success"),
-      webNonceHash: null,
-      authorizedParty: "GOOGLE_NATIVE_IOS_LOGIN_V1",
-    }),
-    accessTokenHash: hash32(),
-    refreshTokenHash: hash32(),
-    deviceBindingHash: hash32(),
-    onboardingTokenHash: hash32(),
-  });
-  assert.equal(success.outcome, "ONBOARDING");
 
   const statuses = await migrationRows<{ status: string; count: number }>(
     `SELECT status::text, count(*)::integer AS count
@@ -1317,18 +1232,12 @@ test("native matrix masks wrong purpose, platform, configuration, nonce shape, a
      ORDER BY status`,
     [[
       android.handleHash.toString("hex"),
-      iosWrongAzp.handleHash.toString("hex"),
-      androidWrongNonce.handleHash.toString("hex"),
-      iosSuccess.handleHash.toString("hex"),
     ]],
   );
-  assert.deepEqual(statuses, [
-    { status: "COMPLETED", count: 1 },
-    { status: "REJECTED", count: 3 },
-  ]);
+  assert.deepEqual(statuses, [{ status: "REJECTED", count: 1 }]);
 });
 
-test("concurrent completion issues exactly one onboarding credential and one identity", async () => {
+test("concurrent unknown-workspace completion returns one safe state without creating authority", async () => {
   const { fixture, completionHash } = await reserveWebTransaction();
   const subject = `completion-race-${randomUUID()}`;
   const claims = newClaims({
@@ -1388,7 +1297,7 @@ test("concurrent completion issues exactly one onboarding credential and one ide
           AND identity_row.provider_subject = $1) AS session_count,
        (SELECT count(*)::integer
         FROM uptech.platform_audit_events
-        WHERE action = 'GOOGLE_AUTH_ONBOARDING_ISSUED'
+         WHERE action = 'GOOGLE_AUTH_EXCHANGE_REJECTED'
           AND request_id = ANY($2::uuid[])) AS success_audit_count,
        (SELECT status::text
         FROM uptech.oauth_transactions
@@ -1398,11 +1307,11 @@ test("concurrent completion issues exactly one onboarding credential and one ide
   );
   assert.deepEqual(persisted, [
     {
-      identity_count: 1,
-      onboarding_count: 1,
+      identity_count: 0,
+      onboarding_count: 0,
       session_count: 0,
       success_audit_count: 1,
-      transaction_status: "COMPLETED",
+      transaction_status: "REJECTED",
     },
   ]);
 });
@@ -1442,12 +1351,12 @@ test("one candidate hash cannot win concurrently in session and onboarding table
     }),
   ]);
   const outcomes = [normalAttempt.outcome, onboardingAttempt.outcome];
-  assert.equal(outcomes.filter((outcome) => outcome === "DENIED").length, 1);
+  assert.equal(outcomes.filter((outcome) => outcome === "DENIED").length, 0);
   assert.equal(
     outcomes.filter(
       (outcome) => outcome === "NORMAL" || outcome === "ONBOARDING",
     ).length,
-    1,
+    2,
   );
 
   const persisted = await migrationRows<{
@@ -1498,6 +1407,323 @@ test("one candidate hash cannot win concurrently in session and onboarding table
   ]);
 });
 
+test("Web public completion denies a GROUP_CONTROLLED subject without membership and creates no authority", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  const domain = "tenant-a.example";
+  try {
+    const workspaceId = await ensureFixedExampleWorkspace(
+      domain,
+      "DOMAIN_AUTO_PROVISION",
+    );
+    await migrationRows(
+      `UPDATE uptech.workspaces
+       SET provisioning_policy = 'GOOGLE_GROUP_CONTROLLED'
+       WHERE workspace_id = $1::uuid`,
+      [workspaceId],
+    );
+    const subject = `group-unprovisioned-${randomUUID()}`;
+    const { fixture, completionHash } = await reserveWebTransaction();
+    const sessionTokenHash = hash32();
+    const onboardingTokenHash = hash32();
+    const result = await completeWeb({
+      completionHash,
+      claims: newClaims({
+        subject,
+        domain,
+        webNonceHash: fixture.nonceHash,
+      }),
+      sessionTokenHash,
+      csrfTokenHash: hash32(),
+      onboardingTokenHash,
+    });
+
+    assert.deepEqual(
+      { outcome: result.outcome, accessState: result.access_state },
+      { outcome: "ONBOARDING", accessState: "USER_NOT_PROVISIONED" },
+    );
+    assert.deepEqual(
+      await migrationRows<{
+        session_tokens: number;
+        onboarding_credentials: number;
+        identities: number;
+        transaction_status: string;
+      }>(
+        `SELECT
+           (SELECT count(*)::integer FROM uptech.session_tokens
+            WHERE token_hash = $1::uptech.google_auth_hash32_v1) AS session_tokens,
+           (SELECT count(*)::integer FROM uptech.onboarding_sessions
+            WHERE token_hash = $2::uptech.google_auth_hash32_v1) AS onboarding_credentials,
+           (SELECT count(*)::integer FROM uptech.identities
+            WHERE provider = 'GOOGLE' AND provider_subject = $3) AS identities,
+           (SELECT status::text FROM uptech.oauth_transactions
+            WHERE completion_handle_hash = $4::uptech.google_auth_hash32_v1)
+              AS transaction_status`,
+        [sessionTokenHash, onboardingTokenHash, subject, completionHash],
+      ),
+      [{
+        session_tokens: 0,
+        onboarding_credentials: 0,
+        identities: 0,
+        transaction_status: "REJECTED",
+      }],
+    );
+  } finally {
+    await migrationRows(
+      `UPDATE uptech.workspaces AS workspace_row
+       SET provisioning_policy = 'DOMAIN_AUTO_PROVISION'
+       FROM uptech.workspace_domain_locators AS locator
+       WHERE locator.workspace_id = workspace_row.workspace_id
+         AND locator.normalized_domain = $1::uptech.google_normalized_domain_v1`,
+      [domain],
+    );
+    await releaseFixedDomains();
+  }
+});
+
+test("verified hosted domains resolve to independent workspaces without cross-tenant fallback", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  try {
+  const tenantADomain = "tenant-a.example";
+  const tenantBDomain = "tenant-b.example";
+  const tenantAWorkspace = await ensureFixedExampleWorkspace(
+    tenantADomain,
+    "DOMAIN_AUTO_PROVISION",
+  );
+  const tenantBWorkspace = await ensureFixedExampleWorkspace(
+    tenantBDomain,
+    "DOMAIN_AUTO_PROVISION",
+  );
+  const tenantASubject = `tenant-a-${randomUUID()}`;
+  const tenantBSubjects = [
+    `tenant-b-member-1-${randomUUID()}`,
+    `tenant-b-member-2-${randomUUID()}`,
+  ];
+
+  const nullRequestSubject = `null-request-${randomUUID()}`;
+  const nullRequestReservation = await reserveWebTransaction();
+  assert.equal(
+    (await completeWeb({
+      completionHash: nullRequestReservation.completionHash,
+      claims: newClaims({
+        subject: nullRequestSubject,
+        domain: tenantADomain,
+        webNonceHash: nullRequestReservation.fixture.nonceHash,
+      }),
+      sessionTokenHash: hash32(),
+      csrfTokenHash: hash32(),
+      onboardingTokenHash: hash32(),
+      requestId: null,
+    })).outcome,
+    "DENIED",
+  );
+  assert.deepEqual(
+    await migrationRows<{ status: string; identity_count: number }>(
+      `SELECT transaction_row.status::text,
+         (SELECT count(*)::integer
+          FROM uptech.identities
+          WHERE provider = 'GOOGLE'
+            AND provider_subject = $2) AS identity_count
+       FROM uptech.oauth_transactions AS transaction_row
+       WHERE transaction_row.completion_handle_hash =
+         $1::uptech.google_auth_hash32_v1`,
+      [nullRequestReservation.completionHash, nullRequestSubject],
+    ),
+    [{ status: "REJECTED", identity_count: 0 }],
+  );
+
+  async function login(
+    domain: string,
+    subject: string,
+    issuer: VerifiedClaims["issuer"] = "https://accounts.google.com",
+  ) {
+    const reservation = await reserveWebTransaction();
+    return completeWeb({
+      completionHash: reservation.completionHash,
+      claims: {
+        ...newClaims({
+        subject,
+        domain,
+        webNonceHash: reservation.fixture.nonceHash,
+        }),
+        issuer,
+      },
+      sessionTokenHash: hash32(),
+      csrfTokenHash: hash32(),
+      onboardingTokenHash: null,
+    });
+  }
+
+  assert.equal(
+    (await login(tenantADomain, tenantASubject, "accounts.google.com")).outcome,
+    "NORMAL",
+  );
+  await migrationRows(`
+    UPDATE uptech.workspaces
+    SET provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+    WHERE workspace_id=$1`, [tenantAWorkspace]);
+  assert.equal((await login(tenantADomain, tenantASubject)).outcome, "NORMAL");
+  await migrationRows(`
+    UPDATE uptech.workspaces
+    SET provisioning_policy='DOMAIN_AUTO_PROVISION'
+    WHERE workspace_id=$1`, [tenantAWorkspace]);
+  for (const subject of tenantBSubjects) {
+    assert.equal((await login(tenantBDomain, subject)).outcome, "NORMAL");
+  }
+
+  const crossTenantReservation = await reserveWebTransaction();
+  const crossTenantResult = await completeWeb({
+    completionHash: crossTenantReservation.completionHash,
+    claims: {
+      ...newClaims({
+        subject: tenantASubject,
+        domain: tenantBDomain,
+        webNonceHash: crossTenantReservation.fixture.nonceHash,
+      }),
+      issuer: "accounts.google.com",
+    },
+    sessionTokenHash: hash32(),
+    csrfTokenHash: hash32(),
+    onboardingTokenHash: hash32(),
+  });
+  assert.equal(crossTenantResult.outcome, "DENIED");
+
+  const racingSubject = `cross-tenant-race-${randomUUID()}`;
+  const concurrentResults = await Promise.all([
+    login(tenantADomain, racingSubject),
+    login(tenantBDomain, racingSubject),
+  ]);
+  assert.equal(
+    concurrentResults.filter((result) => result.outcome === "NORMAL").length,
+    1,
+  );
+  assert.equal(
+    concurrentResults.filter((result) => result.outcome === "DENIED").length,
+    1,
+  );
+
+  const deprovisionedSubject = `deprovisioned-${randomUUID()}`;
+  const deprovisionedUserId = randomUUID();
+  await withMigrationOwner(async (client) => {
+    const deprovisionedIdentityId = randomUUID();
+    await client.query(
+      `INSERT INTO uptech.users (id, status)
+       VALUES ($1::uuid, 'ACTIVE')`,
+      [deprovisionedUserId],
+    );
+    await client.query(
+      `INSERT INTO uptech.identities
+         (id, user_id, provider, issuer, provider_subject, status,
+          email_claim, email_verified, hosted_domain_claim, claims_observed_at)
+       VALUES ($1::uuid, $2::uuid, 'GOOGLE', 'https://accounts.google.com',
+               $3, 'ACTIVE', $4, true, $5, clock_timestamp())`,
+      [
+        deprovisionedIdentityId,
+        deprovisionedUserId,
+        deprovisionedSubject,
+        `deprovisioned@${tenantADomain}`,
+        tenantADomain,
+      ],
+    );
+    await client.query(
+      `INSERT INTO uptech.workspace_memberships
+         (workspace_id, id, user_id, role, status)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, 'MEMBER', 'DEPROVISIONED')`,
+      [tenantAWorkspace, randomUUID(), deprovisionedUserId],
+    );
+  });
+  const deprovisionedReservation = await reserveWebTransaction();
+  const deprovisionedSessionToken = hash32();
+  const deprovisionedResult = await completeWeb({
+    completionHash: deprovisionedReservation.completionHash,
+    claims: newClaims({
+      subject: deprovisionedSubject,
+      domain: tenantADomain,
+      webNonceHash: deprovisionedReservation.fixture.nonceHash,
+    }),
+    sessionTokenHash: deprovisionedSessionToken,
+    csrfTokenHash: hash32(),
+    onboardingTokenHash: hash32(),
+  });
+  assert.equal(deprovisionedResult.outcome, "DENIED");
+  assert.deepEqual(
+    await migrationRows<{ membership_status: string; session_count: number }>(
+      `SELECT membership_row.status::text AS membership_status,
+         (SELECT count(*)::integer
+          FROM uptech.session_tokens
+          WHERE token_hash = $3::bytea) AS session_count
+       FROM uptech.workspace_memberships AS membership_row
+       WHERE membership_row.workspace_id = $1::uuid
+         AND membership_row.user_id = $2::uuid`,
+      [
+        tenantAWorkspace,
+        deprovisionedUserId,
+        deprovisionedSessionToken,
+      ],
+    ),
+    [{ membership_status: "DEPROVISIONED", session_count: 0 }],
+  );
+
+  const tenantRows = await migrationRows<{
+    workspace_id: string;
+    normalized_domain: string;
+    membership_count: number;
+    provider_subjects: string[];
+    issuers: string[];
+  }>(
+    `SELECT
+       locator.workspace_id::text,
+       locator.normalized_domain::text,
+       count(membership_row.id) FILTER (
+         WHERE identity_row.provider_subject = ANY($2::text[])
+       )::integer AS membership_count,
+       array_agg(identity_row.provider_subject ORDER BY identity_row.provider_subject)
+         FILTER (WHERE identity_row.provider_subject = ANY($2::text[]))
+         AS provider_subjects,
+       array_agg(identity_row.issuer ORDER BY identity_row.provider_subject)
+         FILTER (WHERE identity_row.provider_subject = ANY($2::text[]))
+         AS issuers
+     FROM uptech.workspace_domain_locators AS locator
+     LEFT JOIN uptech.workspace_memberships AS membership_row
+       ON membership_row.workspace_id = locator.workspace_id
+     LEFT JOIN uptech.identities AS identity_row
+       ON identity_row.user_id = membership_row.user_id
+     WHERE locator.workspace_id = ANY($1::uuid[])
+     GROUP BY locator.workspace_id, locator.normalized_domain`,
+    [
+      [tenantAWorkspace, tenantBWorkspace],
+      [tenantASubject, ...tenantBSubjects, racingSubject],
+    ],
+  );
+  const tenantState = new Map(
+    tenantRows.map((row) => [row.normalized_domain, row]),
+  );
+
+  const tenantAState = tenantState.get(tenantADomain);
+  const tenantBState = tenantState.get(tenantBDomain);
+  assert.ok(tenantAState);
+  assert.ok(tenantBState);
+  assert.equal(tenantAState.workspace_id, tenantAWorkspace);
+  assert.equal(tenantBState.workspace_id, tenantBWorkspace);
+  assert.equal(tenantAState.membership_count + tenantBState.membership_count, 4);
+  assert.deepEqual(
+    [...tenantAState.provider_subjects, ...tenantBState.provider_subjects].sort(),
+    [tenantASubject, ...tenantBSubjects, racingSubject].sort(),
+  );
+  assert.equal(
+    [...tenantAState.provider_subjects, ...tenantBState.provider_subjects]
+      .filter((subject) => subject === racingSubject).length,
+    1,
+  );
+  assert.ok(
+    [...tenantAState.issuers, ...tenantBState.issuers].every(
+      (issuer) => issuer === "https://accounts.google.com",
+    ),
+  );
+  } finally {
+    await releaseFixedDomains();
+  }
+});
+
 test("provisioning policy, session expiry, and logout audit remain fail-closed", async () => {
   const inviteDomain = normalizedTestDomain("invite-only");
   const inviteWorkspace = await seedWorkspace(inviteDomain, "INVITE_ONLY");
@@ -1516,6 +1742,7 @@ test("provisioning policy, session expiry, and logout audit remain fail-closed",
   });
   assert.deepEqual(inviteResult, {
     outcome: "ONBOARDING",
+    access_state: "USER_NOT_PROVISIONED",
     allowed_operations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
   });
   const inviteAuthority = await migrationRows<{
@@ -1723,6 +1950,7 @@ test("provisioning policy, session expiry, and logout audit remain fail-closed",
       transaction_status: "REJECTED",
     },
   ]);
+
 });
 
 test("audit failure rolls back begin, consume, and completion atomically", async () => {
@@ -1745,7 +1973,7 @@ test("audit failure rolls back begin, consume, and completion atomically", async
            OR (NEW.request_id = '${consumeFaultRequest}'::uuid
                AND NEW.action = 'GOOGLE_AUTH_EXCHANGE_RESERVED')
            OR (NEW.request_id = '${completionFaultRequest}'::uuid
-               AND NEW.action = 'GOOGLE_AUTH_ONBOARDING_ISSUED') THEN
+               AND NEW.action = 'GOOGLE_AUTH_EXCHANGE_REJECTED') THEN
           RAISE EXCEPTION 'forced A1 integration audit failure';
         END IF;
         RETURN NEW;

@@ -26,7 +26,7 @@ export class WebSessionCsrfError extends WebSessionAuthenticationError {
   override readonly name = "WebSessionCsrfError";
 }
 
-export class WebSessionIntegrityError extends Error {
+export class WebSessionIntegrityError extends WebSessionAuthenticationError {
   override readonly name = "WebSessionIntegrityError";
 }
 

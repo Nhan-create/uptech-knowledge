@@ -16,7 +16,10 @@ test("login page renders the approved Uptech branding and readable Google action
 
   const html = await response.text();
 
-  assert.match(html, /Sử dụng tài khoản Workspace của bạn\./);
+  assert.match(
+    html,
+    /Sử dụng tài khoản Google Workspace do tổ chức của bạn cấp\./,
+  );
   assert.match(html, /data-testid="login-uptech-logo"/);
   assert.match(html, /alt="Uptech"[^>]+src="\/logo\.png"/);
   assert.match(
@@ -50,7 +53,7 @@ test("personal Google accounts receive Workspace guidance with Uptech branding",
   assert.match(html, />Tài khoản không hợp lệ</);
   assert.match(
     html,
-    /Vui lòng nhập tài khoản Workspace, không phải tài khoản Google\./,
+    /Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp\./,
   );
   assert.match(html, /data-testid="login-uptech-logo"/);
   assert.match(html, />Đăng nhập bằng tài khoản khác</);
@@ -147,6 +150,7 @@ test("login page follows the English preference in normal and error states", asy
   assert.match(normalHtml, />Sign in to your workspace</);
   assert.match(normalHtml, /Use your Workspace account\./);
   assert.match(normalHtml, />Continue with Google Workspace</);
+  assert.match(normalHtml, /Redirecting to Google…/);
   assert.match(normalHtml, />Home</);
   assert.match(normalHtml, /Terms of Use/);
   assert.match(normalHtml, /Privacy Policy/);
@@ -160,7 +164,10 @@ test("login page follows the English preference in normal and error states", asy
   const errorHtml = await errorResponse.text();
 
   assert.match(errorHtml, />Invalid account</);
-  assert.match(errorHtml, /Please use a Workspace account, not a personal Google account\./);
+  assert.match(
+    errorHtml,
+    /Please use the Google Workspace account provided by your organization\./,
+  );
   assert.match(errorHtml, />Sign in with another account</);
 });
 

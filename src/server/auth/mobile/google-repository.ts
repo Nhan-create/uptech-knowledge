@@ -18,14 +18,35 @@ function envelope(row: QueryResultRow): WebPkceEnvelope {
 }
 const SAFE_CATEGORIES = new Set<MobileAuthUiCategory>([
   "PERSONAL_GOOGLE_ACCOUNT", "UNKNOWN_WORKSPACE", "USER_NOT_PROVISIONED",
-  "USER_SUSPENDED", "SESSION_REVOKED", "SESSION_EXPIRED",
-  "POLICY_OR_DEVICE_BLOCKED", "OFFLINE", "AUTH_ERROR",
+  "USER_SUSPENDED", "WORKSPACE_SUSPENDED", "POLICY_OR_DEVICE_BLOCKED",
+  "GOOGLE_CANCELLED", "PROVIDER_UNAVAILABLE", "AUTH_ERROR",
 ]);
 function safeCategory(value: unknown): MobileAuthUiCategory {
   if (typeof value !== "string" || !SAFE_CATEGORIES.has(value as MobileAuthUiCategory)) {
     throw new Error("Invalid mobile callback category");
   }
   return value as MobileAuthUiCategory;
+}
+
+function callbackCompletion(row: QueryResultRow):
+  | { readonly outcome: "NORMAL"; readonly appReturnUri: string }
+  | { readonly outcome: "DENIAL_HANDOFF"; readonly appReturnUri: string;
+      readonly category: MobileAuthUiCategory }
+  | { readonly outcome: "DENIED" } {
+  if (row.outcome === "NORMAL" && typeof row.app_return_uri === "string") {
+    return { outcome: "NORMAL", appReturnUri: row.app_return_uri };
+  }
+  if (row.outcome === "DENIED" && row.app_return_uri === null) {
+    return { outcome: "DENIED" };
+  }
+  if (row.outcome === "DENIED" && typeof row.app_return_uri === "string") {
+    return {
+      outcome: "DENIAL_HANDOFF",
+      appReturnUri: row.app_return_uri,
+      category: safeCategory(row.denial_category),
+    };
+  }
+  throw new Error("Invalid mobile completion outcome");
 }
 
 export function createMobileGoogleRepository(pool: Pick<DatabasePool, "query">): MobileGoogleRepository {
@@ -73,9 +94,24 @@ export function createMobileGoogleRepository(pool: Pick<DatabasePool, "query">):
         Buffer.from(input.completionHandleHash),c.issuer,c.providerSubject,c.normalizedEmail,c.emailVerified,c.hostedDomain,
         new Date(c.issuedAtEpochSeconds*1000),new Date(c.expiresAtEpochSeconds*1000),c.audienceConfigurationKey,
         c.authorizedPartyConfigurationKey,Buffer.from(c.nonceHash),Buffer.from(input.handoffHash),input.requestId])).rows as QueryResultRow[]);
-      if(row.outcome==="DENIED") return {outcome:"DENIED",category:safeCategory(row.denial_category)};
-      if(row.outcome!=="NORMAL"||typeof row.app_return_uri!=="string") throw new Error("Invalid mobile completion outcome");
-      return {outcome:"NORMAL",appReturnUri:row.app_return_uri};
+      return callbackCompletion(row);
+    },
+    async completeDenial(input) {
+      const row = one((await pool.query(`SELECT result.outcome::text outcome,
+        result.app_return_uri::text app_return_uri,
+        result.denial_category::text denial_category
+        FROM uptech.complete_mobile_google_denial_v1(
+          $1::uptech.google_auth_hash32_v1,$2::uptech.google_auth_hash32_v1,
+          $3::uptech.google_auth_rejection_class_v1,
+          $4::uptech.mobile_auth_ui_category_v1,$5::uuid) result`, [
+        Buffer.from(input.completionHandleHash), Buffer.from(input.handoffHash),
+        input.rejectionClass, input.category, input.requestId,
+      ])).rows as QueryResultRow[]);
+      const completion = callbackCompletion(row);
+      if (completion.outcome === "NORMAL") {
+        throw new Error("Invalid mobile denial completion outcome");
+      }
+      return completion;
     },
     async reject(input) {
       const row=one((await pool.query(`SELECT uptech.record_google_login_rejection_v1($1::uptech.mobile_platform_v1,

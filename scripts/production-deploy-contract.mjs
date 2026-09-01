@@ -69,7 +69,7 @@ function configuredAndroidFingerprint() {
 
 function iosUniversalLinksEnabled() {
   const value = process.env.UPTECH_IOS_UNIVERSAL_LINKS_ENABLED?.trim();
-  if (!value || value === "false") return false;
+  if (value === "false") return false;
   if (value === "true") return true;
   errors.push("iOS universal links flag must be true or false");
   return false;
@@ -171,8 +171,15 @@ if (iosUniversalLinksEnabled()) {
   if (!iosTeamIdPattern.test(teamId)) {
     errors.push("iOS Team ID is missing or invalid");
   } else {
-    const appleAssociation = await readJson("public/apple-app-site-association");
-    if (!validAppleAssociation(appleAssociation, teamId)) {
+    const [rootAssociation, wellKnownAssociation] = await Promise.all([
+      readJson("public/apple-app-site-association"),
+      readJson("public/.well-known/apple-app-site-association"),
+    ]);
+    if (
+      !validAppleAssociation(rootAssociation, teamId) ||
+      !validAppleAssociation(wellKnownAssociation, teamId) ||
+      JSON.stringify(rootAssociation) !== JSON.stringify(wellKnownAssociation)
+    ) {
       errors.push("iOS universal links association is incomplete");
     }
   }

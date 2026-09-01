@@ -1,11 +1,16 @@
 \set ON_ERROR_STOP on
 
--- Run after bootstrap/0001_roles.sql, migrations/0001_phase1_foundation.sql,
--- and migrations/0002_google_auth_a1.sql.  All fixtures are rolled back.
+-- Run after A1 alone or after the staged A4 migration. All fixtures are
+-- rolled back; A4 must have retired the obsolete native completion boundary.
 BEGIN;
 
 DO $verify$
 DECLARE
+  a4_decommission_applied boolean :=
+    pg_catalog.to_regtype('uptech.google_login_completion_result_v2') IS NOT NULL;
+  legacy_native_completion regprocedure := pg_catalog.to_regprocedure(
+    'uptech.complete_native_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
+  );
   expected_routines regprocedure[] := ARRAY[
     pg_catalog.to_regprocedure(
       'uptech.begin_google_login_transaction_v1(uptech.google_login_purpose_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_web_pkce_envelope_v1,uuid)'
@@ -39,7 +44,7 @@ BEGIN
     RAISE EXCEPTION 'one or more exact A1 routine overloads are missing';
   END IF;
 
-  IF (
+  IF NOT a4_decommission_applied AND (
     SELECT count(*)
     FROM pg_catalog.pg_proc AS procedure_row
     JOIN pg_catalog.pg_namespace AS namespace_row
@@ -82,12 +87,19 @@ BEGIN
       RAISE EXCEPTION 'dynamic SQL found in A1 routine %', routine_oid;
     END IF;
 
-    IF NOT pg_catalog.has_function_privilege(
-         'uptech_api_runtime', routine_oid, 'EXECUTE'
-       )
-       OR pg_catalog.has_function_privilege(
-         'uptech_worker_runtime', routine_oid, 'EXECUTE'
-       ) THEN
+    IF routine_oid = legacy_native_completion AND a4_decommission_applied THEN
+      IF pg_catalog.has_function_privilege(
+           'uptech_api_runtime', routine_oid, 'EXECUTE'
+         ) OR pg_catalog.has_function_privilege(
+           'uptech_worker_runtime', routine_oid, 'EXECUTE'
+         ) THEN
+        RAISE EXCEPTION 'obsolete native completion remains runtime-executable';
+      END IF;
+    ELSIF NOT pg_catalog.has_function_privilege(
+           'uptech_api_runtime', routine_oid, 'EXECUTE'
+         ) OR pg_catalog.has_function_privilege(
+           'uptech_worker_runtime', routine_oid, 'EXECUTE'
+         ) THEN
       RAISE EXCEPTION 'A1 API/worker execute separation is wrong for %', routine_oid;
     END IF;
 
@@ -108,7 +120,7 @@ BEGIN
     END IF;
   END LOOP;
 
-  IF (
+  IF NOT a4_decommission_applied AND (
     SELECT count(*)
     FROM pg_catalog.pg_proc AS procedure_row
     JOIN pg_catalog.pg_namespace AS namespace_row
@@ -150,7 +162,7 @@ INSERT INTO uptech.google_auth_configuration_registry (
   'verify-client.apps.googleusercontent.com',
   'verify-client.apps.googleusercontent.com',
   'GOOGLE_WEB_LOGIN_V1',
-  'https://verify.example.test/api/v1/auth/google/callback',
+      'https://tenant-a.example/api/v1/auth/google/callback',
   ARRAY['openid', 'email', 'profile']::text[],
   ARRAY[
     'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1
@@ -259,7 +271,7 @@ DO $verify$
 DECLARE
   begin_result uptech.google_login_begin_result_v1;
   consume_result uptech.google_web_login_consume_result_v1;
-  completion_result uptech.google_login_completion_result_v1;
+  completion_result record;
 BEGIN
   begin_result := uptech.begin_google_login_transaction_v1(
     'WEB_LOGIN'::uptech.google_login_purpose_v1,
@@ -288,9 +300,9 @@ BEGIN
     ROW(
       'https://accounts.google.com'::uptech.google_auth_issuer_v1,
       'NonceMismatchSubject'::uptech.google_provider_subject_v1,
-      'nonce-mismatch@example.test'::uptech.google_normalized_email_v1,
+      'nonce-mismatch@unknown.example'::uptech.google_normalized_email_v1,
       true,
-      'example.test'::uptech.google_normalized_domain_v1,
+      'tenant-a.example'::uptech.google_normalized_domain_v1,
       pg_catalog.clock_timestamp(),
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,
@@ -315,7 +327,7 @@ DO $verify$
 DECLARE
   begin_result uptech.google_login_begin_result_v1;
   consume_result uptech.google_web_login_consume_result_v1;
-  completion_result uptech.google_login_completion_result_v1;
+  completion_result record;
 BEGIN
   begin_result := uptech.begin_google_login_transaction_v1(
     'WEB_LOGIN'::uptech.google_login_purpose_v1,
@@ -344,9 +356,9 @@ BEGIN
     ROW(
       'https://accounts.google.com'::uptech.google_auth_issuer_v1,
       'OnboardingSubject'::uptech.google_provider_subject_v1,
-      'person@unclaimed.test'::uptech.google_normalized_email_v1,
+      'person@tenant-b.example'::uptech.google_normalized_email_v1,
       true,
-      'unclaimed.test'::uptech.google_normalized_domain_v1,
+      'tenant-b.example'::uptech.google_normalized_domain_v1,
       pg_catalog.clock_timestamp(),
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,
@@ -627,7 +639,7 @@ INSERT INTO uptech.google_auth_configuration_registry (
   'verify-client.apps.googleusercontent.com',
   'verify-client.apps.googleusercontent.com',
   'GOOGLE_WEB_LOGIN_V1',
-  'https://verify.example.test/api/v1/auth/google/callback',
+      'https://tenant-a.example/api/v1/auth/google/callback',
   ARRAY['openid', 'email', 'profile']::text[],
   ARRAY[
     'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1
@@ -652,13 +664,13 @@ INSERT INTO uptech.workspace_domain_locators (
   normalized_domain, workspace_id, status, verified_at
 ) VALUES
   (
-    'example.test',
+    'tenant-a.example',
     'a3000000-0000-0000-0000-000000000003',
     'VERIFIED',
     pg_catalog.clock_timestamp()
   ),
   (
-    'fault.test',
+    'unknown.example',
     'a3000000-0000-0000-0000-000000000003',
     'VERIFIED',
     pg_catalog.clock_timestamp()
@@ -680,9 +692,9 @@ INSERT INTO uptech.identities (
   'DifferentCaseSensitiveSubject',
   'ACTIVE',
   1,
-  'member@example.test',
+    'member@tenant-a.example',
   true,
-  'example.test',
+  'tenant-a.example',
   pg_catalog.clock_timestamp()
 );
 
@@ -693,8 +705,8 @@ DO $verify$
 DECLARE
   begin_result uptech.google_login_begin_result_v1;
   consume_result uptech.google_web_login_consume_result_v1;
-  completion_result uptech.google_login_completion_result_v1;
-  replay_result uptech.google_login_completion_result_v1;
+  completion_result record;
+  replay_result record;
   expected_aad bytea;
 BEGIN
   begin_result := uptech.begin_google_login_transaction_v1(
@@ -751,9 +763,9 @@ BEGIN
     ROW(
       'https://accounts.google.com'::uptech.google_auth_issuer_v1,
       'NewCaseSensitiveSubject'::uptech.google_provider_subject_v1,
-      'member@example.test'::uptech.google_normalized_email_v1,
+      'member@tenant-a.example'::uptech.google_normalized_email_v1,
       true,
-      'example.test'::uptech.google_normalized_domain_v1,
+      'tenant-a.example'::uptech.google_normalized_domain_v1,
       pg_catalog.clock_timestamp(),
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,
@@ -777,9 +789,9 @@ BEGIN
     ROW(
       'https://accounts.google.com'::uptech.google_auth_issuer_v1,
       'NewCaseSensitiveSubject'::uptech.google_provider_subject_v1,
-      'member@example.test'::uptech.google_normalized_email_v1,
+      'member@tenant-a.example'::uptech.google_normalized_email_v1,
       true,
-      'example.test'::uptech.google_normalized_domain_v1,
+      'tenant-a.example'::uptech.google_normalized_domain_v1,
       pg_catalog.clock_timestamp(),
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,
@@ -853,7 +865,7 @@ BEGIN
   IF (
     SELECT count(DISTINCT identity_row.user_id)
     FROM uptech.identities AS identity_row
-    WHERE identity_row.email_claim = 'member@example.test'
+      WHERE identity_row.email_claim = 'member@tenant-a.example'
   ) <> 2 THEN
     RAISE EXCEPTION 'same-email Google subjects were merged';
   END IF;
@@ -918,11 +930,11 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM uptech.platform_audit_events AS audit_row
-    WHERE audit_row.metadata::text ~* 'member@example|example[.]test'
+      WHERE audit_row.metadata::text ~* 'member@tenant-a|tenant-a[.]example'
   ) OR EXISTS (
     SELECT 1
     FROM uptech.audit_events AS audit_row
-    WHERE audit_row.metadata::text ~* 'member@example|example[.]test'
+      WHERE audit_row.metadata::text ~* 'member@tenant-a|tenant-a[.]example'
   ) THEN
     RAISE EXCEPTION 'email or hosted domain leaked into audit metadata';
   END IF;
@@ -953,7 +965,7 @@ DO $verify$
 DECLARE
   begin_result uptech.google_login_begin_result_v1;
   consume_result uptech.google_web_login_consume_result_v1;
-  completion_result uptech.google_login_completion_result_v1;
+  completion_result record;
 BEGIN
   begin_result := uptech.begin_google_login_transaction_v1(
     'WEB_LOGIN'::uptech.google_login_purpose_v1,
@@ -982,9 +994,9 @@ BEGIN
     ROW(
       'https://accounts.google.com'::uptech.google_auth_issuer_v1,
       'NewCaseSensitiveSubject'::uptech.google_provider_subject_v1,
-      'member@example.test'::uptech.google_normalized_email_v1,
+      'member@tenant-a.example'::uptech.google_normalized_email_v1,
       true,
-      'example.test'::uptech.google_normalized_domain_v1,
+      'tenant-a.example'::uptech.google_normalized_domain_v1,
       pg_catalog.clock_timestamp(),
       pg_catalog.clock_timestamp() + interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,
@@ -1049,7 +1061,7 @@ DO $verify$
 DECLARE
   begin_result uptech.google_login_begin_result_v1;
   consume_result uptech.google_web_login_consume_result_v1;
-  completion_result uptech.google_login_completion_result_v1;
+  completion_result record;
 BEGIN
   begin_result := uptech.begin_google_login_transaction_v1(
     'WEB_LOGIN'::uptech.google_login_purpose_v1,
@@ -1085,9 +1097,9 @@ BEGIN
       ROW(
         'https://accounts.google.com'::uptech.google_auth_issuer_v1,
         'FaultInjectionSubject'::uptech.google_provider_subject_v1,
-        'fault-user@fault.test'::uptech.google_normalized_email_v1,
+        'fault-user@unknown.example'::uptech.google_normalized_email_v1,
         true,
-        'fault.test'::uptech.google_normalized_domain_v1,
+        'unknown.example'::uptech.google_normalized_domain_v1,
         pg_catalog.clock_timestamp(),
         pg_catalog.clock_timestamp() + interval '1 hour',
         'GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1,

@@ -28,14 +28,30 @@ export type GoogleLoginConsumeResult =
     }
   | { readonly outcome: "RATE_LIMITED" | "DENIED" };
 
+export type GoogleLoginAccessState =
+  | "UNKNOWN_WORKSPACE"
+  | "USER_NOT_PROVISIONED"
+  | "USER_SUSPENDED"
+  | "WORKSPACE_SUSPENDED";
+
 export type GoogleLoginCompletionResult =
   | { readonly outcome: "NORMAL" }
   | {
       readonly outcome: "ONBOARDING";
+      readonly accessState?: Extract<
+        GoogleLoginAccessState,
+        "UNKNOWN_WORKSPACE" | "USER_NOT_PROVISIONED"
+      >;
       readonly allowedOperations: readonly string[];
       readonly expiresAt: Date;
     }
-  | { readonly outcome: "DENIED" };
+  | {
+      readonly outcome: "DENIED";
+      readonly accessState?: Extract<
+        GoogleLoginAccessState,
+        "USER_SUSPENDED" | "WORKSPACE_SUSPENDED"
+      >;
+    };
 
 export interface BeginGoogleLoginInput {
   readonly networkHmac: Uint8Array;
@@ -104,6 +120,7 @@ interface ConsumeRow extends QueryResultRow {
 
 interface CompletionRow extends QueryResultRow {
   readonly outcome: unknown;
+  readonly access_state: unknown;
   readonly allowed_operations: unknown;
   readonly expires_at: unknown;
 }
@@ -156,6 +173,7 @@ FROM uptech.consume_google_login_transaction_v1(
 
 const COMPLETE_SQL = `
 SELECT result.outcome::text AS outcome,
+       result.access_state::text AS access_state,
        result.allowed_operations,
        result.expires_at
 FROM uptech.complete_web_google_login_v1(
@@ -227,6 +245,30 @@ function requireKeyVersion(value: unknown): string {
     );
   }
   return value;
+}
+
+function accessState(value: unknown): GoogleLoginAccessState | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (
+    value === "UNKNOWN_WORKSPACE" ||
+    value === "USER_NOT_PROVISIONED" ||
+    value === "USER_SUSPENDED" ||
+    value === "WORKSPACE_SUSPENDED"
+  ) {
+    return value;
+  }
+  throw new GoogleLoginRepositoryError("Google login access state is invalid");
+}
+
+function requiresExactOperations(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  return actual.length === expected.length && actual.every(
+    (operation, index) => operation === expected[index],
+  );
 }
 
 function requireEnvelope(row: ConsumeRow): WebPkceEnvelope {
@@ -353,14 +395,49 @@ export function createGoogleLoginRepository(
             "Google login onboarding result is invalid",
           );
         }
+        const state = accessState(row.access_state);
+        if (
+          (state !== null && state !== "UNKNOWN_WORKSPACE" && state !== "USER_NOT_PROVISIONED") ||
+          (state === "UNKNOWN_WORKSPACE" && !requiresExactOperations(
+            row.allowed_operations,
+            [
+              "FIRST_DOMAIN_CLAIM_READ",
+              "FIRST_DOMAIN_CLAIM_RESERVE",
+              "FIRST_DOMAIN_CLAIM_COMPLETE",
+              "ACCESS_REQUEST_READ",
+              "ACCESS_REQUEST_SUBMIT",
+            ],
+          )) ||
+          (state === "USER_NOT_PROVISIONED" && !requiresExactOperations(
+            row.allowed_operations,
+            ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+          ))
+        ) {
+          throw new GoogleLoginRepositoryError(
+            "Google login onboarding access state is invalid",
+          );
+        }
         return {
           outcome: "ONBOARDING",
+          ...(state === null ? {} : { accessState: state }),
           allowedOperations: Object.freeze([...row.allowed_operations]),
           expiresAt: requireDate(row.expires_at),
         };
       }
       if (row.outcome === "DENIED") {
-        return { outcome: "DENIED" };
+        const state = accessState(row.access_state);
+        if (
+          state !== null &&
+          state !== "USER_SUSPENDED" &&
+          state !== "WORKSPACE_SUSPENDED"
+        ) {
+          throw new GoogleLoginRepositoryError(
+            "Google login denied access state is invalid",
+          );
+        }
+        return state === null
+          ? { outcome: "DENIED" }
+          : { outcome: "DENIED", accessState: state };
       }
       throw new GoogleLoginRepositoryError(
         "Google login completion result is invalid",

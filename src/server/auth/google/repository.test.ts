@@ -11,6 +11,7 @@ import {
   type BeginGoogleLoginInput,
   type CompleteGoogleLoginInput,
   type ConsumeGoogleLoginInput,
+  type GoogleLoginAccessState,
 } from "./repository.ts";
 
 const REQUEST_ID = "00000000-0000-4000-8000-000000000011";
@@ -47,9 +48,9 @@ const CONSUME_INPUT: ConsumeGoogleLoginInput = Object.freeze({
 const CLAIMS: VerifiedGoogleClaims = Object.freeze({
   issuer: "https://accounts.google.com",
   providerSubject: "google-subject-123",
-  normalizedEmail: "member@uptech.example",
+  normalizedEmail: "member@tenant-a.example",
   emailVerified: true,
-  hostedDomain: "uptech.example",
+  hostedDomain: "tenant-a.example",
   issuedAtEpochSeconds: 1_777_000_000,
   expiresAtEpochSeconds: 1_777_003_600,
   audienceConfigurationKey: "GOOGLE_WEB_LOGIN_V1",
@@ -244,9 +245,14 @@ test("complete sends exactly the approved typed assertion and credential hashes"
 
 test("complete strictly parses onboarding and copies its operations/expiry", async () => {
   const expiresAt = new Date("2026-08-25T04:15:00.000Z");
-  const operations = ["submit_or_read_access_request"];
+  const operations = ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"];
   const fake = fakePool([
-    { outcome: "ONBOARDING", allowed_operations: operations, expires_at: expiresAt },
+    {
+      outcome: "ONBOARDING",
+      access_state: "USER_NOT_PROVISIONED",
+      allowed_operations: operations,
+      expires_at: expiresAt,
+    },
   ]);
   const repository = createGoogleLoginRepository(fake.pool as never);
 
@@ -254,6 +260,7 @@ test("complete strictly parses onboarding and copies its operations/expiry", asy
 
   assert.deepEqual(result, {
     outcome: "ONBOARDING",
+    accessState: "USER_NOT_PROVISIONED",
     allowedOperations: operations,
     expiresAt,
   });
@@ -274,6 +281,123 @@ test("complete parses DENIED without returning candidate authority", async () =>
   assert.deepEqual(await repository.complete(COMPLETE_INPUT), {
     outcome: "DENIED",
   });
+});
+
+const ONBOARDING_ACCESS_STATES = [
+  [
+    "UNKNOWN_WORKSPACE",
+    [
+      "FIRST_DOMAIN_CLAIM_READ",
+      "FIRST_DOMAIN_CLAIM_RESERVE",
+      "FIRST_DOMAIN_CLAIM_COMPLETE",
+      "ACCESS_REQUEST_READ",
+      "ACCESS_REQUEST_SUBMIT",
+    ],
+  ],
+] as const satisfies readonly (readonly [
+  GoogleLoginAccessState,
+  readonly string[],
+])[];
+
+for (const [accessState, allowedOperations] of ONBOARDING_ACCESS_STATES) {
+  test(`complete preserves the fixed ${accessState} onboarding access state without authority`, async () => {
+    const expiresAt = new Date("2026-09-01T04:15:00.000Z");
+    const fake = fakePool([
+      {
+        outcome: "ONBOARDING",
+        access_state: accessState,
+        allowed_operations: allowedOperations,
+        expires_at: expiresAt,
+      },
+    ]);
+    const repository = createGoogleLoginRepository(fake.pool as never);
+
+    assert.deepEqual(await repository.complete(COMPLETE_INPUT), {
+      outcome: "ONBOARDING",
+      accessState,
+      allowedOperations,
+      expiresAt,
+    });
+    assert.match(fake.calls[0].text, /result\.access_state/u);
+  });
+}
+
+const SUSPENDED_ACCESS_STATES = [
+  "USER_SUSPENDED",
+  "WORKSPACE_SUSPENDED",
+] as const satisfies readonly GoogleLoginAccessState[];
+
+for (const accessState of SUSPENDED_ACCESS_STATES) {
+  test(`complete preserves the fixed ${accessState} denied access state without authority`, async () => {
+    const fake = fakePool([
+      {
+        outcome: "DENIED",
+        access_state: accessState,
+        allowed_operations: null,
+        expires_at: null,
+      },
+    ]);
+    const repository = createGoogleLoginRepository(fake.pool as never);
+
+    assert.deepEqual(await repository.complete(COMPLETE_INPUT), {
+      outcome: "DENIED",
+      accessState,
+    });
+  });
+}
+
+test("complete rejects access states that do not match their safe completion outcome", async () => {
+  for (const row of [
+    {
+      outcome: "ONBOARDING",
+      access_state: "USER_SUSPENDED",
+      allowed_operations: ["ACCESS_REQUEST_READ"],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+    },
+    {
+      outcome: "DENIED",
+      access_state: "UNKNOWN_WORKSPACE",
+      allowed_operations: null,
+      expires_at: null,
+    },
+  ]) {
+    const fake = fakePool([row]);
+    const repository = createGoogleLoginRepository(fake.pool as never);
+    await assert.rejects(
+      repository.complete(COMPLETE_INPUT),
+      GoogleLoginRepositoryError,
+    );
+  }
+});
+
+test("complete rejects onboarding operations mapped to the wrong safe access state", async () => {
+  for (const row of [
+    {
+      outcome: "ONBOARDING",
+      access_state: "UNKNOWN_WORKSPACE",
+      allowed_operations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+    },
+    {
+      outcome: "ONBOARDING",
+      access_state: "USER_NOT_PROVISIONED",
+      allowed_operations: [
+        "FIRST_DOMAIN_CLAIM_READ",
+        "FIRST_DOMAIN_CLAIM_RESERVE",
+        "FIRST_DOMAIN_CLAIM_COMPLETE",
+        "ACCESS_REQUEST_READ",
+        "ACCESS_REQUEST_SUBMIT",
+      ],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+    },
+  ]) {
+    const fake = fakePool([row]);
+    const repository = createGoogleLoginRepository(fake.pool as never);
+    await assert.rejects(
+      repository.complete(COMPLETE_INPUT),
+      GoogleLoginRepositoryError,
+    );
+  }
 });
 
 test("bound and unbound rejection calls use only their approved overloads", async () => {

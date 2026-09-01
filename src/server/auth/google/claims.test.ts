@@ -13,6 +13,7 @@ import {
 const NOW = 2_000_000_000;
 const CLIENT_ID = "google-web-client-id.apps.googleusercontent.com";
 const NONCE = Buffer.alloc(32, 0x31).toString("base64url");
+const MANAGED_DOMAIN = "tenant-a.example";
 
 type Claims = Parameters<typeof verifyGoogleWorkspaceClaims>[0]["claims"];
 
@@ -24,9 +25,9 @@ function validClaims(overrides: Readonly<Record<string, unknown>> = {}): Claims 
     iat: NOW - 30,
     exp: NOW + 300,
     nonce: NONCE,
-    email: "Alice@UPTECH.VN",
+    email: "alice@tenant-a.example",
     email_verified: true,
-    hd: "UPTECH.VN",
+    hd: "tenant-a.example",
     name: "Alice Uptech",
     picture: "https://lh3.googleusercontent.com/a/profile-photo",
     ...overrides,
@@ -57,9 +58,9 @@ test("accepts verified Workspace claims and emits only normalized typed data", (
     {
       issuer: GOOGLE_ISSUER,
       providerSubject: "google-subject-123456789",
-      normalizedEmail: "alice@uptech.vn",
+      normalizedEmail: "alice@tenant-a.example",
       emailVerified: true,
-      hostedDomain: "uptech.vn",
+      hostedDomain: "tenant-a.example",
       issuedAtEpochSeconds: NOW - 30,
       expiresAtEpochSeconds: NOW + 300,
       audienceConfigurationKey: GOOGLE_LOGIN_CONFIGURATION_KEY,
@@ -73,35 +74,35 @@ test("accepts verified Workspace claims and emits only normalized typed data", (
   assert.equal(Object.isFrozen(claims), true);
 });
 
-test("accepts Google's legacy issuer and binds multi-audience tokens with azp", () => {
+test("canonicalizes Google's legacy issuer and binds multi-audience tokens with azp", () => {
   const claims = verify({
     iss: "accounts.google.com",
     aud: ["another-audience", CLIENT_ID],
     azp: CLIENT_ID,
   });
 
-  assert.equal(claims.issuer, "accounts.google.com");
+  assert.equal(claims.issuer, GOOGLE_ISSUER);
   assert.equal(
     claims.authorizedPartyConfigurationKey,
     GOOGLE_LOGIN_CONFIGURATION_KEY,
   );
 });
 
-test("normalizes internationalized hosted domains and optional profile fields", () => {
+test("normalizes hosted-domain case and optional profile fields", () => {
   const claims = verify({
-    email: "user@xn--bcher-kva.example",
-    hd: "BÜCHER.EXAMPLE",
+    email: "user@UNKNOWN.EXAMPLE",
+    hd: "UNKNOWN.EXAMPLE",
     name: undefined,
     picture: undefined,
   });
 
-  assert.equal(claims.hostedDomain, "xn--bcher-kva.example");
+  assert.equal(claims.hostedDomain, "unknown.example");
   assert.equal(claims.displayName, null);
   assert.equal(claims.pictureUrl, null);
 });
 
 test("rejects wrong issuer, audience, authorized party, and nonce", () => {
-  assertInvalid({ iss: "https://evil.example" });
+  assertInvalid({ iss: "https://unknown.example" });
   assertInvalid({ aud: "wrong-client.apps.googleusercontent.com" });
   assertInvalid({ aud: ["wrong-one", "wrong-two"] });
   assertInvalid({ aud: [] });
@@ -127,8 +128,8 @@ test("requires Google's exact boolean email_verified claim", () => {
 });
 
 test("rejects personal Gmail identities without a verified hosted domain", () => {
-  assertInvalid({ email: "person@gmail.com", hd: undefined });
-  assertInvalid({ email: "person@gmail.com", hd: "" });
+  assertInvalid({ email: "person@unknown.example", hd: undefined });
+  assertInvalid({ email: "person@unknown.example", hd: "" });
 });
 
 test("rejects missing or syntactically invalid hosted domains", () => {
@@ -136,12 +137,12 @@ test("rejects missing or syntactically invalid hosted domains", () => {
     undefined,
     null,
     "",
-    ".uptech.vn",
-    "uptech.vn.",
-    "bad_label.uptech.vn",
-    "uptech..vn",
-    "-uptech.vn",
-    "uptech-.vn",
+    `.${MANAGED_DOMAIN}`,
+    `${MANAGED_DOMAIN}.`,
+    `bad_${MANAGED_DOMAIN}`,
+    MANAGED_DOMAIN.replace(".", ".."),
+    `-${MANAGED_DOMAIN}`,
+    `${MANAGED_DOMAIN}-`,
   ]) {
     assertInvalid({ hd: hostedDomain });
   }
@@ -151,11 +152,11 @@ test("rejects malformed identity, email, name, and picture claims", () => {
   assertInvalid({ sub: "" });
   assertInvalid({ sub: `subject\0injection` });
   assertInvalid({ email: "not-an-email" });
-  assertInvalid({ email: " alice@uptech.vn" });
-  assertInvalid({ email: "alice@@uptech.vn" });
+  assertInvalid({ email: " alice@tenant-a.example" });
+  assertInvalid({ email: "alice@@tenant-a.example" });
   assertInvalid({ name: "name\nwith-control" });
-  assertInvalid({ picture: "http://images.example/avatar.png" });
-  assertInvalid({ picture: "https://user@images.example/avatar.png" });
+  assertInvalid({ picture: "http://unknown.example/avatar.png" });
+  assertInvalid({ picture: "https://user@unknown.example/avatar.png" });
   assertInvalid({ picture: "not-a-url" });
 });
 

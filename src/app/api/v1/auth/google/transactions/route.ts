@@ -1,6 +1,4 @@
 import {
-  createSafeProblem,
-  problemResponse,
   requestIdFromHeaders,
 } from "@/server/http/problem";
 import { trustedVercelClientIp } from "@/server/auth/google/crypto";
@@ -29,10 +27,34 @@ function redirectResponse(
   });
 }
 
+function redirectToLogin(
+  appOrigin: string | null,
+  error: string,
+  requestId: string,
+): Response {
+  const search = new URLSearchParams({ error, request_id: requestId });
+  const location = appOrigin === null
+    ? `/login?${search.toString()}`
+    : new URL(`/login?${search.toString()}`, appOrigin).href;
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "Cache-Control": "no-store, max-age=0",
+      Location: location,
+      Pragma: "no-cache",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Request-Id": requestId,
+    },
+  });
+}
+
 export async function POST(request: Request): Promise<Response> {
   const operationRequestId = requestIdFromHeaders(request.headers);
+  let appOrigin: string | null = null;
   try {
     const runtimeContext = createGoogleLoginRuntime();
+    appOrigin = runtimeContext.config.appOrigin;
     const result = await runtimeContext.service.initiate({
       canonicalClientIp: trustedVercelClientIp(request.headers),
       requestId: operationRequestId,
@@ -55,24 +77,20 @@ export async function POST(request: Request): Promise<Response> {
         operation: "GOOGLE_LOGIN_TRANSACTION",
         outcome: "RATE_LIMITED",
       });
-      return problemResponse(
-        createSafeProblem("RATE_LIMITED", operationRequestId),
-      );
+      return redirectToLogin(appOrigin, "rate_limited", operationRequestId);
     }
     logAuthOperation({
       requestId: operationRequestId,
       operation: "GOOGLE_LOGIN_TRANSACTION",
       outcome: "DENIED",
     });
-    return problemResponse(createSafeProblem("FORBIDDEN", operationRequestId));
+    return redirectToLogin(appOrigin, "login_failed", operationRequestId);
   } catch {
     logAuthOperation({
       requestId: operationRequestId,
       operation: "GOOGLE_LOGIN_TRANSACTION",
       outcome: "PROVIDER_UNAVAILABLE",
     });
-    return problemResponse(
-      createSafeProblem("PROVIDER_UNAVAILABLE", operationRequestId),
-    );
+    return redirectToLogin(appOrigin, "temporarily_unavailable", operationRequestId);
   }
 }

@@ -30,6 +30,25 @@ export function mobileProblem(code: ProblemCode, requestId: string) {
   return problemResponse(createSafeProblem(code, requestId));
 }
 
+export function mobileAuthProblem(
+  category: MobileAuthUiCategory,
+  requestId: string,
+): Response {
+  const code: ProblemCode = category === "OFFLINE"
+    ? "PROVIDER_UNAVAILABLE"
+    : category;
+  return mobileProblem(code, requestId);
+}
+
+export function mobileAuthenticatedDenialProblem(
+  category: MobileAuthUiCategory,
+  requestId: string,
+): Response {
+  const response = mobileAuthProblem(category, requestId);
+  response.headers.set("X-Uptech-Mobile-Handoff-Outcome", "ACCESS_DENIED");
+  return response;
+}
+
 export function mobileSessionProblem(error: unknown, requestId: string): Response {
   return mobileProblem(
     error instanceof MobileSessionServiceError ? error.code : "PROVIDER_UNAVAILABLE",
@@ -42,13 +61,11 @@ export function mobileCallbackRedirect(
   requestId: string,
   result:
     | { readonly outcome: "HANDOFF"; readonly handoffCode: string }
-    | { readonly outcome: "DENIED"; readonly category: MobileAuthUiCategory },
+    | { readonly outcome: "DENIED" },
 ): Response {
   const location = new URL(appReturnUri);
   if (result.outcome === "HANDOFF") {
     location.searchParams.set("handoff", result.handoffCode);
-  } else {
-    location.searchParams.set("error", result.category);
   }
   location.searchParams.set("request_id", requestId);
   return new Response(null, { status: 303, headers: {

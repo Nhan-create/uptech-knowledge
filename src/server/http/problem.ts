@@ -33,6 +33,46 @@ const SAFE_PROBLEM_DEFINITIONS = Object.freeze({
     title: "Forbidden",
     detail: "The requested action is not allowed.",
   },
+  PERSONAL_GOOGLE_ACCOUNT: {
+    status: 403,
+    title: "Google Workspace account required",
+    detail: "Use the Google Workspace account provided by your organization.",
+  },
+  UNKNOWN_WORKSPACE: {
+    status: 403,
+    title: "Unknown workspace",
+    detail: "The organization is not registered.",
+  },
+  USER_NOT_PROVISIONED: {
+    status: 403,
+    title: "Access not granted",
+    detail: "Access has not been granted for this account.",
+  },
+  USER_SUSPENDED: {
+    status: 403,
+    title: "Account suspended",
+    detail: "The account is suspended.",
+  },
+  WORKSPACE_SUSPENDED: {
+    status: 403,
+    title: "Workspace suspended",
+    detail: "The organization workspace is suspended.",
+  },
+  POLICY_OR_DEVICE_BLOCKED: {
+    status: 403,
+    title: "Access blocked",
+    detail: "The organization policy does not allow this sign-in.",
+  },
+  GOOGLE_CANCELLED: {
+    status: 400,
+    title: "Google sign-in cancelled",
+    detail: "Google sign-in was not completed.",
+  },
+  AUTH_ERROR: {
+    status: 401,
+    title: "Authentication error",
+    detail: "The sign-in request could not be verified.",
+  },
   NOT_FOUND: {
     status: 404,
     title: "Not found",

@@ -81,6 +81,20 @@ test("handoff denial releases no candidate credential", async () => {
   assert.equal(JSON.stringify(result).includes("token"), false);
 });
 
+test("authenticated denial handoff returns a safe category and no candidate credential", async () => {
+  const repository = repositoryWith({
+    async exchangeHandoff() {
+      return { outcome: "ACCESS_DENIED", category: "USER_NOT_PROVISIONED" } as const;
+    },
+  });
+  const result = await createMobileSessionService({ repository, replayKey, rateHmacKey }).exchangeHandoff({
+    handoffCode: proof(1), appExchangeVerifier: proof(2), installationSecret: installation,
+    canonicalClientIp: "203.0.113.1", requestId,
+  });
+  assert.deepEqual(result, { outcome: "ACCESS_DENIED", category: "USER_NOT_PROVISIONED" });
+  assert.equal(JSON.stringify(result).includes("token"), false);
+});
+
 test("refresh rotates both credentials and passes a bounded idempotency key", async () => {
   let received: Parameters<MobileSessionRepository["refresh"]>[0] | null = null;
   const repository = repositoryWith({

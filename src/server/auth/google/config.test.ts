@@ -16,14 +16,13 @@ function validEnvironment(
 ): Record<string, string | undefined> {
   return {
     NODE_ENV: "production",
-    PRODUCTION_BASE_URL: "https://knowledge.uptech.example",
+    PRODUCTION_BASE_URL: "https://tenant-a.example",
     GOOGLE_REDIRECT_URI:
-      "https://knowledge.uptech.example/api/v1/auth/google/callback",
+      "https://tenant-a.example/api/v1/auth/google/callback",
     GOOGLE_CLIENT_ID: "google-web-client-id.apps.googleusercontent.com",
     GOOGLE_CLIENT_SECRET: "google-client-secret",
-    GOOGLE_WORKSPACE_DOMAIN: "UPTECH.VN",
     UPTECH_ENVIRONMENT_ID: "production_v1",
-    DATABASE_URL: "postgresql://app@example.invalid/uptech",
+    DATABASE_URL: "postgresql://app@unknown.example/uptech",
     UPTECH_ENVIRONMENT_RATE_KEY: RATE_KEY,
     UPTECH_GOOGLE_LOGIN_PKCE_KEY: PKCE_KEY,
     UPTECH_GOOGLE_LOGIN_PKCE_KEY_VERSION: "kms-2026-08",
@@ -35,12 +34,11 @@ function validEnvironment(
 test("loads and freezes the exact production Google login configuration", () => {
   const config = loadGoogleLoginRuntimeConfig(validEnvironment());
 
-  assert.equal(config.appOrigin, "https://knowledge.uptech.example");
+  assert.equal(config.appOrigin, "https://tenant-a.example");
   assert.equal(
     config.redirectUri,
-    `https://knowledge.uptech.example${GOOGLE_LOGIN_CALLBACK_PATH}`,
+    `https://tenant-a.example${GOOGLE_LOGIN_CALLBACK_PATH}`,
   );
-  assert.equal(config.workspaceDomainHint, "uptech.vn");
   assert.equal(config.environmentId, "production_v1");
   assert.deepEqual(config.rateHmacKey, Uint8Array.from(Buffer.alloc(32, 0x11)));
   assert.deepEqual(
@@ -60,9 +58,9 @@ test("requires HTTPS for both production origin and callback", () => {
     () =>
       loadGoogleLoginRuntimeConfig(
         validEnvironment({
-          PRODUCTION_BASE_URL: "http://knowledge.uptech.example",
+          PRODUCTION_BASE_URL: "http://tenant-a.example",
           GOOGLE_REDIRECT_URI:
-            "http://knowledge.uptech.example/api/v1/auth/google/callback",
+            "http://tenant-a.example/api/v1/auth/google/callback",
         }),
       ),
     GoogleLoginConfigurationError,
@@ -73,7 +71,7 @@ test("requires HTTPS for both production origin and callback", () => {
       loadGoogleLoginRuntimeConfig(
         validEnvironment({
           GOOGLE_REDIRECT_URI:
-            "http://knowledge.uptech.example/api/v1/auth/google/callback",
+            "http://tenant-a.example/api/v1/auth/google/callback",
         }),
       ),
     GoogleLoginConfigurationError,
@@ -96,9 +94,9 @@ test("permits HTTP only for an exact local development origin", () => {
       loadGoogleLoginRuntimeConfig(
         validEnvironment({
           NODE_ENV: "development",
-          PRODUCTION_BASE_URL: "http://dev.uptech.example",
+          PRODUCTION_BASE_URL: "http://unknown.example",
           GOOGLE_REDIRECT_URI:
-            "http://dev.uptech.example/api/v1/auth/google/callback",
+            "http://unknown.example/api/v1/auth/google/callback",
         }),
       ),
     GoogleLoginConfigurationError,
@@ -107,12 +105,12 @@ test("permits HTTP only for an exact local development origin", () => {
 
 test("binds the redirect URI to the exact approved origin and callback path", () => {
   const invalidRedirects = [
-    "https://evil.example/api/v1/auth/google/callback",
-    "https://knowledge.uptech.example/auth/google/callback",
-    "https://knowledge.uptech.example/api/v1/auth/google/callback/",
-    "https://knowledge.uptech.example/api/v1/auth/google/callback?next=/home",
-    "https://knowledge.uptech.example/api/v1/auth/google/callback#fragment",
-    "https://user@knowledge.uptech.example/api/v1/auth/google/callback",
+    "https://tenant-b.example/api/v1/auth/google/callback",
+    "https://tenant-a.example/auth/google/callback",
+    "https://tenant-a.example/api/v1/auth/google/callback/",
+    "https://tenant-a.example/api/v1/auth/google/callback?next=/home",
+    "https://tenant-a.example/api/v1/auth/google/callback#fragment",
+    "https://user@tenant-a.example/api/v1/auth/google/callback",
   ];
 
   for (const redirectUri of invalidRedirects) {
@@ -130,9 +128,9 @@ test("binds the redirect URI to the exact approved origin and callback path", ()
 test("rejects malformed origins and missing required deployment values", () => {
   for (const appOrigin of [
     "not-a-url",
-    "https://user@knowledge.uptech.example",
-    "https://knowledge.uptech.example?mode=unsafe",
-    "ftp://knowledge.uptech.example",
+    "https://user@tenant-a.example",
+    "https://tenant-a.example?mode=unsafe",
+    "ftp://tenant-a.example",
   ]) {
     assert.throws(
       () =>
@@ -185,7 +183,7 @@ test("accepts only canonical 256-bit base64url secrets", () => {
   }
 });
 
-test("validates environment identifiers, key versions, and Workspace hints", () => {
+test("validates environment identifiers and key versions", () => {
   for (const environmentId of ["", "bad space", "prod!", "a".repeat(65)]) {
     assert.throws(
       () =>
@@ -203,16 +201,6 @@ test("validates environment identifiers, key versions, and Workspace hints", () 
           validEnvironment({
             UPTECH_GOOGLE_LOGIN_PKCE_KEY_VERSION: keyVersion,
           }),
-        ),
-      GoogleLoginConfigurationError,
-    );
-  }
-
-  for (const domain of [".uptech.vn", "uptech.vn.", "bad_label.vn", "a..vn"]) {
-    assert.throws(
-      () =>
-        loadGoogleLoginRuntimeConfig(
-          validEnvironment({ GOOGLE_WORKSPACE_DOMAIN: domain }),
         ),
       GoogleLoginConfigurationError,
     );

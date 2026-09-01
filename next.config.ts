@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Keep production builds within the memory envelope of constrained CI/release
+  // runners. This changes build concurrency only; runtime behavior is unchanged.
+  experimental: {
+    cpus: 1,
+  },
   // Preserve the literal path so the containment proxy can deny trailing-slash
   // variants instead of Next.js normalizing them onto an approved auth route.
   skipTrailingSlashRedirect: true,

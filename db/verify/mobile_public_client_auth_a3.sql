@@ -207,7 +207,9 @@ BEGIN
       OR EXISTS (
         SELECT 1
         FROM pg_attribute a
-        CROSS JOIN LATERAL aclexplode(COALESCE(a.attacl,'{}'::aclitem[])) acl
+        -- aclexplode is strict, so NULL ACLs already produce no rows. Passing
+        -- an empty, zero-dimensional ACL array is rejected by PostgreSQL 18.
+        CROSS JOIN LATERAL aclexplode(a.attacl) acl
         WHERE a.attrelid=('uptech.'||column_acl.table_name)::regclass
           AND a.attname=column_acl.column_name AND acl.grantee=0
           AND acl.privilege_type IN ('SELECT','INSERT','UPDATE','REFERENCES')

@@ -90,14 +90,62 @@ function requireCallbackSearch(value: string): string {
   return value;
 }
 
-function classifyExchangeError(error: unknown): GoogleOidcError {
-  if (
-    error instanceof openid.AuthorizationResponseError ||
-    error instanceof openid.ResponseBodyError ||
-    error instanceof openid.WWWAuthenticateChallengeError
-  ) {
+const TRANSIENT_PROVIDER_ERRORS = new Set([
+  "temporarily_unavailable",
+  "server_error",
+]);
+
+function providerUnavailable(errorCode: unknown): boolean {
+  return typeof errorCode === "string" &&
+    TRANSIENT_PROVIDER_ERRORS.has(errorCode);
+}
+
+export function classifyGoogleAuthorizationErrorCode(
+  errorCode: unknown,
+):
+  | GoogleOidcProviderRejectedError
+  | GoogleOidcProviderUnavailableError
+  | GoogleOidcVerificationError {
+  if (errorCode === "access_denied") {
     return new GoogleOidcProviderRejectedError(
-      "Google rejected the authorization exchange",
+      "Google authorization was cancelled",
+    );
+  }
+  if (providerUnavailable(errorCode)) {
+    return new GoogleOidcProviderUnavailableError(
+      "Google authorization service is unavailable",
+    );
+  }
+  return new GoogleOidcVerificationError(
+    "Google authorization response verification failed",
+  );
+}
+
+export function classifyGoogleOidcExchangeError(error: unknown): GoogleOidcError {
+  if (error instanceof openid.AuthorizationResponseError) {
+    return classifyGoogleAuthorizationErrorCode(error.error);
+  }
+  if (error instanceof openid.ResponseBodyError) {
+    if (providerUnavailable(error.error)) {
+      return new GoogleOidcProviderUnavailableError(
+        "Google authorization service is unavailable",
+      );
+    }
+    return new GoogleOidcVerificationError(
+      "Google authorization response verification failed",
+    );
+  }
+  if (error instanceof openid.WWWAuthenticateChallengeError) {
+    if (
+      error.cause.some((challenge) =>
+        providerUnavailable(challenge.parameters.error))
+    ) {
+      return new GoogleOidcProviderUnavailableError(
+        "Google authorization service is unavailable",
+      );
+    }
+    return new GoogleOidcVerificationError(
+      "Google authorization response verification failed",
     );
   }
   if (error instanceof TypeError) {
@@ -161,10 +209,11 @@ export function createGoogleOidcClient(
       nonce: transaction.nonce,
       code_challenge: transaction.pkceChallenge,
       code_challenge_method: "S256",
+      // Every entry point doubles as the real "use another account" action.
+      // Keep this server-owned so clients cannot widen the authorization
+      // request or choose a different OAuth application.
+      prompt: "select_account",
     };
-    if (config.workspaceDomainHint !== null) {
-      parameters.hd = config.workspaceDomainHint;
-    }
     return openid.buildAuthorizationUrl(discovered, parameters);
   },
 
@@ -199,7 +248,7 @@ export function createGoogleOidcClient(
       if (error instanceof GoogleOidcError) {
         throw error;
       }
-      throw classifyExchangeError(error);
+      throw classifyGoogleOidcExchangeError(error);
     }
   },
   };

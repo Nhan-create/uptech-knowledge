@@ -1,4 +1,7 @@
-import { authenticateWebSession } from "@/server/auth/web-session";
+import {
+  authenticateWebSession,
+  WebSessionAuthenticationError,
+} from "@/server/auth/web-session";
 import { loadWebSessionRuntimeConfig } from "@/server/auth/google/config";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import {
@@ -53,7 +56,7 @@ export async function GET(request: Request): Promise<Response> {
       },
     );
   } catch (error) {
-    if (error instanceof Error && error.name === "WebSessionAuthenticationError") {
+    if (error instanceof WebSessionAuthenticationError) {
       return problemResponse(
         createSafeProblem("UNAUTHENTICATED", operationRequestId),
       );

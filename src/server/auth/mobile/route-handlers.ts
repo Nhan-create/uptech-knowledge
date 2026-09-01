@@ -1,5 +1,5 @@
 import { requestIdFromHeaders } from "../../http/problem.ts";
-import { boundedJson, mobileCallbackRedirect, mobileJson, mobileProblem, mobileSessionProblem } from "./http.ts";
+import { boundedJson, mobileAuthenticatedDenialProblem, mobileCallbackRedirect, mobileJson, mobileProblem, mobileSessionProblem } from "./http.ts";
 import { parseHandoffExchangeBody, parseMobileTransactionBody, parseWorkspaceSwitchBody, type MobilePlatform } from "./protocol.ts";
 import type { MobileMembershipSummary } from "./session-service.ts";
 import type { MobileAuthUiCategory } from "./google-service.ts";
@@ -21,6 +21,7 @@ interface MobileSessionRouteService {
       | { readonly outcome: "ISSUED"; readonly accessToken: string; readonly refreshToken: string;
           readonly accessExpiresAt: Date; readonly refreshExpiresAt: Date; readonly activeWorkspaceId: string;
           readonly memberships: readonly MobileMembershipSummary[] }
+      | { readonly outcome: "ACCESS_DENIED"; readonly category: MobileAuthUiCategory }
       | { readonly outcome: "RATE_LIMITED" | "DENIED" }>;
   listWorkspaces(authorization: string | null): Promise<readonly MobileMembershipSummary[]>;
   authenticateBearer(authorization: string | null): Promise<unknown>;
@@ -97,6 +98,9 @@ export function createMobileRouteHandlers(dependencies: {
       try {
         const result = await dependencies.sessionService.exchangeHandoff({ ...body, canonicalClientIp, requestId });
         if (result.outcome === "RATE_LIMITED") return mobileProblem("RATE_LIMITED", requestId);
+        if (result.outcome === "ACCESS_DENIED") {
+          return mobileAuthenticatedDenialProblem(result.category, requestId);
+        }
         if (result.outcome !== "ISSUED") return mobileProblem("UNAUTHENTICATED", requestId);
         return mobileJson({ access_token: result.accessToken, refresh_token: result.refreshToken,
           access_expires_at: result.accessExpiresAt.toISOString(), refresh_expires_at: result.refreshExpiresAt.toISOString(),
@@ -109,7 +113,7 @@ export function createMobileRouteHandlers(dependencies: {
       let canonicalClientIp: string;
       try { canonicalClientIp = dependencies.clientIp(request.headers); }
       catch { return mobileCallbackRedirect(dependencies.appReturnUri, requestId,
-        { outcome: "DENIED", category: "AUTH_ERROR" }); }
+        { outcome: "DENIED" }); }
       try {
         const result = await dependencies.googleService.callback({ callbackSearch: new URL(request.url).search,
           canonicalClientIp, requestId });
@@ -117,10 +121,10 @@ export function createMobileRouteHandlers(dependencies: {
           ? mobileCallbackRedirect(dependencies.appReturnUri, requestId,
             { outcome: "HANDOFF", handoffCode: result.handoffCode })
           : mobileCallbackRedirect(dependencies.appReturnUri, requestId,
-            { outcome: "DENIED", category: result.category ?? "AUTH_ERROR" });
+            { outcome: "DENIED" });
       } catch {
         return mobileCallbackRedirect(dependencies.appReturnUri, requestId,
-          { outcome: "DENIED", category: "AUTH_ERROR" });
+          { outcome: "DENIED" });
       }
     },
 
@@ -175,6 +179,49 @@ export function createMobileGoogleTransactionPost(dependencies: {
       return response;
     } catch {
       return mobileProblem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createMobileHandoffExchangePost(dependencies: {
+  readonly createRuntime: () => MobileGoogleTransactionRuntime;
+  readonly clientIp: (headers: Headers) => string;
+}) {
+  return async (request: Request): Promise<Response> => {
+    const requestId = requestIdFromHeaders(request.headers);
+    try {
+      const runtime = dependencies.createRuntime();
+      return createMobileRouteHandlers({
+        appReturnUri: runtime.config.appReturnUri,
+        clientIp: dependencies.clientIp,
+        googleService: runtime.googleService,
+        sessionService: runtime.sessionService,
+      }).handoffExchange(request);
+    } catch {
+      return mobileProblem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createMobileGoogleCallbackGet(dependencies: {
+  readonly appReturnUri: string;
+  readonly createRuntime: () => MobileGoogleTransactionRuntime;
+  readonly clientIp: (headers: Headers) => string;
+}) {
+  return async (request: Request): Promise<Response> => {
+    const requestId = requestIdFromHeaders(request.headers);
+    try {
+      const runtime = dependencies.createRuntime();
+      return createMobileRouteHandlers({
+        appReturnUri: runtime.config.appReturnUri,
+        clientIp: dependencies.clientIp,
+        googleService: runtime.googleService,
+        sessionService: runtime.sessionService,
+      }).googleCallback(request);
+    } catch {
+      return mobileCallbackRedirect(dependencies.appReturnUri, requestId, {
+        outcome: "DENIED",
+      });
     }
   };
 }

@@ -11,7 +11,7 @@ const JWKS_ENDPOINT = `${ISSUER}/oauth2/v3/certs`;
 const CLIENT_ID = "offline-google-client.apps.googleusercontent.com";
 const CLIENT_SECRET = "offline-client-secret";
 const REDIRECT_URI =
-  "https://knowledge.uptech.example/api/v1/auth/google/callback";
+  "https://tenant-a.example/api/v1/auth/google/callback";
 const STATE = "nZ8jMQPMJ5N7tTmuYKuKXWQ8V7zBnoW1qODge0RB5N8";
 const NONCE = "dyiqiGoT2xr5Vmz9rKBjvQeDFw1Vyaj6hnm6MTw0MyA";
 const PKCE_VERIFIER =
@@ -79,9 +79,9 @@ async function issueGoogleShapedIdToken(
   const material = await signingMaterial;
   const signed = await new SignJWT({
     azp: audience,
-    email: "member@uptech.example",
+    email: "member@tenant-a.example",
     email_verified: true,
-    hd: "uptech.example",
+    hd: "tenant-a.example",
     name: "UPTECH Member",
     nonce: variation.nonce ?? NONCE,
     picture: "https://lh3.googleusercontent.com/offline-test-member",
@@ -267,7 +267,7 @@ test("openid-client accepts a correctly signed Google-shaped ID token with state
   assert.equal(claims?.sub, "google-subject-offline-test");
   assert.equal(claims?.nonce, NONCE);
   assert.equal(claims?.email_verified, true);
-  assert.equal(claims?.hd, "uptech.example");
+  assert.equal(claims?.hd, "tenant-a.example");
   assert.equal(calls.discovery, 1);
   assert.equal(calls.token, 1);
   assert.equal(calls.jwks, 1);

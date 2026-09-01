@@ -5,6 +5,7 @@ import type {
   MobileMembershipSummary,
   MobileSessionRepository,
 } from "./session-service.ts";
+import type { MobileAuthUiCategory } from "./google-service.ts";
 
 export class MobileSessionRepositoryError extends Error {
   override readonly name = "MobileSessionRepositoryError";
@@ -13,8 +14,9 @@ export class MobileSessionRepositoryError extends Error {
 const EXCHANGE_SQL = `
 SELECT result.outcome::text AS outcome, result.session_id,
   result.access_expires_at, result.refresh_expires_at,
-  result.active_workspace_id, result.memberships
-FROM uptech.exchange_mobile_handoff_v1(
+  result.active_workspace_id, result.memberships,
+  result.denial_category::text AS denial_category
+FROM uptech.exchange_mobile_handoff_v2(
   $1::uptech.google_auth_hash32_v1, $2::uptech.google_auth_hash32_v1,
   $3::uptech.google_auth_hash32_v1, $4::uptech.google_auth_hash32_v1,
   $5::uptech.google_auth_hash32_v1, $6::uptech.google_auth_hash32_v1, $7::uuid
@@ -96,6 +98,28 @@ function values(...items: readonly unknown[]) {
   return items.map((item) => item instanceof Uint8Array ? Buffer.from(item) : item);
 }
 
+const MOBILE_LOGIN_DENIAL_CATEGORIES = new Set<MobileAuthUiCategory>([
+  "PERSONAL_GOOGLE_ACCOUNT",
+  "UNKNOWN_WORKSPACE",
+  "USER_NOT_PROVISIONED",
+  "USER_SUSPENDED",
+  "WORKSPACE_SUSPENDED",
+  "POLICY_OR_DEVICE_BLOCKED",
+  "GOOGLE_CANCELLED",
+  "PROVIDER_UNAVAILABLE",
+  "AUTH_ERROR",
+]);
+
+export function parseMobileLoginDenialCategory(value: unknown): MobileAuthUiCategory {
+  if (
+    typeof value !== "string" ||
+    !MOBILE_LOGIN_DENIAL_CATEGORIES.has(value as MobileAuthUiCategory)
+  ) {
+    throw new MobileSessionRepositoryError("Invalid mobile denial category");
+  }
+  return value as MobileAuthUiCategory;
+}
+
 export function createMobileSessionRepository(
   pool: Pick<DatabasePool, "query">,
 ): MobileSessionRepository {
@@ -107,6 +131,21 @@ export function createMobileSessionRepository(
       ))).rows as QueryResultRow[]);
       if (row.outcome === "DENIED" || row.outcome === "RATE_LIMITED") {
         return { outcome: row.outcome };
+      }
+      if (row.outcome === "ACCESS_DENIED") {
+        if (
+          row.session_id !== null ||
+          row.access_expires_at !== null ||
+          row.refresh_expires_at !== null ||
+          row.active_workspace_id !== null ||
+          row.memberships !== null
+        ) {
+          throw new MobileSessionRepositoryError("Denial handoff returned session authority");
+        }
+        return {
+          outcome: "ACCESS_DENIED",
+          category: parseMobileLoginDenialCategory(row.denial_category),
+        };
       }
       if (row.outcome !== "ISSUED") throw new MobileSessionRepositoryError("Invalid exchange outcome");
       return {

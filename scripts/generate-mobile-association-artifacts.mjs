@@ -15,7 +15,7 @@ function requiredAndroidFingerprint() {
 
 function iosUniversalLinksEnabled() {
   const value = process.env.UPTECH_IOS_UNIVERSAL_LINKS_ENABLED?.trim();
-  if (!value || value === "false") return false;
+  if (value === "false") return false;
   if (value === "true") return true;
   throw new Error("UPTECH_IOS_UNIVERSAL_LINKS_ENABLED must be true or false");
 }
@@ -46,7 +46,7 @@ if (iosUniversalLinksEnabled()) {
   if (!iosTeamIdPattern.test(teamId)) {
     throw new Error("UPTECH_IOS_TEAM_ID must be a 10-character uppercase Apple Team ID");
   }
-  await writeJson("public/apple-app-site-association", {
+  const association = {
     applinks: {
       apps: [],
       details: [{
@@ -54,7 +54,11 @@ if (iosUniversalLinksEnabled()) {
         paths: ["/auth/mobile/callback"],
       }],
     },
-  });
+  };
+  await Promise.all([
+    "public/.well-known/apple-app-site-association",
+    "public/apple-app-site-association",
+  ].map((relativePath) => writeJson(relativePath, association)));
 } else {
   await Promise.all([
     "public/.well-known/apple-app-site-association",

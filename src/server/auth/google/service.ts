@@ -25,12 +25,14 @@ import {
   proofHashMatches,
 } from "./crypto.ts";
 import {
+  classifyGoogleAuthorizationErrorCode,
   googleOidcClient,
   GoogleOidcProviderRejectedError,
   GoogleOidcProviderUnavailableError,
   type GoogleOidcClient,
 } from "./oidc.ts";
 import type {
+  GoogleLoginAccessState,
   GoogleLoginRejectionClass,
   GoogleLoginRepository,
 } from "./repository.ts";
@@ -55,6 +57,10 @@ export type GoogleLoginCallbackResult =
       readonly onboardingCredential: string;
       readonly allowedOperations: readonly string[];
       readonly expiresAt: Date;
+    }
+  | {
+      readonly outcome: "ACCESS_DENIED";
+      readonly accessState: GoogleLoginAccessState;
     }
   | {
       readonly outcome:
@@ -120,8 +126,8 @@ function structurallyValidCallback(
   );
 }
 
-function callbackHasProviderError(callbackSearch: string): boolean {
-  return new URLSearchParams(callbackSearch.slice(1)).has("error");
+function callbackProviderErrorCode(callbackSearch: string): string | undefined {
+  return new URLSearchParams(callbackSearch.slice(1)).get("error") ?? undefined;
 }
 
 async function safelyRejectBound(
@@ -286,14 +292,33 @@ export function createGoogleLoginService(input: {
           return { outcome: "DENIED" };
         }
       }
-      if (callbackHasProviderError(operation.callbackSearch)) {
+      const providerCallbackError = callbackProviderErrorCode(
+        operation.callbackSearch,
+      );
+      if (providerCallbackError !== undefined) {
+        const classifiedError = classifyGoogleAuthorizationErrorCode(
+          providerCallbackError,
+        );
+        const rejectionClass: GoogleLoginRejectionClass =
+          classifiedError instanceof GoogleOidcProviderUnavailableError
+            ? "PROVIDER_UNAVAILABLE"
+            : classifiedError instanceof GoogleOidcProviderRejectedError
+              ? "PROVIDER_REJECTED"
+              : "CLAIMS_INVALID";
         await safelyRejectBound(
           repository,
           completionHandleHash,
-          "PROVIDER_REJECTED",
+          rejectionClass,
           operationRequestId,
         );
-        return { outcome: "PROVIDER_REJECTED" };
+        return {
+          outcome:
+            rejectionClass === "PROVIDER_UNAVAILABLE"
+              ? "PROVIDER_UNAVAILABLE"
+              : rejectionClass === "PROVIDER_REJECTED"
+                ? "PROVIDER_REJECTED"
+                : "DENIED",
+        };
       }
 
       let pkceVerifier: string;
@@ -375,11 +400,23 @@ export function createGoogleLoginService(input: {
         };
       }
       if (completed.outcome === "ONBOARDING") {
+        if (completed.accessState === undefined) {
+          return {
+            outcome: "ONBOARDING",
+            onboardingCredential,
+            allowedOperations: completed.allowedOperations,
+            expiresAt: completed.expiresAt,
+          };
+        }
         return {
-          outcome: "ONBOARDING",
-          onboardingCredential,
-          allowedOperations: completed.allowedOperations,
-          expiresAt: completed.expiresAt,
+          outcome: "ACCESS_DENIED",
+          accessState: completed.accessState,
+        };
+      }
+      if (completed.accessState !== undefined) {
+        return {
+          outcome: "ACCESS_DENIED",
+          accessState: completed.accessState,
         };
       }
       return { outcome: "DENIED" };

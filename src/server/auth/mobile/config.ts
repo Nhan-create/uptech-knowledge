@@ -15,6 +15,24 @@ function required(environment: Environment, name: string): string {
   return value;
 }
 
+function oauthCredentials(environment: Environment): Readonly<{
+  clientId: string;
+  clientSecret: string;
+}> {
+  const mobileClientId = environment.GOOGLE_MOBILE_CLIENT_ID?.trim();
+  const mobileClientSecret = environment.GOOGLE_MOBILE_CLIENT_SECRET?.trim();
+  if (Boolean(mobileClientId) !== Boolean(mobileClientSecret)) {
+    throw new MobileAuthConfigurationError("Mobile OAuth override is incomplete");
+  }
+  if (mobileClientId && mobileClientSecret) {
+    return { clientId: mobileClientId, clientSecret: mobileClientSecret };
+  }
+  return {
+    clientId: required(environment, "GOOGLE_CLIENT_ID"),
+    clientSecret: required(environment, "GOOGLE_CLIENT_SECRET"),
+  };
+}
+
 function key(environment: Environment, name: string): Uint8Array {
   const encoded = required(environment, name);
   if (!/^[A-Za-z0-9_-]{43}$/u.test(encoded)) {
@@ -54,17 +72,18 @@ export function loadMobileAuthConfig(
   }
   const environmentId = required(environment, "UPTECH_ENVIRONMENT_ID");
   const pkceKeyVersion = required(environment, "UPTECH_GOOGLE_LOGIN_PKCE_KEY_VERSION");
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(environmentId) ||
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(environmentId) ||
       !/^[\x21-\x7e]{1,128}$/u.test(pkceKeyVersion)) {
     throw new MobileAuthConfigurationError("Invalid mobile environment configuration");
   }
+  const oauth = oauthCredentials(environment);
   return Object.freeze({
     callbackUri: MOBILE_GOOGLE_CALLBACK_URI,
     appReturnUri: MOBILE_APP_RETURN_URI,
     databaseUrl: required(environment, "DATABASE_URL"),
     environmentId,
-    clientId: required(environment, "GOOGLE_MOBILE_CLIENT_ID"),
-    clientSecret: required(environment, "GOOGLE_MOBILE_CLIENT_SECRET"),
+    clientId: oauth.clientId,
+    clientSecret: oauth.clientSecret,
     rateHmacKey: key(environment, "UPTECH_ENVIRONMENT_RATE_KEY"),
     pkceEncryptionKey: key(environment, "UPTECH_GOOGLE_LOGIN_PKCE_KEY"),
     pkceKeyVersion,

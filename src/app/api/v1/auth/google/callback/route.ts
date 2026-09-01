@@ -1,14 +1,11 @@
 import {
   LOGIN_TRANSACTION_COOKIE_NAME,
-  ONBOARDING_COOKIE_NAME,
   trustedVercelClientIp,
 } from "@/server/auth/google/crypto";
 import { createGoogleLoginRuntime } from "@/server/auth/google/runtime";
 import { inspectBrowserAuthority } from "@/server/auth/browser-authority";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import {
-  createSafeProblem,
-  problemResponse,
   requestIdFromHeaders,
 } from "@/server/http/problem";
 import { serializeWebSessionCookie } from "@/server/sessions/session-security";
@@ -45,15 +42,17 @@ function clearLoginCookie(headers: Headers): void {
 }
 
 function redirectToLogin(
-  appOrigin: string,
+  appOrigin: string | null,
   error: string,
   requestId: string,
 ): Response {
-  const location = new URL("/login", appOrigin);
-  location.searchParams.set("error", error);
+  const search = new URLSearchParams({ error, request_id: requestId });
+  const location = appOrigin === null
+    ? `/login?${search.toString()}`
+    : new URL(`/login?${search.toString()}`, appOrigin).href;
   const headers = new Headers({
     "Cache-Control": "no-store, max-age=0",
-    Location: location.href,
+    Location: location,
     Pragma: "no-cache",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -78,10 +77,19 @@ function appendCookies(response: Response, cookies: readonly string[]): Response
   return response;
 }
 
+function safeAccessError(accessState: string): string {
+  if (accessState === "UNKNOWN_WORKSPACE") return "unknown_workspace";
+  if (accessState === "USER_NOT_PROVISIONED") return "access_required";
+  if (accessState === "USER_SUSPENDED") return "user_suspended";
+  if (accessState === "WORKSPACE_SUSPENDED") return "workspace_suspended";
+  return "login_failed";
+}
+
 export async function GET(request: Request): Promise<Response> {
   const operationRequestId = requestIdFromHeaders(request.headers);
   let staleCookieHeaders: readonly string[] = [];
   let preexistingBrowserAuthority = false;
+  let preexistingBrowserAuthorityKind: "WEB_SESSION" | "ONBOARDING" | null = null;
   try {
     const runtimeContext = createGoogleLoginRuntime();
     const incoming = new URL(request.url);
@@ -96,9 +104,11 @@ export async function GET(request: Request): Promise<Response> {
         const authority = await inspectBrowserAuthority(
           request.headers,
           getRuntimeDatabasePool(runtimeContext.config.databaseUrl),
+          { sessionPepper: runtimeContext.config.sessionPepper },
         );
         staleCookieHeaders = authority.staleCookieHeaders;
         preexistingBrowserAuthority = authority.active;
+        preexistingBrowserAuthorityKind = authority.activeKind;
         return authority.active;
       },
       requestId: operationRequestId,
@@ -108,7 +118,9 @@ export async function GET(request: Request): Promise<Response> {
       return appendCookies(
         redirectToLogin(
           runtimeContext.config.appOrigin,
-          "active_authority",
+          preexistingBrowserAuthorityKind === "ONBOARDING"
+            ? "access_required"
+            : "active_authority",
           operationRequestId,
         ),
         staleCookieHeaders,
@@ -133,31 +145,37 @@ export async function GET(request: Request): Promise<Response> {
       }
       return new Response(null, { status: 303, headers });
     }
+    if (result.outcome === "ACCESS_DENIED") {
+      logCallback(operationRequestId, "DENIED");
+      return appendCookies(
+        redirectToLogin(
+          runtimeContext.config.appOrigin,
+          safeAccessError(result.accessState),
+          operationRequestId,
+        ),
+        staleCookieHeaders,
+      );
+    }
     if (result.outcome === "ONBOARDING") {
-      logCallback(operationRequestId, "ONBOARDING");
-      const response = redirectToLogin(
+      // No production onboarding route exists. Do not expose an unusable
+      // authority cookie or a dead action; preserve the safe access state.
+      logCallback(operationRequestId, "DENIED");
+      return appendCookies(redirectToLogin(
         runtimeContext.config.appOrigin,
         "access_required",
         operationRequestId,
-      );
-      for (const cookie of replacementCookieHeaders(
-        staleCookieHeaders,
-        `${ONBOARDING_COOKIE_NAME}=${result.onboardingCredential}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
-      )) {
-        response.headers.append("Set-Cookie", cookie);
-      }
-      return response;
+      ), staleCookieHeaders);
     }
     const safeError =
       result.outcome === "RATE_LIMITED"
         ? "rate_limited"
         : result.outcome === "PERSONAL_GOOGLE_ACCOUNT"
           ? "personal_account"
-        : result.outcome === "PROVIDER_UNAVAILABLE"
-          ? "temporarily_unavailable"
-          : result.outcome === "PROVIDER_REJECTED"
-            ? "provider_rejected"
-            : "login_failed";
+          : result.outcome === "PROVIDER_UNAVAILABLE"
+            ? "temporarily_unavailable"
+            : result.outcome === "PROVIDER_REJECTED"
+              ? "provider_rejected"
+              : "login_failed";
     logCallback(
       operationRequestId,
       result.outcome === "RATE_LIMITED"
@@ -178,10 +196,11 @@ export async function GET(request: Request): Promise<Response> {
     );
   } catch {
     logCallback(operationRequestId, "PROVIDER_UNAVAILABLE");
-    const response = problemResponse(
-      createSafeProblem("PROVIDER_UNAVAILABLE", operationRequestId),
+    const response = redirectToLogin(
+      null,
+      "temporarily_unavailable",
+      operationRequestId,
     );
-    response.headers.set("Referrer-Policy", "no-referrer");
     return appendCookies(response, staleCookieHeaders);
   }
 }

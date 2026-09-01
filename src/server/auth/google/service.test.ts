@@ -54,14 +54,13 @@ const AUTHORIZATION: GoogleAuthorizationTransaction = Object.freeze({
 });
 
 const CONFIG: GoogleLoginRuntimeConfig = Object.freeze({
-  appOrigin: "https://knowledge.uptech.example",
+  appOrigin: "https://tenant-a.example",
   redirectUri:
-    "https://knowledge.uptech.example/api/v1/auth/google/callback",
+    "https://tenant-a.example/api/v1/auth/google/callback",
   clientId: "uptech-google-web-client.apps.googleusercontent.com",
   clientSecret: "raw-google-client-secret-never-for-the-database",
-  workspaceDomainHint: "uptech.example",
   environmentId: "offline_test",
-  databaseUrl: "postgresql://not-used.invalid/uptech",
+  databaseUrl: "postgresql://unknown.example/uptech",
   rateHmacKey: Uint8Array.from({ length: 32 }, (_, index) => index + 1),
   pkceEncryptionKey: Uint8Array.from(
     { length: 32 },
@@ -274,9 +273,9 @@ function validClaims(
     azp: CONFIG.clientId,
     sub: "google-subject-123",
     nonce,
-    email: "Member@UPTECH.Example",
+    email: "Member@tenant-a.example",
     email_verified: true,
-    hd: "UPTECH.Example",
+    hd: "tenant-a.example",
     iat: now - 5,
     exp: now + 3_600,
     name: "UPTECH Member",
@@ -567,8 +566,8 @@ test("normal callback consumes once and gives the database only verified claims 
     "providerSubject",
   ]);
   assert.equal(completed.claims.providerSubject, "google-subject-123");
-  assert.equal(completed.claims.normalizedEmail, "member@uptech.example");
-  assert.equal(completed.claims.hostedDomain, "uptech.example");
+  assert.equal(completed.claims.normalizedEmail, "member@tenant-a.example");
+  assert.equal(completed.claims.hostedDomain, "tenant-a.example");
   assert.equal(completed.claims.emailVerified, true);
   assert.equal(
     "provider_private_claim" in completed.claims,
@@ -918,6 +917,53 @@ test("a provider error callback is consumed and recorded without code exchange",
   assert.equal(
     harness.repository.rejectBoundCalls[0].rejectionClass,
     "PROVIDER_REJECTED",
+  );
+});
+
+for (const transientError of ["temporarily_unavailable", "server_error"] as const) {
+  test(`a ${transientError} callback is recorded as provider unavailable`, async () => {
+    const harness = createHarness();
+    const started = await initiateCreated(harness);
+
+    const result = await harness.service.callback({
+      canonicalClientIp: CLIENT_IP,
+      callbackSearch: `?error=${transientError}&state=${encodeURIComponent(started.state)}`,
+      loginCookie: started.loginCookie,
+      requestId: CALLBACK_REQUEST_ID,
+    });
+
+    assert.deepEqual(result, { outcome: "PROVIDER_UNAVAILABLE" });
+    assertRepositoryCalls(harness.repository, {
+      begin: 1,
+      consume: 1,
+      complete: 0,
+      rejectUnbound: 0,
+      rejectBound: 1,
+    });
+    assert.equal(harness.oidc.exchangeCalls.length, 0);
+    assert.equal(
+      harness.repository.rejectBoundCalls[0].rejectionClass,
+      "PROVIDER_UNAVAILABLE",
+    );
+  });
+}
+
+test("an unrecognized provider error is a generic verification denial", async () => {
+  const harness = createHarness();
+  const started = await initiateCreated(harness);
+
+  const result = await harness.service.callback({
+    canonicalClientIp: CLIENT_IP,
+    callbackSearch: `?error=interaction_required&state=${encodeURIComponent(started.state)}`,
+    loginCookie: started.loginCookie,
+    requestId: CALLBACK_REQUEST_ID,
+  });
+
+  assert.deepEqual(result, { outcome: "DENIED" });
+  assert.equal(harness.oidc.exchangeCalls.length, 0);
+  assert.equal(
+    harness.repository.rejectBoundCalls[0].rejectionClass,
+    "CLAIMS_INVALID",
   );
 });
 

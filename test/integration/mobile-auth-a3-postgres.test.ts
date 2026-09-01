@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
 
 import { Pool, type QueryResultRow } from "pg";
@@ -38,8 +39,92 @@ async function asRole<Row extends QueryResultRow>(role: "uptech_migration_owner"
   } finally { client.release(); }
 }
 
+async function asRoleBatch(
+  role: "uptech_migration_owner" | "uptech_api_runtime",
+  statements: readonly { readonly text: string; readonly values?: readonly unknown[] }[],
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL ROLE ${role}`);
+    for (const statement of statements) {
+      await client.query(statement.text, [...(statement.values ?? [])]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+}
+
 async function api<Row extends QueryResultRow>(text: string, values: readonly unknown[] = []): Promise<Row[]> {
   return asRole<Row>("uptech_api_runtime", text, values);
+}
+
+async function ensureFixedExampleWorkspace(
+  domain: "tenant-a.example" | "tenant-b.example" | "unknown.example",
+  status: "ACTIVE" | "SUSPENDED",
+): Promise<string> {
+  const workspaceId = randomUUID();
+  const [row] = await asRole<{ workspace_id: string }>(
+    "uptech_migration_owner",
+    `WITH domain_lock AS MATERIALIZED (
+       SELECT pg_catalog.pg_advisory_xact_lock(
+         pg_catalog.hashtextextended('uptech-example-domain:' || $1, 0)
+       )
+     ), existing AS (
+       SELECT locator.workspace_id
+       FROM uptech.workspace_domain_locators AS locator
+       CROSS JOIN domain_lock
+       WHERE normalized_domain = $1::uptech.google_normalized_domain_v1
+     ), inserted_workspace AS (
+       INSERT INTO uptech.workspaces
+         (workspace_id, status, provisioning_policy, security_version)
+       SELECT $2::uuid, $3::text, 'DOMAIN_AUTO_PROVISION', 1
+       WHERE NOT EXISTS (SELECT 1 FROM existing)
+       RETURNING workspace_id
+     ), inserted_locator AS (
+       INSERT INTO uptech.workspace_domain_locators
+         (normalized_domain, workspace_id, status, verified_at)
+       SELECT $1::uptech.google_normalized_domain_v1, workspace_id,
+         'VERIFIED', clock_timestamp()
+       FROM inserted_workspace
+       RETURNING workspace_id
+     ), updated_existing AS (
+       UPDATE uptech.workspaces AS workspace_row
+       SET status = $3::text,
+           provisioning_policy = 'DOMAIN_AUTO_PROVISION'
+       FROM existing
+       WHERE workspace_row.workspace_id = existing.workspace_id
+       RETURNING workspace_row.workspace_id
+     )
+     SELECT workspace_id::text FROM updated_existing
+     UNION ALL
+     SELECT workspace_id::text FROM inserted_locator`,
+    [domain, workspaceId, status],
+  );
+  assert.ok(row?.workspace_id);
+  return row.workspace_id;
+}
+
+async function acquireFixedExampleDomainLock(): Promise<() => Promise<void>> {
+  const client = await pool.connect();
+  await client.query(
+    `SELECT pg_catalog.pg_advisory_lock(
+       pg_catalog.hashtextextended('uptech-fixed-example-domains-v1', 0)
+     )`,
+  );
+  return async () => {
+    try {
+      await client.query(
+        `SELECT pg_catalog.pg_advisory_unlock(
+           pg_catalog.hashtextextended('uptech-fixed-example-domains-v1', 0)
+         )`,
+      );
+    } finally {
+      client.release();
+    }
+  };
 }
 
 async function asApiSession<Row extends QueryResultRow>(workspaceId: string, sessionId: string, text: string,
@@ -142,22 +227,25 @@ async function seedHandoff(input: { expiresAt?: Date; verifier?: Buffer; install
   const install = input.installation ?? installation;
   const expiresAt = input.expiresAt ?? new Date(Date.now()+60_000);
   const createdAt = new Date(expiresAt.getTime()-60_000);
-  await asRole("uptech_migration_owner", `
-    INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,
+  await asRoleBatch("uptech_migration_owner", [{
+    text: `INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,
       state_hash,nonce_hash,installation_binding_hash,app_exchange_challenge,pkce_envelope,
       pkce_kms_key_version,pkce_associated_data,status,request_id,created_at,expires_at,completed_at)
     SELECT $1,e.environment_name,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$2,$3,$4,$5,
       ROW(1,'AES-256-GCM',$6,$7,$8)::uptech.google_web_pkce_envelope_v1,
-      'a3-test-kms',convert_to('a3-test','UTF8'),'COMPLETED',$9,clock_timestamp(),
-      clock_timestamp()+interval '5 minutes',clock_timestamp()
-    FROM uptech.google_auth_environment_registry e WHERE e.is_active;
-    INSERT INTO uptech.mobile_handoffs(id,transaction_id,handoff_hash,platform,installation_binding_hash,
+      'a3-test-kms',convert_to('a3-test','UTF8'),'COMPLETED',$9,statement_timestamp(),
+      statement_timestamp()+interval '5 minutes',statement_timestamp()
+    FROM uptech.google_auth_environment_registry e WHERE e.is_active`,
+    values: [transaction,randomBytes(32),randomBytes(32),install,verifier,randomBytes(12),randomBytes(48),randomBytes(16),
+      randomUUID()],
+  }, {
+    text: `INSERT INTO uptech.mobile_handoffs(id,transaction_id,handoff_hash,platform,installation_binding_hash,
       app_exchange_challenge,identity_id,user_id,workspace_id,membership_id,user_security_version,
       identity_security_version,workspace_security_version,membership_authz_version,created_at,expires_at)
-    VALUES($10,$1,$11,'ANDROID',$4,$5,$12,$13,$14,$15,1,1,1,1,$17,$16)`,
-    [transaction,randomBytes(32),randomBytes(32),install,verifier,randomBytes(12),randomBytes(48),randomBytes(16),
-      randomUUID(),randomUUID(),handoff,ids.identity,ids.user,ids.workspace,ids.membership,
-      expiresAt,createdAt]);
+    VALUES($1,$2,$3,'ANDROID',$4,$5,$6,$7,$8,$9,1,1,1,1,$11,$10)`,
+    values: [randomUUID(),transaction,handoff,install,verifier,ids.identity,ids.user,ids.workspace,ids.membership,
+      expiresAt,createdAt],
+  }]);
   return { handoff, verifier, install };
 }
 
@@ -168,6 +256,29 @@ async function exchange(fixture: Awaited<ReturnType<typeof seedHandoff>>) {
       $1,$2,$3,$4,$5,$6,$7) r`,
     [randomBytes(32),fixture.handoff,fixture.verifier,fixture.install,access,refresh,randomUUID()]);
   return { ...row, access, refresh };
+}
+
+async function exchangeV2(input: {
+  handoff: Buffer;
+  verifier: Buffer;
+  install: Buffer;
+  networkHmac?: Buffer;
+}) {
+  const networkHmac = input.networkHmac ?? randomBytes(32);
+  const access = randomBytes(32);
+  const refresh = randomBytes(32);
+  const [row] = await api<{
+    outcome: string;
+    session_id: string | null;
+    denial_category: string | null;
+  }>(`SELECT result.outcome,result.session_id,
+      result.denial_category::text AS denial_category
+    FROM uptech.exchange_mobile_handoff_v2(
+      $1,$2,$3,$4,$5,$6,$7
+    ) AS result`, [
+      networkHmac,input.handoff,input.verifier,input.install,access,refresh,randomUUID(),
+    ]);
+  return { ...row, networkHmac, access, refresh };
 }
 
 async function nativeFamily(workspaceId: string, sessionId: string, access: Buffer, refresh: Buffer) {
@@ -182,26 +293,84 @@ async function nativeFamily(workspaceId: string, sessionId: string, access: Buff
   return family;
 }
 
-async function completeCallback(input: { workspaceId: string; domain: string; email: string; subject: string }) {
+async function completeCallback(input: {
+  workspaceId: string;
+  domain: string;
+  email: string;
+  subject: string;
+  issuer?: "https://accounts.google.com" | "accounts.google.com";
+}) {
   const transaction=randomUUID(); transactionIds.push(transaction);
   const completion=randomBytes(32); const nonce=randomBytes(32); const handoff=randomBytes(32);
+  const appExchangeChallenge=randomBytes(32);
   await asRole("uptech_migration_owner", `
     INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,
       nonce_hash,installation_binding_hash,app_exchange_challenge,pkce_envelope,pkce_kms_key_version,
       pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
     SELECT $1,e.environment_name,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$2,$3,$4,$5,
       ROW(1,'AES-256-GCM',$6,$7,$8)::uptech.google_web_pkce_envelope_v1,'a3-test-kms',
-      convert_to('a3-test','UTF8'),'EXCHANGE_RESERVED',$9,$10,clock_timestamp(),clock_timestamp()+interval '5 minutes',
-      clock_timestamp(),clock_timestamp()+interval '2 minutes'
+      convert_to('a3-test','UTF8'),'EXCHANGE_RESERVED',$9,$10,statement_timestamp(),statement_timestamp()+interval '5 minutes',
+      statement_timestamp(),statement_timestamp()+interval '2 minutes'
     FROM uptech.google_auth_environment_registry e WHERE e.is_active`,
-    [transaction,randomBytes(32),nonce,installation,randomBytes(32),randomBytes(12),randomBytes(48),randomBytes(16),completion,randomUUID()]);
+    [transaction,randomBytes(32),nonce,installation,appExchangeChallenge,randomBytes(12),randomBytes(48),randomBytes(16),completion,randomUUID()]);
   const requestId=randomUUID();
-  const [result]=await api<{outcome:string;category:string|null}>(`SELECT r.outcome::text,r.category::text
+  const [result]=await api<{outcome:string;category:string|null;app_return_uri:string|null}>(`SELECT r.outcome::text,
+      r.denial_category::text AS category,r.app_return_uri::text
     FROM uptech.complete_mobile_google_callback_v1($1,
-      ROW('https://accounts.google.com',$2,$3,true,$4,clock_timestamp(),clock_timestamp()+interval '5 minutes',
+      ROW($8::uptech.google_auth_issuer_v1,$2,$3,true,$4,clock_timestamp(),clock_timestamp()+interval '5 minutes',
         'GOOGLE_WEB_LOGIN_V1',NULL,$5)::uptech.google_verified_claims_assertion_v1,$6,$7) r`,
-    [completion,input.subject,input.email,input.domain,nonce,handoff,requestId]);
-  return { ...result, requestId };
+    [
+      completion,
+      input.subject,
+      input.email,
+      input.domain,
+      nonce,
+      handoff,
+      requestId,
+      input.issuer ?? "https://accounts.google.com",
+    ]);
+  return {
+    ...result,
+    requestId,
+    transactionId: transaction,
+    handoff,
+    verifier: appExchangeChallenge,
+    install: installation,
+  };
+}
+
+async function seedReservedDenialTransaction() {
+  const transactionId = randomUUID();
+  transactionIds.push(transactionId);
+  const completionHash = randomBytes(32);
+  const handoffHash = randomBytes(32);
+  const installationBinding = randomBytes(32);
+  const appExchangeChallenge = randomBytes(32);
+  await asRole("uptech_migration_owner", `
+    INSERT INTO uptech.mobile_google_transactions(
+      id,environment_name,platform,configuration_key,state_hash,nonce_hash,
+      installation_binding_hash,app_exchange_challenge,pkce_envelope,
+      pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,
+      request_id,created_at,expires_at,reserved_at,completion_expires_at
+    )
+    SELECT $1,e.environment_name,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$2,$3,$4,$5,
+      ROW(1,'AES-256-GCM',$6,$7,$8)::uptech.google_web_pkce_envelope_v1,
+      'a3-test-kms',convert_to('a3-test','UTF8'),'EXCHANGE_RESERVED',$9,$10,
+      statement_timestamp(),statement_timestamp()+interval '5 minutes',statement_timestamp(),
+      statement_timestamp()+interval '2 minutes'
+    FROM uptech.google_auth_environment_registry AS e
+    WHERE e.is_active`, [
+      transactionId, randomBytes(32), randomBytes(32), installationBinding,
+      appExchangeChallenge, randomBytes(12), randomBytes(48), randomBytes(16),
+      completionHash, randomUUID(),
+    ]);
+  return {
+    transactionId,
+    completionHash,
+    handoffHash,
+    installationBinding,
+    appExchangeChallenge,
+  };
 }
 
 before(async () => {
@@ -213,22 +382,39 @@ before(async () => {
     SELECT environment_name,'ANDROID','GOOGLE_MOBILE_ANDROID_V1','a3-test','a3-test',
       'https://uptech-knowledge-sigma.vercel.app/api/v1/auth/mobile/google/callback',
       'https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback',ARRAY['openid','email','profile'],
-      ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],'a3-test-kms','com.uptech.test',
+      ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],'a3-test-kms','unknown.example',
       'AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA',true
-    FROM uptech.google_auth_environment_registry WHERE is_active ON CONFLICT DO NOTHING;
-    INSERT INTO uptech.users(id,status,security_version) VALUES($1,'ACTIVE',1);
-    INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,security_version)
-      VALUES($2,$1,'GOOGLE','https://accounts.google.com',$3,'ACTIVE',1);
-    INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
-      VALUES($4,'ACTIVE','INVITE_ONLY',1);
-    INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status,authz_version)
-      VALUES($4,$5,$1,'MEMBER','ACTIVE',1)`,
-    [ids.user,ids.identity,existingSubject,ids.workspace,ids.membership]);
+    FROM uptech.google_auth_environment_registry WHERE is_active ON CONFLICT DO NOTHING`);
+  await asRole("uptech_migration_owner",
+    `INSERT INTO uptech.users(id,status,security_version) VALUES($1,'ACTIVE',1)`,
+    [ids.user]);
+  await asRole("uptech_migration_owner",
+    `INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,security_version)
+      VALUES($2,$1,'GOOGLE','https://accounts.google.com',$3,'ACTIVE',1)`,
+    [ids.user,ids.identity,existingSubject]);
+  await asRole("uptech_migration_owner",
+    `INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
+      VALUES($1,'ACTIVE','INVITE_ONLY',1)`,
+    [ids.workspace]);
+  await asRole("uptech_migration_owner",
+    `INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status,authz_version)
+      VALUES($1,$2,$3,'MEMBER','ACTIVE',1)`,
+    [ids.workspace,ids.membership,ids.user]);
 });
 
 after(async () => {
   if (!pool) return;
   await pool.end();
+});
+
+test("A3 fixtures use only the closed example-domain set", async () => {
+  const source = await readFile(new URL(import.meta.url),"utf8");
+  const domains = new Set(source.match(/[a-z0-9-]+\.example/gu) ?? []);
+  assert.deepEqual([...domains].sort(),[
+    "tenant-a.example","tenant-b.example","unknown.example",
+  ]);
+  assert.doesNotMatch(source,/\$\{[^}\r\n]+\}\.example/u);
+  assert.doesNotMatch(source,/[+]\s*["'`]\.example/u);
 });
 
 test("A3 catalog grants expose only API routines and keep shared session policies Web-only", async () => {
@@ -390,29 +576,176 @@ test("handoff is single-winner and wrong verifier, installation, or expiry issue
   ]) assert.equal((await exchange(bad)).outcome,"DENIED");
 });
 
+test("authenticated denial handoff is proof-bound, single-use, and never creates authority", async () => {
+  const fixture = await seedReservedDenialTransaction();
+  const [before] = await asRole<{ sessions: number; tokens: number }>(
+    "uptech_migration_owner",
+    `SELECT (SELECT count(*)::integer FROM uptech.sessions) AS sessions,
+       (SELECT count(*)::integer FROM uptech.session_tokens) AS tokens`,
+  );
+
+  const [completed] = await api<{
+    outcome: string;
+    app_return_uri: string | null;
+    denial_category: string | null;
+  }>(`SELECT result.outcome::text,result.app_return_uri::text,
+      result.denial_category::text
+    FROM uptech.complete_mobile_google_denial_v1(
+      $1,$2,'PROVIDER_REJECTED','GOOGLE_CANCELLED',$3
+    ) AS result`, [fixture.completionHash,fixture.handoffHash,randomUUID()]);
+  assert.equal(completed.outcome,"DENIED");
+  assert.equal(typeof completed.app_return_uri,"string");
+  assert.equal(completed.denial_category,"GOOGLE_CANCELLED");
+
+  const [persisted] = await asRole<{
+    transaction_status: string;
+    handoff_status: string;
+    denial_category: string;
+    authority_is_null: boolean;
+    lifetime_seconds: number;
+  }>("uptech_migration_owner", `
+    SELECT transaction_row.status::text AS transaction_status,
+      handoff_row.status::text AS handoff_status,
+      handoff_row.denial_category::text,
+      handoff_row.identity_id IS NULL AND handoff_row.user_id IS NULL
+        AND handoff_row.workspace_id IS NULL AND handoff_row.membership_id IS NULL
+        AND handoff_row.user_security_version IS NULL
+        AND handoff_row.identity_security_version IS NULL
+        AND handoff_row.workspace_security_version IS NULL
+        AND handoff_row.membership_authz_version IS NULL AS authority_is_null,
+      extract(epoch FROM handoff_row.expires_at-handoff_row.created_at)::integer
+        AS lifetime_seconds
+    FROM uptech.mobile_google_transactions AS transaction_row
+    JOIN uptech.mobile_handoffs AS handoff_row
+      ON handoff_row.transaction_id=transaction_row.id
+    WHERE transaction_row.id=$1`, [fixture.transactionId]);
+  assert.deepEqual(persisted, {
+    transaction_status: "REJECTED",
+    handoff_status: "ACTIVE",
+    denial_category: "GOOGLE_CANCELLED",
+    authority_is_null: true,
+    lifetime_seconds: 60,
+  });
+
+  assert.equal((await exchangeV2({
+    handoff: fixture.handoffHash,
+    verifier: randomBytes(32),
+    install: fixture.installationBinding,
+  })).outcome,"DENIED");
+  assert.equal((await exchangeV2({
+    handoff: fixture.handoffHash,
+    verifier: fixture.appExchangeChallenge,
+    install: randomBytes(32),
+  })).outcome,"DENIED");
+  assert.equal((await exchangeV2({
+    handoff: randomBytes(32),
+    verifier: fixture.appExchangeChallenge,
+    install: fixture.installationBinding,
+  })).outcome,"DENIED");
+
+  const [legacy] = await api<{ outcome: string }>(`
+    SELECT result.outcome::text
+    FROM uptech.exchange_mobile_handoff_v1($1,$2,$3,$4,$5,$6,$7) AS result`, [
+      randomBytes(32),fixture.handoffHash,fixture.appExchangeChallenge,
+      fixture.installationBinding,randomBytes(32),randomBytes(32),randomUUID(),
+    ]);
+  assert.equal(legacy.outcome,"DENIED");
+
+  const networkHmac = randomBytes(32);
+  const issuedDenial = await exchangeV2({
+    handoff: fixture.handoffHash,
+    verifier: fixture.appExchangeChallenge,
+    install: fixture.installationBinding,
+    networkHmac,
+  });
+  assert.deepEqual({
+    outcome: issuedDenial.outcome,
+    session_id: issuedDenial.session_id,
+    denial_category: issuedDenial.denial_category,
+  }, {
+    outcome: "ACCESS_DENIED",
+    session_id: null,
+    denial_category: "GOOGLE_CANCELLED",
+  });
+  assert.equal((await exchangeV2({
+    handoff: fixture.handoffHash,
+    verifier: fixture.appExchangeChallenge,
+    install: fixture.installationBinding,
+  })).outcome,"DENIED");
+
+  const [after] = await asRole<{
+    sessions: number;
+    tokens: number;
+    admission_count: number;
+    handoff_status: string;
+  }>("uptech_migration_owner", `
+    SELECT (SELECT count(*)::integer FROM uptech.sessions) AS sessions,
+      (SELECT count(*)::integer FROM uptech.session_tokens) AS tokens,
+      (SELECT sum(request_count)::integer
+       FROM uptech.google_auth_rate_limit_buckets
+       WHERE network_hmac=$1) AS admission_count,
+      (SELECT status::text FROM uptech.mobile_handoffs
+       WHERE handoff_hash=$2) AS handoff_status`, [networkHmac,fixture.handoffHash]);
+  assert.deepEqual(after, {
+    sessions: before.sessions,
+    tokens: before.tokens,
+    admission_count: 1,
+    handoff_status: "CONSUMED",
+  });
+});
+
+test("v2 handoff exchange delegates normal issuance unchanged", async () => {
+  const fixture = await seedHandoff();
+  const result = await exchangeV2(fixture);
+  assert.equal(result.outcome,"ISSUED");
+  assert.equal(typeof result.session_id,"string");
+  assert.equal(result.denial_category,null);
+});
+
 test("callback locks hosted-domain authority, preserves active group members, and provisions with schema-valid SYSTEM audits", async () => {
-  const activeDomain=`active-${randomUUID()}.example`; const autoDomain=`auto-${randomUUID()}.example`;
-  const inviteDomain=`invite-${randomUUID()}.example`; const inviteEmail=`invited-${randomUUID()}@${inviteDomain}`;
-  const autoWorkspace=randomUUID(); const inviteWorkspace=randomUUID();
-  await asRole("uptech_migration_owner", `
-    UPDATE uptech.workspaces SET provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1;
-    INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
-      VALUES($2,$1,'VERIFIED',clock_timestamp());
-    INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
-      VALUES($3,'ACTIVE','DOMAIN_AUTO_PROVISION',1);
-    INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
-      VALUES($4,$3,'VERIFIED',clock_timestamp());
-    INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
-      VALUES($5,'ACTIVE','INVITE_ONLY',1);
-    INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
-      VALUES($6,$5,'VERIFIED',clock_timestamp());
-    INSERT INTO uptech.invitations(workspace_id,id,normalized_email,token_hash,role,status,created_at,expires_at,accepted_at)
-      VALUES($5,$7,$8,$9,'MEMBER','ACCEPTED',clock_timestamp(),clock_timestamp()+interval '1 day',clock_timestamp())`,
-    [ids.workspace,activeDomain,autoWorkspace,autoDomain,inviteWorkspace,inviteDomain,randomUUID(),inviteEmail,randomBytes(32)]);
-  assert.equal((await completeCallback({workspaceId:ids.workspace,domain:activeDomain,
-    email:`existing-${randomUUID()}@${activeDomain}`,subject:existingSubject})).outcome,"NORMAL");
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  try {
+  const activeDomain="tenant-a.example";
+  const autoDomain="tenant-b.example";
+  const inviteDomain="unknown.example";
+  const inviteEmail="invited-user@unknown.example";
+  const activeWorkspace=await ensureFixedExampleWorkspace(activeDomain,"ACTIVE");
+  const autoWorkspace=await ensureFixedExampleWorkspace(autoDomain,"ACTIVE");
+  const inviteWorkspace=await ensureFixedExampleWorkspace(inviteDomain,"ACTIVE");
+  const activeMembership=randomUUID();
+  await asRoleBatch("uptech_migration_owner", [
+    {
+      text: `UPDATE uptech.workspaces
+        SET provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1`,
+      values: [activeWorkspace],
+    },
+    {
+      text: `UPDATE uptech.workspaces
+        SET provisioning_policy='INVITE_ONLY' WHERE workspace_id=$1`,
+      values: [inviteWorkspace],
+    },
+    {
+      text: `INSERT INTO uptech.workspace_memberships
+        (workspace_id,id,user_id,role,status,authz_version)
+        SELECT $1,$2,$3,'MEMBER','ACTIVE',1
+        WHERE NOT EXISTS (
+          SELECT 1 FROM uptech.workspace_memberships
+          WHERE workspace_id=$1 AND user_id=$3
+        )`,
+      values: [activeWorkspace,activeMembership,ids.user],
+    },
+    {
+      text: `INSERT INTO uptech.invitations
+        (workspace_id,id,normalized_email,token_hash,role,status,created_at,expires_at,accepted_at)
+        VALUES($1,$2,$3,$4,'MEMBER','ACCEPTED',clock_timestamp(),
+          clock_timestamp()+interval '1 day',clock_timestamp())`,
+      values: [inviteWorkspace,randomUUID(),inviteEmail,randomBytes(32)],
+    },
+  ]);
+  assert.equal((await completeCallback({workspaceId:activeWorkspace,domain:activeDomain,
+    email:"existing-user@tenant-a.example",subject:existingSubject})).outcome,"NORMAL");
   const auto=await completeCallback({workspaceId:autoWorkspace,domain:autoDomain,
-    email:`new-${randomUUID()}@${autoDomain}`,subject:`subject-${randomUUID()}`});
+    email:"new-user@tenant-b.example",subject:`subject-${randomUUID()}`});
   assert.equal(auto.outcome,"NORMAL");
   const [audit]=await asRole<{count:number}>("uptech_migration_owner", `SELECT count(*)::int count
     FROM uptech.audit_events WHERE workspace_id=$1 AND request_id=$2 AND actor_kind='SYSTEM'
@@ -427,6 +760,277 @@ test("callback locks hosted-domain authority, preserves active group members, an
       AND actor_id IS NULL AND membership_id IS NULL AND session_id IS NULL
       AND action IN ('INVITATION_CONSUMED','MEMBERSHIP_PROVISIONED')`, [inviteWorkspace,invited.requestId]);
   assert.equal(inviteAudit.count,2);
+  } finally {
+    await releaseFixedDomains();
+  }
+});
+
+test("Mobile A3 public completion gives GROUP_CONTROLLED subjects without membership only a denial handoff", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  const domain = "tenant-a.example";
+  try {
+    const workspaceId = await ensureFixedExampleWorkspace(domain, "ACTIVE");
+    await asRole(
+      "uptech_migration_owner",
+      `UPDATE uptech.workspaces
+       SET provisioning_policy = 'GOOGLE_GROUP_CONTROLLED'
+       WHERE workspace_id = $1::uuid`,
+      [workspaceId],
+    );
+    const subject = `group-unprovisioned-${randomUUID()}`;
+    const completion = await completeCallback({
+      workspaceId,
+      domain,
+      email: "member@tenant-a.example",
+      subject,
+    });
+
+    assert.deepEqual(
+      {
+        outcome: completion.outcome,
+        category: completion.category,
+        hasReturnUri: typeof completion.app_return_uri === "string",
+      },
+      {
+        outcome: "DENIED",
+        category: "POLICY_OR_DEVICE_BLOCKED",
+        hasReturnUri: true,
+      },
+    );
+    const [handoff] = await asRole<{
+      denial_category: string;
+      normal_authority_fields: number;
+      identity_count: number;
+    }>("uptech_migration_owner", `
+      SELECT handoff_row.denial_category::text AS denial_category,
+        pg_catalog.num_nonnulls(
+          handoff_row.identity_id, handoff_row.user_id,
+          handoff_row.workspace_id, handoff_row.membership_id,
+          handoff_row.user_security_version,
+          handoff_row.identity_security_version,
+          handoff_row.workspace_security_version,
+          handoff_row.membership_authz_version
+        )::integer AS normal_authority_fields,
+        (SELECT count(*)::integer FROM uptech.identities
+         WHERE provider = 'GOOGLE' AND provider_subject = $2) AS identity_count
+      FROM uptech.mobile_handoffs AS handoff_row
+      WHERE handoff_row.handoff_hash = $1::uptech.google_auth_hash32_v1`,
+      [completion.handoff, subject],
+    );
+    assert.deepEqual(handoff, {
+      denial_category: "POLICY_OR_DEVICE_BLOCKED",
+      normal_authority_fields: 0,
+      identity_count: 0,
+    });
+
+    const exchanged = await exchangeV2({
+      handoff: completion.handoff,
+      verifier: completion.verifier,
+      install: completion.install,
+    });
+    assert.deepEqual(
+      {
+        outcome: exchanged.outcome,
+        sessionId: exchanged.session_id,
+        category: exchanged.denial_category,
+      },
+      {
+        outcome: "ACCESS_DENIED",
+        sessionId: null,
+        category: "POLICY_OR_DEVICE_BLOCKED",
+      },
+    );
+    const [tokens] = await asRole<{ count: number }>(
+      "uptech_migration_owner",
+      `SELECT count(*)::integer AS count
+       FROM uptech.session_tokens
+       WHERE token_hash IN (
+         $1::uptech.google_auth_hash32_v1,
+         $2::uptech.google_auth_hash32_v1
+       )`,
+      [exchanged.access, exchanged.refresh],
+    );
+    assert.equal(tokens.count, 0);
+  } finally {
+    await asRole(
+      "uptech_migration_owner",
+      `UPDATE uptech.workspaces AS workspace_row
+       SET provisioning_policy = 'DOMAIN_AUTO_PROVISION'
+       FROM uptech.workspace_domain_locators AS locator
+       WHERE locator.workspace_id = workspace_row.workspace_id
+         AND locator.normalized_domain = $1::uptech.google_normalized_domain_v1`,
+      [domain],
+    );
+    await releaseFixedDomains();
+  }
+});
+
+test("mobile callback never JIT-attaches an existing Google subject to another tenant", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  try {
+  await ensureFixedExampleWorkspace("tenant-a.example", "ACTIVE");
+  const targetWorkspace = await ensureFixedExampleWorkspace(
+    "tenant-b.example",
+    "ACTIVE",
+  );
+  await asRole("uptech_migration_owner", `
+    UPDATE uptech.identities
+    SET hosted_domain_claim='tenant-a.example'
+    WHERE id=$1`,
+    [ids.identity]);
+
+  const result = await completeCallback({
+    workspaceId: targetWorkspace,
+    domain: "tenant-b.example",
+    email: "person@tenant-b.example",
+    subject: existingSubject,
+    issuer: "accounts.google.com",
+  });
+  assert.deepEqual(
+    { outcome: result.outcome, category: result.category },
+    { outcome: "DENIED", category: "AUTH_ERROR" },
+  );
+
+  const [persisted] = await asRole<{
+    hosted_domain_claim: string | null;
+    target_memberships: number;
+    transaction_status: string;
+  }>("uptech_migration_owner", `
+    SELECT identity_row.hosted_domain_claim,
+      (SELECT count(*)::integer
+       FROM uptech.workspace_memberships AS membership_row
+       WHERE membership_row.workspace_id=$2
+         AND membership_row.user_id=identity_row.user_id) AS target_memberships,
+      (SELECT status::text
+       FROM uptech.mobile_google_transactions
+       WHERE id=$3::uuid) AS transaction_status
+    FROM uptech.identities AS identity_row
+    WHERE identity_row.id=$1`, [
+      ids.identity,
+      targetWorkspace,
+      result.transactionId,
+    ]);
+  assert.deepEqual(persisted, {
+    hosted_domain_claim: "tenant-a.example",
+    target_memberships: 0,
+    transaction_status: "REJECTED",
+  });
+  } finally {
+    await releaseFixedDomains();
+  }
+});
+
+test("mobile callback cannot reactivate a deprovisioned member", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  try {
+  const userId = randomUUID();
+  const identityId = randomUUID();
+  const membershipId = randomUUID();
+  const workspaceId = await ensureFixedExampleWorkspace(
+    "tenant-a.example",
+    "ACTIVE",
+  );
+  const subject = `deprovisioned-${randomUUID()}`;
+  await asRoleBatch("uptech_migration_owner", [
+    {
+      text: `INSERT INTO uptech.users(id,status,security_version)
+        VALUES($1,'ACTIVE',1)`,
+      values: [userId],
+    },
+    {
+      text: `INSERT INTO uptech.identities
+        (id,user_id,provider,issuer,provider_subject,status,security_version,hosted_domain_claim)
+        VALUES($1,$2,'GOOGLE','https://accounts.google.com',$3,'ACTIVE',1,'tenant-a.example')`,
+      values: [identityId,userId,subject],
+    },
+    {
+      text: `INSERT INTO uptech.workspace_memberships
+        (workspace_id,id,user_id,role,status,authz_version)
+        VALUES($1,$2,$3,'MEMBER','DEPROVISIONED',1)`,
+      values: [workspaceId,membershipId,userId],
+    },
+  ]);
+
+  const result = await completeCallback({
+    workspaceId,
+    domain: "tenant-a.example",
+    email: "person@tenant-a.example",
+    subject,
+  });
+  assert.deepEqual(
+    { outcome: result.outcome, category: result.category },
+    { outcome: "DENIED", category: "USER_SUSPENDED" },
+  );
+  const [persisted] = await asRole<{
+    status: string;
+    handoff_count: number;
+    transaction_status: string;
+  }>(
+    "uptech_migration_owner",
+    `SELECT membership_row.status::text,
+       (SELECT count(*)::integer
+        FROM uptech.mobile_handoffs AS handoff_row
+        WHERE handoff_row.identity_id=$2) AS handoff_count,
+       (SELECT status::text
+        FROM uptech.mobile_google_transactions
+        WHERE id=$4::uuid) AS transaction_status
+     FROM uptech.workspace_memberships AS membership_row
+     WHERE membership_row.workspace_id=$1 AND membership_row.id=$3`,
+    [workspaceId, identityId, membershipId, result.transactionId],
+  );
+  assert.deepEqual(persisted, {
+    status: "DEPROVISIONED",
+    handoff_count: 0,
+    transaction_status: "REJECTED",
+  });
+  } finally {
+    await releaseFixedDomains();
+  }
+});
+
+test("callback distinguishes a suspended workspace from a suspended user", async () => {
+  const releaseFixedDomains = await acquireFixedExampleDomainLock();
+  try {
+  const suspendedWorkspace = await ensureFixedExampleWorkspace(
+    "unknown.example",
+    "SUSPENDED",
+  );
+
+  const result = await completeCallback({
+    workspaceId: suspendedWorkspace,
+    domain: "unknown.example",
+    email: "person@unknown.example",
+    subject: `suspended-workspace-${randomUUID()}`,
+  });
+
+  assert.deepEqual({ outcome: result.outcome, category: result.category }, {
+    outcome: "DENIED",
+    category: "WORKSPACE_SUSPENDED",
+  });
+  assert.equal(typeof result.app_return_uri,"string");
+  const exchanged = await exchangeV2(result);
+  assert.deepEqual({
+    outcome: exchanged.outcome,
+    session_id: exchanged.session_id,
+    denial_category: exchanged.denial_category,
+  }, {
+    outcome: "ACCESS_DENIED",
+    session_id: null,
+    denial_category: "WORKSPACE_SUSPENDED",
+  });
+  assert.deepEqual(
+    await asRole<{ status: string }>(
+      "uptech_migration_owner",
+      `SELECT status::text
+       FROM uptech.mobile_google_transactions
+       WHERE id=$1::uuid`,
+      [result.transactionId],
+    ),
+    [{ status: "REJECTED" }],
+  );
+  } finally {
+    await releaseFixedDomains();
+  }
 });
 
 test("refresh exact replay returns one capsule and differing reuse atomically revokes and audits", async () => {
@@ -463,11 +1067,20 @@ test("refresh rejects a NULL idempotency key before mutating the token family", 
 
 test("workspace switch rotates once, replays exactly, denies mismatches and old credentials, and inherits absolute expiry", async () => {
   const targetWorkspace=randomUUID(); const targetMembership=randomUUID();
-  await asRole("uptech_migration_owner", `
-    INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,security_version)
-      VALUES($1,'ACTIVE','INVITE_ONLY',1);
-    INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status,authz_version)
-      VALUES($1,$2,$3,'MEMBER','ACTIVE',1)`, [targetWorkspace,targetMembership,ids.user]);
+  await asRoleBatch("uptech_migration_owner", [
+    {
+      text: `INSERT INTO uptech.workspaces
+        (workspace_id,status,provisioning_policy,security_version)
+        VALUES($1,'ACTIVE','INVITE_ONLY',1)`,
+      values: [targetWorkspace],
+    },
+    {
+      text: `INSERT INTO uptech.workspace_memberships
+        (workspace_id,id,user_id,role,status,authz_version)
+        VALUES($1,$2,$3,'MEMBER','ACTIVE',1)`,
+      values: [targetWorkspace,targetMembership,ids.user],
+    },
+  ]);
 
   const issued=await exchange(await seedHandoff()); assert.equal(issued.outcome,"ISSUED"); assert.ok(issued.session_id);
   const absoluteExpiry=new Date(Date.now()+5*60_000);

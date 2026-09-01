@@ -17,7 +17,7 @@ export class GoogleWorkspaceAccountRequiredError extends GoogleClaimsValidationE
 }
 
 export interface VerifiedGoogleClaims {
-  readonly issuer: "https://accounts.google.com" | "accounts.google.com";
+  readonly issuer: typeof GOOGLE_ISSUER;
   readonly providerSubject: string;
   readonly normalizedEmail: string;
   readonly emailVerified: true;
@@ -185,7 +185,7 @@ export function verifyGoogleWorkspaceClaims(
   const hostedDomain = normalizeHostedDomain(claims.hd);
 
   return Object.freeze({
-    issuer: claims.iss,
+    issuer: GOOGLE_ISSUER,
     providerSubject,
     normalizedEmail,
     emailVerified: true,

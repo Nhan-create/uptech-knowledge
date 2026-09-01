@@ -12,6 +12,7 @@ type LoginState = Readonly<{
   actionLabel: string;
   isError: boolean;
   showAlternateAccountAction?: boolean;
+  showContactUptechAction?: boolean;
 }>;
 
 type LoginCopy = Readonly<{
@@ -19,36 +20,40 @@ type LoginCopy = Readonly<{
   states: Readonly<Record<string, LoginState>>;
   home: string;
   homeLabel: string;
-  account: string;
   alternateAccount: string;
+  contactUptech: string;
+  requestId: string;
+  redirecting: string;
 }>;
 
 const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
   personal_gmail: {
     title: "Tài khoản không hợp lệ",
-    description: "Vui lòng nhập tài khoản Workspace, không phải tài khoản Google.",
+    description: "Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
     actionLabel: "Đăng nhập bằng tài khoản khác",
     isError: true,
   },
   personal_account: {
     title: "Tài khoản không hợp lệ",
-    description: "Vui lòng nhập tài khoản Workspace, không phải tài khoản Google.",
+    description: "Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
     actionLabel: "Đăng nhập bằng tài khoản khác",
     isError: true,
   },
   unknown_workspace: {
-    title: "Không tìm thấy workspace",
+    title: "Tổ chức của bạn chưa được đăng ký",
     description:
-      "Tài khoản Google của bạn đã được xác minh, nhưng tổ chức này chưa được cấu hình trên UPTECH KNOWLEDGE.",
+      "Tài khoản Google đã được xác minh, nhưng tổ chức của bạn chưa được thiết lập trên UPTECH KNOWLEDGE.",
     actionLabel: "Đăng nhập bằng tài khoản khác",
     isError: true,
+    showContactUptechAction: true,
   },
   workspace_not_found: {
-    title: "Không tìm thấy workspace",
+    title: "Tổ chức của bạn chưa được đăng ký",
     description:
-      "Tài khoản Google của bạn đã được xác minh, nhưng tổ chức này chưa được cấu hình trên UPTECH KNOWLEDGE.",
+      "Tài khoản Google đã được xác minh, nhưng tổ chức của bạn chưa được thiết lập trên UPTECH KNOWLEDGE.",
     actionLabel: "Đăng nhập bằng tài khoản khác",
     isError: true,
+    showContactUptechAction: true,
   },
   access_required: {
     title: "Bạn chưa được cấp quyền truy cập",
@@ -70,6 +75,21 @@ const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
       "Tài khoản này hiện không còn quyền truy cập UPTECH KNOWLEDGE. Vui lòng liên hệ quản trị viên của tổ chức.",
     actionLabel: "Đăng nhập bằng tài khoản khác",
     isError: true,
+  },
+  user_suspended: {
+    title: "Tài khoản đã bị tạm ngưng",
+    description:
+      "Tài khoản của bạn đã bị tạm ngưng. Vui lòng liên hệ quản trị viên của tổ chức.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+  },
+  workspace_suspended: {
+    title: "Workspace đã bị tạm ngưng",
+    description:
+      "Workspace của tổ chức bạn đang tạm ngưng. Vui lòng liên hệ UPTECH để được hỗ trợ.",
+    actionLabel: "Đăng nhập bằng tài khoản khác",
+    isError: true,
+    showContactUptechAction: true,
   },
   session_expired: {
     title: "Phiên đăng nhập đã hết hạn",
@@ -93,9 +113,9 @@ const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
     showAlternateAccountAction: true,
   },
   provider_rejected: {
-    title: "Đăng nhập chưa hoàn tất",
+    title: "Đăng nhập đã bị hủy",
     description:
-      "Yêu cầu đăng nhập đã bị hủy hoặc từ chối. Bạn có thể thử lại khi sẵn sàng.",
+      "Bạn có thể thử lại bằng tài khoản Google Workspace khác.",
     actionLabel: "Thử lại",
     isError: true,
     showAlternateAccountAction: true,
@@ -120,29 +140,31 @@ const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
 const englishStates: Readonly<Record<string, LoginState>> = Object.freeze({
   personal_gmail: {
     title: "Invalid account",
-    description: "Please use a Workspace account, not a personal Google account.",
+    description: "Please use the Google Workspace account provided by your organization.",
     actionLabel: "Sign in with another account",
     isError: true,
   },
   personal_account: {
     title: "Invalid account",
-    description: "Please use a Workspace account, not a personal Google account.",
+    description: "Please use the Google Workspace account provided by your organization.",
     actionLabel: "Sign in with another account",
     isError: true,
   },
   unknown_workspace: {
-    title: "Workspace not found",
+    title: "Your organization is not registered",
     description:
-      "Your Google account was verified, but this organization has not been configured in UPTECH KNOWLEDGE.",
+      "Your Google account was verified, but your organization has not been set up in UPTECH KNOWLEDGE.",
     actionLabel: "Sign in with another account",
     isError: true,
+    showContactUptechAction: true,
   },
   workspace_not_found: {
-    title: "Workspace not found",
+    title: "Your organization is not registered",
     description:
-      "Your Google account was verified, but this organization has not been configured in UPTECH KNOWLEDGE.",
+      "Your Google account was verified, but your organization has not been set up in UPTECH KNOWLEDGE.",
     actionLabel: "Sign in with another account",
     isError: true,
+    showContactUptechAction: true,
   },
   access_required: {
     title: "Access has not been granted",
@@ -162,6 +184,19 @@ const englishStates: Readonly<Record<string, LoginState>> = Object.freeze({
       "This account no longer has access to UPTECH KNOWLEDGE. Contact your organization administrator.",
     actionLabel: "Sign in with another account",
     isError: true,
+  },
+  user_suspended: {
+    title: "Account suspended",
+    description: "Your account is suspended. Contact your organization administrator.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+  },
+  workspace_suspended: {
+    title: "Workspace suspended",
+    description: "Your organization's workspace is suspended. Contact UPTECH for support.",
+    actionLabel: "Sign in with another account",
+    isError: true,
+    showContactUptechAction: true,
   },
   session_expired: {
     title: "Session expired",
@@ -209,15 +244,17 @@ const loginCopy: Record<Locale, LoginCopy> = {
   vi: {
     normal: {
       title: "Đăng nhập vào workspace",
-      description: "Sử dụng tài khoản Workspace của bạn.",
+      description: "Sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
       actionLabel: "Tiếp tục với Google Workspace",
       isError: false,
     },
     states: vietnameseStates,
     home: "Trang chủ",
     homeLabel: "UPTECH KNOWLEDGE - Trang chủ",
-    account: "Tài khoản",
     alternateAccount: "Đăng nhập bằng tài khoản khác",
+    contactUptech: "Liên hệ UPTECH",
+    requestId: "Mã yêu cầu",
+    redirecting: "Đang chuyển đến Google…",
   },
   en: {
     normal: {
@@ -229,8 +266,10 @@ const loginCopy: Record<Locale, LoginCopy> = {
     states: englishStates,
     home: "Home",
     homeLabel: "UPTECH KNOWLEDGE - Home",
-    account: "Account",
     alternateAccount: "Sign in with another account",
+    contactUptech: "Contact UPTECH",
+    requestId: "Request ID",
+    redirecting: "Redirecting to Google…",
   },
 };
 
@@ -241,11 +280,11 @@ function resolveLoginState(copy: LoginCopy, error?: string): LoginState {
 
 export function GoogleWorkspaceLogin({
   error,
-  account,
+  requestId,
   locale,
 }: {
   readonly error?: string;
-  readonly account?: string;
+  readonly requestId?: string;
   readonly locale: Locale;
 }) {
   const copy = loginCopy[locale];
@@ -362,18 +401,27 @@ export function GoogleWorkspaceLogin({
             </p>
           </div>
 
-          {account !== undefined ? (
-            <div className="mt-5 rounded-xl border border-slate-700/80 bg-slate-950/45 px-4 py-3 text-sm">
-              <p className="text-xs text-slate-400">{copy.account}</p>
-              <p className="mt-1 break-all font-medium text-slate-200">
-                {account}
-              </p>
-            </div>
+          {requestId !== undefined ? (
+            <p className="mt-4 text-center text-xs text-slate-500">
+              {copy.requestId}: <span className="font-mono text-slate-400">{requestId}</span>
+            </p>
+          ) : null}
+
+          {state.showContactUptechAction ? (
+            <a
+              href="mailto:contact@uptech.vn"
+              className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-xl border border-blue-400/60 bg-blue-500 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-surface)]"
+            >
+              {copy.contactUptech}
+            </a>
           ) : null}
 
           <div aria-live="polite">
             <form action="/api/v1/auth/google/transactions" method="post">
-              <GoogleLoginSubmitButton label={state.actionLabel} />
+              <GoogleLoginSubmitButton
+                label={state.actionLabel}
+                loadingLabel={copy.redirecting}
+              />
             </form>
           </div>
 

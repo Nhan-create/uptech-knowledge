@@ -17,7 +17,7 @@ export function LogoutButton() {
         cache: "no-store",
       });
       if (bootstrap.status === 401) {
-        router.replace("/login");
+        router.replace("/login?error=session_expired");
         router.refresh();
         return;
       }

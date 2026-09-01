@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { inspectBrowserAuthority } from "./browser-authority.ts";
 import { ONBOARDING_COOKIE_NAME } from "./google/crypto.ts";
+import { WebSessionAuthenticationError } from "./web-session.ts";
 import {
   issueSessionCredential,
   WEB_SESSION_COOKIE_NAME,
@@ -14,28 +15,56 @@ const NORMAL = Object.freeze({
   tokenKind: "WEB_SESSION",
 });
 const ONBOARDING = Object.freeze({ kind: "onboarding" });
+const SESSION_PEPPER = new Uint8Array(32).fill(0x31);
 
 function credential(): string {
   return issueSessionCredential().raw_token;
 }
 
-test("valid normal and onboarding credentials are active authority", async () => {
-  for (const [name, context] of [
-    [WEB_SESSION_COOKIE_NAME, NORMAL],
-    [ONBOARDING_COOKIE_NAME, ONBOARDING],
-  ] as const) {
-    const result = await inspectBrowserAuthority(
-      new Headers({ cookie: `${name}=${credential()}` }),
-      {} as never,
-      async () => context as never,
-    );
-    assert.deepEqual(result, { active: true, staleCookieHeaders: [] });
-  }
+test("a valid normal credential is active Web authority", async () => {
+  const result = await inspectBrowserAuthority(
+    new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}` }),
+    {} as never,
+    {
+      sessionPepper: SESSION_PEPPER,
+      authenticateSession: async () => NORMAL as never,
+      authenticateWebSession: async () => ({}) as never,
+    },
+  );
+  assert.deepEqual(result, {
+    active: true,
+    activeKind: "WEB_SESSION",
+    staleCookieHeaders: [],
+  });
+});
+
+test("legacy onboarding authority is classified and retired when no route exists", async () => {
+  const result = await inspectBrowserAuthority(
+    new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
+    {} as never,
+    {
+      sessionPepper: SESSION_PEPPER,
+      authenticateSession: async () => ONBOARDING as never,
+      authenticateWebSession: async () => ({}) as never,
+    },
+  );
+  assert.equal(result.active, true);
+  assert.equal(result.activeKind, "ONBOARDING");
+  assert.equal(result.staleCookieHeaders.length, 1);
+  assert.match(result.staleCookieHeaders[0], new RegExp(`^${ONBOARDING_COOKIE_NAME}=;`));
 });
 
 test("expired, revoked, garbage, duplicate, and wrong-kind cookies are recoverable", async () => {
   const stale = credential();
-  const cases = [
+  const cases: readonly Readonly<{
+    cookie: string;
+    authenticate: () => Promise<Readonly<{
+      kind?: string;
+      clientType?: string;
+      tokenKind?: string;
+    }> | null>;
+    cleared: string;
+  }>[] = [
     {
       cookie: `${WEB_SESSION_COOKIE_NAME}=${stale}`,
       authenticate: async () => null,
@@ -57,7 +86,7 @@ test("expired, revoked, garbage, duplicate, and wrong-kind cookies are recoverab
     },
     {
       cookie: `${ONBOARDING_COOKIE_NAME}=${stale}`,
-      authenticate: async () => NORMAL as never,
+      authenticate: async () => NORMAL,
       cleared: ONBOARDING_COOKIE_NAME,
     },
   ];
@@ -65,9 +94,24 @@ test("expired, revoked, garbage, duplicate, and wrong-kind cookies are recoverab
     const result = await inspectBrowserAuthority(
       new Headers({ cookie: scenario.cookie }),
       {} as never,
-      scenario.authenticate as never,
+      {
+        sessionPepper: SESSION_PEPPER,
+        authenticateSession: scenario.authenticate as never,
+        authenticateWebSession: async () => {
+          const context = await scenario.authenticate();
+          if (
+            context?.kind === "session" &&
+            context.clientType === "WEB" &&
+            context.tokenKind === "WEB_SESSION"
+          ) {
+            return {} as never;
+          }
+          throw new WebSessionAuthenticationError("stale Web authority");
+        },
+      },
     );
     assert.equal(result.active, false);
+    assert.equal(result.activeKind, null);
     assert.equal(result.staleCookieHeaders.length, 1);
     assert.match(
       result.staleCookieHeaders[0],
@@ -83,8 +127,14 @@ test("database uncertainty neither clears nor reclassifies authority", async () 
         cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}`,
       }),
       {} as never,
-      async () => {
-        throw new Error("database unavailable");
+      {
+        sessionPepper: SESSION_PEPPER,
+        authenticateSession: async () => {
+          throw new Error("database unavailable");
+        },
+        authenticateWebSession: async () => {
+          throw new Error("database unavailable");
+        },
       },
     ),
     /database unavailable/u,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,7 @@ function runGuard(root, overrides = {}) {
       VERCEL_GIT_REPO_SLUG: "uptech-knowledge",
       VERCEL_GIT_COMMIT_REF: "main",
       UPTECH_ANDROID_APP_LINKS_SHA256: androidFingerprint,
+      UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "false",
       ...overrides,
     },
   });
@@ -79,6 +80,7 @@ function runAssociationGenerator(root, overrides = {}) {
       UPTECH_ASSOCIATION_OUTPUT_ROOT: root,
       VERCEL_ENV: "production",
       UPTECH_ANDROID_APP_LINKS_SHA256: androidFingerprint,
+      UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "false",
       ...overrides,
     },
   });
@@ -128,6 +130,24 @@ test("rejects legacy fragment navigation and a missing login video", async () =>
   assert.match(output, /dedicated public route links are incomplete/);
   assert.match(output, /legacy fragment navigation is forbidden/);
   assert.match(output, /login background video contract is incomplete/);
+});
+
+test("keeps Git pushes detached from production-domain promotion", async () => {
+  const configuration = JSON.parse(
+    await readFile(join(repoRoot, "vercel.json"), "utf8"),
+  );
+
+  assert.deepEqual(configuration.git?.deploymentEnabled, { "*": false });
+  assert.deepEqual(configuration.headers, [
+    {
+      source: "/.well-known/apple-app-site-association",
+      headers: [{ key: "Content-Type", value: "application/json" }],
+    },
+    {
+      source: "/apple-app-site-association",
+      headers: [{ key: "Content-Type", value: "application/json" }],
+    },
+  ]);
 });
 
 test("requires the configured uppercase Android release fingerprint", async () => {
@@ -194,11 +214,41 @@ test("requires iOS association only when explicitly enabled with a configured Te
       }],
     },
   }));
+  const missingWellKnown = runGuard(fixtureRoot, {
+    UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "true",
+    UPTECH_IOS_TEAM_ID: "UPTECH1234",
+  });
+  assert.notEqual(missingWellKnown.status, 0);
+  assert.match(
+    `${missingWellKnown.stdout}\n${missingWellKnown.stderr}`,
+    /iOS universal links association is incomplete/,
+  );
+  await writeFixtureFile(
+    fixtureRoot,
+    "public/.well-known/apple-app-site-association",
+    await readFile(join(fixtureRoot, "public/apple-app-site-association"), "utf8"),
+  );
   const enabled = runGuard(fixtureRoot, {
     UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "true",
     UPTECH_IOS_TEAM_ID: "UPTECH1234",
   });
   assert.equal(enabled.status, 0, enabled.stderr || enabled.stdout);
+});
+
+test("production association steps reject a missing iOS release mode", async () => {
+  const fixtureRoot = await createValidProductionFixture();
+  for (const result of [
+    runGuard(fixtureRoot, { UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "" }),
+    runAssociationGenerator(fixtureRoot, {
+      UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "",
+    }),
+  ]) {
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /UPTECH_IOS_UNIVERSAL_LINKS_ENABLED|iOS universal links flag/u,
+    );
+  }
 });
 
 test("rejects a stale Apple association when iOS universal links are disabled", async () => {
@@ -246,6 +296,30 @@ test("generates the exact Android association from the configured release finger
       sha256_cert_fingerprints: [androidFingerprint],
     },
   }]);
+});
+
+test("generates identical root and well-known Apple association documents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "uptech-association-generator-ios-"));
+  const result = runAssociationGenerator(root, {
+    UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "true",
+    UPTECH_IOS_TEAM_ID: "UPTECH1234",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const [rootAssociation, wellKnownAssociation] = await Promise.all([
+    readFile(join(root, "public/apple-app-site-association"), "utf8"),
+    readFile(join(root, "public/.well-known/apple-app-site-association"), "utf8"),
+  ]);
+  assert.equal(rootAssociation, wellKnownAssociation);
+  assert.deepEqual(JSON.parse(rootAssociation), {
+    applinks: {
+      apps: [],
+      details: [{
+        appID: "UPTECH1234.vn.uptech.uptechKnowledgeMobile",
+        paths: ["/auth/mobile/callback"],
+      }],
+    },
+  });
 });
 
 test("generator rejects malformed Android and iOS production configuration", async () => {

@@ -231,7 +231,7 @@ async function seedRateLimitWorkspace(
            (id, user_id, provider, issuer, provider_subject, status,
             email_verified, hosted_domain_claim, claims_observed_at)
          VALUES ($1, $2, 'GOOGLE', 'https://accounts.google.com', $3,
-                 'ACTIVE', true, 'example.test', pg_catalog.statement_timestamp())`,
+                 'ACTIVE', true, 'tenant-a.example', pg_catalog.statement_timestamp())`,
         [member.identityId, member.userId, `sub-${member.identityId}`],
       );
       await client.query(
@@ -561,7 +561,7 @@ test("real PostgreSQL maps a valid WEB session and denies it immediately after r
             security_version, email_verified, hosted_domain_claim,
             claims_observed_at)
          VALUES ($1, $2, 'GOOGLE', 'https://accounts.google.com', $3,
-                 'ACTIVE', $4, true, 'example.test', transaction_timestamp())`,
+                 'ACTIVE', $4, true, 'tenant-a.example', transaction_timestamp())`,
         [fixture.identityId, fixture.userId, `sub-${fixture.identityId}`, version],
       );
       await seedClient.query(
