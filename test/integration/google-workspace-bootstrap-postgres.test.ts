@@ -3,8 +3,63 @@ import { readFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
 import { Pool } from "pg";
 
+import { createGoogleWorkspaceBootstrapRepository } from "../../src/server/onboarding/google-workspace/repository.ts";
+
 const PREFIX = "uptech_phase1_test";
 let pool: Pool;
+
+const CURRENT_DIRECTORY_SCOPES = [
+  "https://www.googleapis.com/auth/admin.directory.customer.readonly",
+  "https://www.googleapis.com/auth/admin.directory.user.readonly",
+  "https://www.googleapis.com/auth/admin.directory.group.readonly",
+  "https://www.googleapis.com/auth/admin.directory.orgunit.readonly",
+  "https://www.googleapis.com/auth/admin.directory.domain.readonly",
+] as const;
+
+const bootstrapFixtures = {
+  abort: {
+    userId: "92000000-0000-0000-0000-000000000001",
+    identityId: "92000000-0000-0000-0000-000000000002",
+    sourceId: "92000000-0000-0000-0000-000000000003",
+    sourceByte: 0x21,
+    subject: "bootstrap-abort-sub",
+    domain: "abort.example",
+  },
+  commit: {
+    userId: "92000000-0000-0000-0000-000000000011",
+    identityId: "92000000-0000-0000-0000-000000000012",
+    sourceId: "92000000-0000-0000-0000-000000000013",
+    sourceByte: 0x31,
+    subject: "bootstrap-commit-sub",
+    domain: "commit.example",
+  },
+  deny: {
+    userId: "92000000-0000-0000-0000-000000000021",
+    identityId: "92000000-0000-0000-0000-000000000022",
+    sourceId: "92000000-0000-0000-0000-000000000023",
+    sourceByte: 0x41,
+    subject: "bootstrap-deny-sub",
+    domain: "deny.example",
+  },
+} as const;
+
+function hash32(byte: number): Buffer { return Buffer.alloc(32, byte); }
+
+async function asApi<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE uptech_api_runtime");
+    const result = await operation(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 function databaseUrl(): string {
   const value = process.env.UPTECH_TEST_DATABASE_URL;
@@ -49,6 +104,23 @@ before(async () => {
     }
     await pool.query(await sql(`db/migrations/${String(number).padStart(4, "0")}_${names[number - 1]}.sql`));
   }
+  await pool.query(`SET ROLE uptech_migration_owner;
+    INSERT INTO uptech.users(id) VALUES
+      ('92000000-0000-0000-0000-000000000001'),
+      ('92000000-0000-0000-0000-000000000011'),
+      ('92000000-0000-0000-0000-000000000021');
+    INSERT INTO uptech.identities(
+      id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
+      hosted_domain_claim,claims_observed_at
+    ) VALUES
+      ('92000000-0000-0000-0000-000000000002','92000000-0000-0000-0000-000000000001','GOOGLE','https://accounts.google.com','bootstrap-abort-sub','owner@abort.example',true,'abort.example',statement_timestamp()),
+      ('92000000-0000-0000-0000-000000000012','92000000-0000-0000-0000-000000000011','GOOGLE','https://accounts.google.com','bootstrap-commit-sub','owner@commit.example',true,'commit.example',statement_timestamp()),
+      ('92000000-0000-0000-0000-000000000022','92000000-0000-0000-0000-000000000021','GOOGLE','https://accounts.google.com','bootstrap-deny-sub','owner@deny.example',true,'deny.example',statement_timestamp());
+    INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at) VALUES
+      ('92000000-0000-0000-0000-000000000003','92000000-0000-0000-0000-000000000002',decode(repeat('21',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
+      ('92000000-0000-0000-0000-000000000013','92000000-0000-0000-0000-000000000012',decode(repeat('31',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
+      ('92000000-0000-0000-0000-000000000023','92000000-0000-0000-0000-000000000022',decode(repeat('41',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes');
+    RESET ROLE`);
 });
 
 after(async () => { await pool?.end(); });
@@ -154,4 +226,177 @@ test("approved activation and lease routines execute with five scopes and reject
   const leased = await pool.query("SELECT connector_id::text FROM uptech.lease_next_directory_job_v1()");
   assert.equal(leased.rows[0]?.connector_id, '90000000-0000-0000-0000-000000000023');
   await pool.query("RESET ROLE");
+});
+
+test("prepare is idempotent, denies a second live source attempt, creates no authority, and aborts one-way", async () => {
+  const fixture = bootstrapFixtures.abort;
+  const attemptId = "92000000-0000-0000-0000-000000000004";
+  const candidateWorkspaceId = "92000000-0000-0000-0000-000000000005";
+  const repositoryInput = {
+    attemptId,
+    sourceTokenHash: hash32(fixture.sourceByte),
+    candidateWorkspaceId,
+    statusTokenHash: hash32(0x22),
+    requestId: "92000000-0000-0000-0000-000000000006",
+  };
+
+  const first = await asApi((client) =>
+    createGoogleWorkspaceBootstrapRepository(client as never).prepare(repositoryInput));
+  const retry = await asApi((client) =>
+    createGoogleWorkspaceBootstrapRepository(client as never).prepare(repositoryInput));
+  const competing = await asApi((client) =>
+    createGoogleWorkspaceBootstrapRepository(client as never).prepare({
+      ...repositoryInput,
+      attemptId: "92000000-0000-0000-0000-000000000007",
+      candidateWorkspaceId: "92000000-0000-0000-0000-000000000008",
+      statusTokenHash: hash32(0x23),
+    }));
+
+  assert.deepEqual(first, { outcome: "PREPARED" });
+  assert.deepEqual(retry, { outcome: "PREPARED" });
+  assert.deepEqual(competing, { outcome: "DENIED" });
+  const authority = await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.workspaces WHERE workspace_id=$1) AS workspaces,
+    (SELECT count(*)::int FROM uptech.workspace_memberships WHERE workspace_id=$1) AS memberships,
+    (SELECT count(*)::int FROM uptech.connectors WHERE workspace_id=$1) AS connectors,
+    (SELECT count(*)::int FROM uptech.sessions WHERE workspace_id=$1) AS sessions`, [candidateWorkspaceId]);
+  assert.deepEqual(authority.rows[0], { workspaces: 0, memberships: 0, connectors: 0, sessions: 0 });
+
+  const aborted = await asApi((client) =>
+    createGoogleWorkspaceBootstrapRepository(client as never).abort({
+      attemptId,
+      sourceTokenHash: hash32(fixture.sourceByte),
+      requestId: "92000000-0000-0000-0000-000000000009",
+    }));
+  assert.deepEqual(aborted, { outcome: "ABORTED" });
+  await assert.rejects(
+    pool.query(`SET ROLE uptech_migration_owner;
+      UPDATE uptech.google_workspace_bootstrap_attempts
+      SET state='COMMITTED',committed_at=statement_timestamp()
+      WHERE id='92000000-0000-0000-0000-000000000004'; RESET ROLE`),
+    (error: { code?: string }) => error.code === "55000",
+  );
+  await pool.query("ROLLBACK; RESET ROLE");
+});
+
+test("complete atomically creates the existing identity's tenant authority and no login session", async () => {
+  const fixture = bootstrapFixtures.commit;
+  const attemptId = "92000000-0000-0000-0000-000000000014";
+  const candidateWorkspaceId = "92000000-0000-0000-0000-000000000015";
+  const sourceTokenHash = hash32(fixture.sourceByte);
+  const statusTokenHash = hash32(0x32);
+  const before = await pool.query("SELECT (SELECT count(*)::int FROM uptech.users) AS users,(SELECT count(*)::int FROM uptech.identities) AS identities");
+  const repository = (client: Awaited<ReturnType<Pool["connect"]>>) =>
+    createGoogleWorkspaceBootstrapRepository(client as never);
+
+  assert.deepEqual(await asApi((client) => repository(client).prepare({
+    attemptId, sourceTokenHash, candidateWorkspaceId, statusTokenHash,
+    requestId: "92000000-0000-0000-0000-000000000016",
+  })), { outcome: "PREPARED" });
+
+  const credentialReference = "secretref://google-workspace/commit";
+  const completed = await asApi((client) => repository(client).complete({
+    attemptId,
+    sourceTokenHash,
+    statusTokenHash,
+    customerId: "customer-commit",
+    customerDomain: " COMMIT.EXAMPLE ",
+    providerSubject: fixture.subject,
+    hostedDomain: " COMMIT.EXAMPLE ",
+    verifiedDomains: [
+      { normalizedDomain: "alias.commit.example", domainKind: "ALIAS", providerParentDomain: "commit.example" },
+      { normalizedDomain: " COMMIT.EXAMPLE ", domainKind: "PRIMARY", providerParentDomain: null },
+      { normalizedDomain: "secondary.commit.example", domainKind: "SECONDARY", providerParentDomain: null },
+    ],
+    credentialReference: credentialReference as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "92000000-0000-0000-0000-000000000017",
+  }));
+  assert.equal(completed.outcome, "PROVISIONING");
+  assert.ok(completed.outcome === "PROVISIONING" && completed.statusExpiresAt.getTime() > Date.now());
+
+  const created = await pool.query(`SELECT
+    workspace.status AS workspace_status,workspace.provisioning_policy,workspace.google_customer_id,
+    attempt.state AS attempt_state,source.status AS source_status,
+    status_capability.allowed_operations AS status_operations,
+    status_capability.resource_workspace_id::text AS status_workspace_id,
+    receipt.initial_status_onboarding_session_id::text AS status_capability_id,
+    connector.status AS connector_status,connector.provider_customer_id,
+    connector.directory_authorized_by_identity_id::text AS authorized_identity_id,
+    actor.actor_kind,actor.status AS actor_status,job.job_kind,job.status AS job_status,
+    membership.user_id::text AS owner_user_id,membership.role AS owner_role,
+    (SELECT count(*)::int FROM uptech.workspace_domain_locators WHERE workspace_id=workspace.workspace_id AND status='VERIFIED') AS verified_domains,
+    (SELECT count(*)::int FROM uptech.sessions WHERE workspace_id=workspace.workspace_id) AS sessions,
+    (SELECT count(*)::int FROM uptech.audit_events WHERE workspace_id=workspace.workspace_id AND actor_kind='SYSTEM') AS system_audits,
+    (SELECT count(*)::int FROM uptech.platform_audit_events WHERE metadata->>'workspace_id'=workspace.workspace_id::text) AS platform_audits,
+    (SELECT count(*)::int FROM uptech.users) AS users,
+    (SELECT count(*)::int FROM uptech.identities) AS identities
+  FROM uptech.workspaces AS workspace
+  JOIN uptech.google_workspace_bootstrap_attempts AS attempt ON attempt.candidate_workspace_id=workspace.workspace_id
+  JOIN uptech.google_workspace_bootstrap_receipts AS receipt ON receipt.attempt_id=attempt.id
+  JOIN uptech.onboarding_sessions AS source ON source.id=attempt.source_onboarding_session_id
+  JOIN uptech.onboarding_sessions AS status_capability ON status_capability.id=receipt.initial_status_onboarding_session_id
+  JOIN uptech.connectors AS connector ON connector.workspace_id=workspace.workspace_id AND connector.id=receipt.connector_id
+  JOIN uptech.service_actors AS actor ON actor.workspace_id=workspace.workspace_id
+  JOIN uptech.sync_jobs AS job ON job.workspace_id=workspace.workspace_id AND job.connector_id=connector.id
+  JOIN uptech.workspace_memberships AS membership ON membership.workspace_id=workspace.workspace_id
+  WHERE workspace.workspace_id=$1`, [candidateWorkspaceId]);
+  assert.deepEqual(created.rows[0], {
+    workspace_status: "ACTIVE", provisioning_policy: "GOOGLE_GROUP_CONTROLLED", google_customer_id: "customer-commit",
+    attempt_state: "COMMITTED", source_status: "CONSUMED",
+    status_operations: ["DIRECTORY_BOOTSTRAP_STATUS_READ", "DIRECTORY_BOOTSTRAP_SYNC_RETRY"],
+    status_workspace_id: candidateWorkspaceId,
+    status_capability_id: created.rows[0]?.status_capability_id,
+    connector_status: "ACTIVE", provider_customer_id: "customer-commit",
+    authorized_identity_id: fixture.identityId,
+    actor_kind: "SYNC_WORKER", actor_status: "ACTIVE", job_kind: "DIRECTORY_SYNC", job_status: "QUEUED",
+    owner_user_id: fixture.userId, owner_role: "OWNER", verified_domains: 3, sessions: 0,
+    system_audits: 1, platform_audits: 1,
+    users: before.rows[0].users, identities: before.rows[0].identities,
+  });
+});
+
+test("complete denies mismatched proof without leaving partial tenant authority", async () => {
+  const fixture = bootstrapFixtures.deny;
+  const attemptId = "92000000-0000-0000-0000-000000000024";
+  const candidateWorkspaceId = "92000000-0000-0000-0000-000000000025";
+  const repository = (client: Awaited<ReturnType<Pool["connect"]>>) =>
+    createGoogleWorkspaceBootstrapRepository(client as never);
+  await asApi((client) => repository(client).prepare({
+    attemptId,
+    sourceTokenHash: hash32(fixture.sourceByte),
+    candidateWorkspaceId,
+    statusTokenHash: hash32(0x42),
+    requestId: "92000000-0000-0000-0000-000000000026",
+  }));
+
+  const denied = await asApi((client) => repository(client).complete({
+    attemptId,
+    sourceTokenHash: hash32(fixture.sourceByte),
+    statusTokenHash: hash32(0x42),
+    customerId: "customer-deny",
+    customerDomain: fixture.domain,
+    providerSubject: "different-provider-subject",
+    hostedDomain: fixture.domain,
+    verifiedDomains: [{ normalizedDomain: fixture.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+    credentialReference: "secretref://google-workspace/denied" as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "92000000-0000-0000-0000-000000000027",
+  }));
+  assert.deepEqual(denied, { outcome: "DENIED" });
+
+  const residue = await pool.query(`SELECT
+    (SELECT state::text FROM uptech.google_workspace_bootstrap_attempts WHERE id=$1) AS attempt_state,
+    (SELECT count(*)::int FROM uptech.workspaces WHERE workspace_id=$2) AS workspaces,
+    (SELECT count(*)::int FROM uptech.workspace_memberships WHERE workspace_id=$2) AS memberships,
+    (SELECT count(*)::int FROM uptech.connectors WHERE workspace_id=$2) AS connectors,
+    (SELECT count(*)::int FROM uptech.service_actors WHERE workspace_id=$2) AS actors,
+    (SELECT count(*)::int FROM uptech.sync_jobs WHERE workspace_id=$2) AS jobs,
+    (SELECT count(*)::int FROM uptech.google_workspace_bootstrap_receipts WHERE attempt_id=$1) AS receipts,
+    (SELECT status FROM uptech.onboarding_sessions WHERE id=$3) AS source_status`,
+    [attemptId, candidateWorkspaceId, fixture.sourceId]);
+  assert.deepEqual(residue.rows[0], {
+    attempt_state: "PREPARED", workspaces: 0, memberships: 0, connectors: 0,
+    actors: 0, jobs: 0, receipts: 0, source_status: "ACTIVE",
+  });
 });

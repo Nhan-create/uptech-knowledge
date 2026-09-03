@@ -33,6 +33,31 @@ CREATE TYPE uptech.google_workspace_verified_domain_v1 AS (
   provider_parent_domain text
 );
 
+CREATE TYPE uptech.google_workspace_bootstrap_prepare_outcome_v1 AS ENUM (
+  'PREPARED', 'DENIED'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_prepare_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_prepare_outcome_v1
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_complete_outcome_v1 AS ENUM (
+  'PROVISIONING', 'DENIED'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_complete_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_complete_outcome_v1,
+  status_expires_at timestamptz
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_abort_outcome_v1 AS ENUM (
+  'ABORTED', 'UNKNOWN'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_abort_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_abort_outcome_v1
+);
+
 CREATE FUNCTION uptech.onboarding_operations_are_unique_v1(p_values text[])
 RETURNS boolean
 LANGUAGE sql
@@ -662,6 +687,431 @@ FOR EACH ROW EXECUTE FUNCTION uptech.enforce_google_workspace_bootstrap_receipt_
 
 REVOKE ALL ON FUNCTION uptech.enforce_google_workspace_bootstrap_receipt_v1()
   FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+CREATE FUNCTION uptech.prepare_google_workspace_bootstrap_v1(
+  p_attempt_id uuid,
+  p_source_token_hash uptech.google_auth_hash32_v1,
+  p_candidate_workspace_id uuid,
+  p_status_token_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_prepare_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  existing_attempt uptech.google_workspace_bootstrap_attempts%ROWTYPE;
+  selected_identity_id uuid;
+  selected_source_id uuid;
+BEGIN
+  IF p_attempt_id IS NULL OR p_source_token_hash IS NULL
+    OR p_candidate_workspace_id IS NULL OR p_status_token_hash IS NULL
+    OR p_request_id IS NULL OR p_source_token_hash = p_status_token_hash
+  THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'google-workspace-bootstrap:' || p_attempt_id::text, 0
+  ));
+
+  SELECT * INTO existing_attempt
+  FROM uptech.google_workspace_bootstrap_attempts
+  WHERE id = p_attempt_id
+  FOR UPDATE;
+
+  IF existing_attempt.id IS NOT NULL THEN
+    IF existing_attempt.state = 'PREPARED'
+      AND existing_attempt.completion_deadline > pg_catalog.statement_timestamp()
+      AND existing_attempt.candidate_workspace_id = p_candidate_workspace_id
+      AND existing_attempt.candidate_status_hash = p_status_token_hash
+      AND EXISTS (
+        SELECT 1 FROM uptech.onboarding_sessions AS source
+        WHERE source.id = existing_attempt.source_onboarding_session_id
+          AND source.token_hash = p_source_token_hash
+      )
+    THEN
+      RETURN ROW('PREPARED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+    END IF;
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+  END IF;
+
+  SELECT source.id, source.identity_id INTO selected_source_id, selected_identity_id
+  FROM uptech.onboarding_sessions AS source
+  JOIN uptech.identities AS identity_row ON identity_row.id = source.identity_id
+  JOIN uptech.users AS user_row ON user_row.id = identity_row.user_id
+  WHERE source.token_hash = p_source_token_hash
+    AND source.status = 'ACTIVE'
+    AND source.expires_at > pg_catalog.statement_timestamp()
+    AND source.resource_workspace_id IS NULL
+    AND pg_catalog.cardinality(source.allowed_operations) = 3
+    AND source.allowed_operations @> ARRAY[
+      'FIRST_DOMAIN_CLAIM_READ',
+      'FIRST_DOMAIN_CLAIM_RESERVE',
+      'FIRST_DOMAIN_CLAIM_COMPLETE'
+    ]::text[]
+    AND identity_row.provider = 'GOOGLE'
+    AND identity_row.issuer IN ('https://accounts.google.com', 'accounts.google.com')
+    AND identity_row.status = 'ACTIVE'
+    AND identity_row.email_verified
+    AND identity_row.hosted_domain_claim IS NOT NULL
+    AND user_row.status = 'ACTIVE'
+  FOR UPDATE OF source, identity_row, user_row;
+
+  IF selected_identity_id IS NULL
+    OR EXISTS (SELECT 1 FROM uptech.workspaces WHERE workspace_id = p_candidate_workspace_id)
+    OR EXISTS (
+      SELECT 1 FROM uptech.google_workspace_bootstrap_attempts
+      WHERE source_onboarding_session_id = selected_source_id AND state = 'PREPARED'
+    )
+    OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash = p_status_token_hash)
+    OR EXISTS (SELECT 1 FROM uptech.session_tokens WHERE token_hash = p_status_token_hash)
+    OR EXISTS (SELECT 1 FROM uptech.google_workspace_bootstrap_attempts WHERE candidate_status_hash = p_status_token_hash)
+  THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+  END IF;
+
+  BEGIN
+    INSERT INTO uptech.google_workspace_bootstrap_attempts (
+      id, source_onboarding_session_id, identity_id, candidate_workspace_id,
+      candidate_status_hash, completion_deadline
+    ) VALUES (
+      p_attempt_id, selected_source_id, selected_identity_id,
+      p_candidate_workspace_id, p_status_token_hash,
+      pg_catalog.transaction_timestamp() + interval '10 minutes'
+    );
+  EXCEPTION WHEN unique_violation THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+  END;
+
+  RETURN ROW('PREPARED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+END
+$function$;
+
+CREATE FUNCTION uptech.abort_google_workspace_bootstrap_v1(
+  p_attempt_id uuid,
+  p_source_token_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_abort_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_attempt uptech.google_workspace_bootstrap_attempts%ROWTYPE;
+BEGIN
+  IF p_attempt_id IS NULL OR p_source_token_hash IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_abort_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'google-workspace-bootstrap:' || p_attempt_id::text, 0
+  ));
+
+  SELECT attempt.* INTO selected_attempt
+  FROM uptech.google_workspace_bootstrap_attempts AS attempt
+  JOIN uptech.onboarding_sessions AS source
+    ON source.id = attempt.source_onboarding_session_id
+   AND source.token_hash = p_source_token_hash
+  WHERE attempt.id = p_attempt_id
+  FOR UPDATE OF attempt;
+
+  IF selected_attempt.id IS NULL OR selected_attempt.state = 'COMMITTED' THEN
+    RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_abort_result_v1;
+  END IF;
+  IF selected_attempt.state = 'PREPARED' THEN
+    UPDATE uptech.google_workspace_bootstrap_attempts
+    SET state = 'ABORTED', aborted_at = pg_catalog.statement_timestamp()
+    WHERE id = p_attempt_id AND state = 'PREPARED';
+  END IF;
+  RETURN ROW('ABORTED')::uptech.google_workspace_bootstrap_abort_result_v1;
+END
+$function$;
+
+CREATE FUNCTION uptech.complete_google_workspace_bootstrap_v1(
+  p_attempt_id uuid,
+  p_source_token_hash uptech.google_auth_hash32_v1,
+  p_status_token_hash uptech.google_auth_hash32_v1,
+  p_customer_id text,
+  p_customer_domain text,
+  p_provider_subject text,
+  p_hosted_domain text,
+  p_verified_domains uptech.google_workspace_verified_domain_v1[],
+  p_credential_reference text,
+  p_authorized_scopes text[],
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_complete_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_attempt uptech.google_workspace_bootstrap_attempts%ROWTYPE;
+  selected_identity_id uuid;
+  selected_user_id uuid;
+  selected_membership_id uuid := pg_catalog.gen_random_uuid();
+  selected_actor_id uuid := pg_catalog.gen_random_uuid();
+  selected_connector_id uuid := pg_catalog.gen_random_uuid();
+  selected_status_id uuid := pg_catalog.gen_random_uuid();
+  normalized_domains uptech.google_workspace_verified_domain_v1[];
+  normalized_customer_domain uptech.google_normalized_domain_v1;
+  normalized_hosted_domain uptech.google_normalized_domain_v1;
+  committed_time timestamptz := pg_catalog.statement_timestamp();
+  selected_status_expires_at timestamptz := committed_time + interval '24 hours';
+BEGIN
+  IF p_attempt_id IS NULL OR p_source_token_hash IS NULL OR p_status_token_hash IS NULL
+    OR p_request_id IS NULL OR p_source_token_hash = p_status_token_hash
+    OR p_customer_id IS NULL OR pg_catalog.length(p_customer_id) NOT BETWEEN 1 AND 512
+    OR p_customer_id <> pg_catalog.btrim(p_customer_id)
+    OR p_provider_subject IS NULL OR pg_catalog.length(p_provider_subject) NOT BETWEEN 1 AND 255
+    OR p_provider_subject <> pg_catalog.btrim(p_provider_subject)
+    OR p_credential_reference IS NULL
+    OR pg_catalog.length(p_credential_reference) NOT BETWEEN 1 AND 1024
+    OR p_credential_reference <> pg_catalog.btrim(p_credential_reference)
+    OR pg_catalog.cardinality(p_authorized_scopes) <> 5
+    OR pg_catalog.array_position(p_authorized_scopes, NULL) IS NOT NULL
+    OR (SELECT pg_catalog.count(DISTINCT scope_name) FROM pg_catalog.unnest(p_authorized_scopes) AS scope_name) <> 5
+    OR NOT p_authorized_scopes @> ARRAY[
+      'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+      'https://www.googleapis.com/auth/admin.directory.user.readonly',
+      'https://www.googleapis.com/auth/admin.directory.group.readonly',
+      'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+      'https://www.googleapis.com/auth/admin.directory.domain.readonly'
+    ]::text[]
+  THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'google-workspace-bootstrap:' || p_attempt_id::text, 0
+  ));
+
+  SELECT * INTO selected_attempt
+  FROM uptech.google_workspace_bootstrap_attempts
+  WHERE id = p_attempt_id
+  FOR UPDATE;
+
+  IF selected_attempt.id IS NULL
+    OR selected_attempt.candidate_status_hash <> p_status_token_hash
+  THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END IF;
+
+  IF selected_attempt.state = 'COMMITTED' THEN
+    SELECT status_capability.expires_at INTO selected_status_expires_at
+    FROM uptech.google_workspace_bootstrap_receipts AS receipt
+    JOIN uptech.onboarding_sessions AS source
+      ON source.id = receipt.source_onboarding_session_id
+     AND source.token_hash = p_source_token_hash
+    JOIN uptech.onboarding_sessions AS status_capability
+      ON status_capability.id = receipt.initial_status_onboarding_session_id
+     AND status_capability.token_hash = p_status_token_hash
+    JOIN uptech.connectors AS connector
+      ON connector.workspace_id = receipt.workspace_id
+     AND connector.id = receipt.connector_id
+     AND connector.credential_reference = p_credential_reference
+    WHERE receipt.attempt_id = p_attempt_id;
+    IF selected_status_expires_at IS NOT NULL THEN
+      RETURN ROW('PROVISIONING', selected_status_expires_at)::uptech.google_workspace_bootstrap_complete_result_v1;
+    END IF;
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END IF;
+
+  IF selected_attempt.state <> 'PREPARED'
+    OR selected_attempt.completion_deadline <= committed_time
+  THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END IF;
+
+  BEGIN
+    normalized_customer_domain := pg_catalog.lower(pg_catalog.btrim(p_customer_domain))::uptech.google_normalized_domain_v1;
+    normalized_hosted_domain := pg_catalog.lower(pg_catalog.btrim(p_hosted_domain))::uptech.google_normalized_domain_v1;
+    normalized_domains := uptech.normalize_google_workspace_verified_domains_v1(
+      normalized_customer_domain::text, p_verified_domains
+    );
+  EXCEPTION WHEN invalid_parameter_value OR check_violation OR not_null_violation THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END;
+
+  SELECT identity_row.id, identity_row.user_id
+    INTO selected_identity_id, selected_user_id
+  FROM uptech.onboarding_sessions AS source
+  JOIN uptech.identities AS identity_row ON identity_row.id = source.identity_id
+  JOIN uptech.users AS user_row ON user_row.id = identity_row.user_id
+  WHERE source.id = selected_attempt.source_onboarding_session_id
+    AND source.token_hash = p_source_token_hash
+    AND source.status = 'ACTIVE'
+    AND source.expires_at > committed_time
+    AND source.resource_workspace_id IS NULL
+    AND pg_catalog.cardinality(source.allowed_operations) = 3
+    AND source.allowed_operations @> ARRAY[
+      'FIRST_DOMAIN_CLAIM_READ', 'FIRST_DOMAIN_CLAIM_RESERVE', 'FIRST_DOMAIN_CLAIM_COMPLETE'
+    ]::text[]
+    AND identity_row.id = selected_attempt.identity_id
+    AND identity_row.provider = 'GOOGLE'
+    AND identity_row.issuer IN ('https://accounts.google.com', 'accounts.google.com')
+    AND identity_row.provider_subject = p_provider_subject
+    AND identity_row.status = 'ACTIVE'
+    AND identity_row.email_verified
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)) = normalized_hosted_domain::text
+    AND normalized_hosted_domain = normalized_customer_domain
+    AND user_row.status = 'ACTIVE'
+  FOR UPDATE OF source, identity_row, user_row;
+
+  IF selected_identity_id IS NULL
+    OR EXISTS (SELECT 1 FROM uptech.workspaces WHERE google_customer_id = p_customer_id)
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.unnest(normalized_domains) AS supplied
+      JOIN uptech.workspace_domain_locators AS locator
+        ON locator.normalized_domain::text = supplied.normalized_domain
+    )
+    OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash = p_status_token_hash)
+    OR EXISTS (SELECT 1 FROM uptech.session_tokens WHERE token_hash = p_status_token_hash)
+  THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END IF;
+
+  BEGIN
+    INSERT INTO uptech.workspaces (
+      workspace_id, status, provisioning_policy, google_customer_id,
+      created_at, updated_at
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, 'ACTIVE',
+      'GOOGLE_GROUP_CONTROLLED', p_customer_id, committed_time, committed_time
+    );
+
+    INSERT INTO uptech.workspace_domain_locators (
+      normalized_domain, workspace_id, status, verified_at, created_at, updated_at,
+      google_customer_id, domain_kind, provider_parent_domain
+    )
+    SELECT supplied.normalized_domain::uptech.google_normalized_domain_v1,
+      selected_attempt.candidate_workspace_id, 'VERIFIED', committed_time,
+      committed_time, committed_time, p_customer_id, supplied.domain_kind,
+      supplied.provider_parent_domain::uptech.google_normalized_domain_v1
+    FROM pg_catalog.unnest(normalized_domains) AS supplied;
+
+    INSERT INTO uptech.workspace_memberships (
+      workspace_id, id, user_id, role, status, created_at, updated_at
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, selected_membership_id,
+      selected_user_id, 'OWNER', 'ACTIVE', committed_time, committed_time
+    );
+
+    INSERT INTO uptech.service_actors (
+      workspace_id, id, actor_kind, status, created_at, updated_at
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, selected_actor_id,
+      'SYNC_WORKER', 'ACTIVE', committed_time, committed_time
+    );
+
+    INSERT INTO uptech.connectors (
+      workspace_id, id, purpose, status, created_at, updated_at,
+      provider_customer_id, credential_reference,
+      directory_authorized_by_identity_id, directory_authorized_scopes
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, selected_connector_id,
+      'DIRECTORY', 'ACTIVE', committed_time, committed_time, p_customer_id,
+      p_credential_reference, selected_identity_id, p_authorized_scopes
+    );
+
+    INSERT INTO uptech.sync_jobs (
+      workspace_id, id, service_actor_id, connector_id, job_kind, status,
+      dedupe_key, payload, available_at, created_at, updated_at
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, pg_catalog.gen_random_uuid(),
+      selected_actor_id, selected_connector_id, 'DIRECTORY_SYNC', 'QUEUED',
+      'initial-directory-sync',
+      pg_catalog.jsonb_build_object('bootstrap_attempt_id', p_attempt_id),
+      committed_time, committed_time, committed_time
+    );
+
+    UPDATE uptech.onboarding_sessions
+    SET status = 'CONSUMED', consumed_at = committed_time
+    WHERE id = selected_attempt.source_onboarding_session_id AND status = 'ACTIVE';
+
+    INSERT INTO uptech.onboarding_sessions (
+      id, identity_id, token_hash, allowed_operations, status,
+      created_at, expires_at, resource_workspace_id
+    ) VALUES (
+      selected_status_id, selected_identity_id, p_status_token_hash,
+      ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY']::text[],
+      'ACTIVE', committed_time, selected_status_expires_at,
+      selected_attempt.candidate_workspace_id
+    );
+
+    UPDATE uptech.google_workspace_bootstrap_attempts
+    SET state = 'COMMITTED', committed_at = committed_time
+    WHERE id = p_attempt_id AND state = 'PREPARED';
+
+    INSERT INTO uptech.google_workspace_bootstrap_receipts (
+      attempt_id, source_onboarding_session_id,
+      initial_status_onboarding_session_id, identity_id, workspace_id,
+      connector_id, committed_at
+    ) VALUES (
+      p_attempt_id, selected_attempt.source_onboarding_session_id,
+      selected_status_id, selected_identity_id,
+      selected_attempt.candidate_workspace_id, selected_connector_id, committed_time
+    );
+
+    INSERT INTO uptech.audit_events (
+      workspace_id, id, actor_kind, action, target_type, target_id,
+      outcome, request_id, metadata, occurred_at
+    ) VALUES (
+      selected_attempt.candidate_workspace_id, pg_catalog.gen_random_uuid(),
+      'SYSTEM', 'GOOGLE_WORKSPACE_BOOTSTRAP_COMMITTED', 'CONNECTOR',
+      selected_connector_id, 'SUCCEEDED', p_request_id,
+      pg_catalog.jsonb_build_object('bootstrap_attempt_id', p_attempt_id), committed_time
+    );
+
+    INSERT INTO uptech.platform_audit_events (
+      id, identity_id, action, target_type, outcome, request_id, metadata, occurred_at
+    ) VALUES (
+      pg_catalog.gen_random_uuid(), selected_identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_COMMITTED', 'GOOGLE_WORKSPACE_BOOTSTRAP',
+      'SUCCEEDED', p_request_id,
+      pg_catalog.jsonb_build_object(
+        'bootstrap_attempt_id', p_attempt_id,
+        'workspace_id', selected_attempt.candidate_workspace_id
+      ), committed_time
+    );
+  EXCEPTION WHEN unique_violation THEN
+    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
+  END;
+
+  RETURN ROW('PROVISIONING', selected_status_expires_at)::uptech.google_workspace_bootstrap_complete_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.prepare_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uuid, uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.prepare_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uuid, uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
+REVOKE ALL ON FUNCTION uptech.complete_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uptech.google_auth_hash32_v1,
+  text, text, text, text, uptech.google_workspace_verified_domain_v1[],
+  text, text[], uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.complete_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uptech.google_auth_hash32_v1,
+  text, text, text, text, uptech.google_workspace_verified_domain_v1[],
+  text, text[], uuid
+) TO uptech_api_runtime;
+
+REVOKE ALL ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
 
 CREATE TABLE uptech.workspace_access_requests (
   workspace_id uuid NOT NULL,
