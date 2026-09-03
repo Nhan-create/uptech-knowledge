@@ -16,7 +16,7 @@ SELECT result.outcome::text AS outcome, result.session_id,
   result.access_expires_at, result.refresh_expires_at,
   result.active_workspace_id, result.memberships,
   result.denial_category::text AS denial_category
-FROM uptech.exchange_mobile_handoff_v2(
+FROM uptech.exchange_mobile_handoff_directory_v1(
   $1::uptech.google_auth_hash32_v1, $2::uptech.google_auth_hash32_v1,
   $3::uptech.google_auth_hash32_v1, $4::uptech.google_auth_hash32_v1,
   $5::uptech.google_auth_hash32_v1, $6::uptech.google_auth_hash32_v1, $7::uuid
@@ -25,7 +25,7 @@ FROM uptech.exchange_mobile_handoff_v2(
 const REFRESH_SQL = `
 SELECT result.outcome::text AS outcome, result.replay_capsule,
   result.access_expires_at, result.refresh_expires_at
-FROM uptech.rotate_mobile_refresh_v1(
+FROM uptech.rotate_mobile_refresh_directory_v1(
   $1::uptech.google_auth_hash32_v1, $2::uptech.google_auth_hash32_v1,
   $3::uptech.google_auth_hash32_v1, $4::uptech.google_auth_hash32_v1,
   $5::bytea, $6::uptech.google_auth_ascii_identifier_v1, $7::uuid
@@ -35,20 +35,20 @@ const AUTHENTICATE_SQL = `
 SELECT result.outcome::text AS outcome, result.session_id, result.user_id,
   result.identity_id, result.workspace_id, result.membership_id,
   result.workspace_role::text AS role
-FROM uptech.authenticate_mobile_access_v1(
+FROM uptech.authenticate_mobile_access_directory_v1(
   $1::uptech.google_auth_hash32_v1
 ) AS result`;
 
 const LIST_SQL = `
 SELECT result.outcome::text AS outcome, result.memberships
-FROM uptech.list_mobile_workspaces_v1(
+FROM uptech.list_mobile_workspaces_directory_v1(
   $1::uptech.google_auth_hash32_v1
 ) AS result`;
 
 const SWITCH_SQL = `
 SELECT result.outcome::text AS outcome, result.access_expires_at,
   result.refresh_expires_at, result.replay_capsule
-FROM uptech.switch_mobile_workspace_v1(
+FROM uptech.switch_mobile_workspace_directory_v1(
   $1::uptech.google_auth_hash32_v1, $2::uuid,
   $3::uptech.google_auth_hash32_v1, $4::uptech.google_auth_hash32_v1,
   $5::uptech.google_auth_hash32_v1, $6::bytea,

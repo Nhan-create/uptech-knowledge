@@ -1,10 +1,12 @@
-import type { DatabasePool } from "../db/core.ts";
+import {
+  type DatabasePool,
+} from "../db/core.ts";
 import { getRuntimeDatabasePool } from "../db/runtime-pool.ts";
+import { requireCurrentDirectoryAuthority } from "./directory-authority.ts";
 import { loadWebSessionRuntimeConfig } from "./google/config.ts";
 import {
   authenticateWebSession,
   type AuthenticatedWebSession,
-  WebSessionAuthenticationError,
 } from "./web-session.ts";
 
 export type WebRouteTarget = "HOME" | "ADMIN";
@@ -17,7 +19,7 @@ export interface WebRouteAuthorityDependencies {
   };
   readonly getPool: (
     databaseUrl: string,
-  ) => Pick<DatabasePool, "query">;
+  ) => Pick<DatabasePool, "connect" | "query">;
   readonly authenticate: (
     headers: Headers,
     sessionPepper: Uint8Array,
@@ -35,11 +37,11 @@ function decisionForRole(
   target: WebRouteTarget,
   workspaceRole: unknown,
 ): WebRouteAuthorityDecision {
-  if (workspaceRole === "MEMBER") {
-    return target === "HOME" ? "ALLOW" : "HOME";
-  }
   if (workspaceRole === "OWNER" || workspaceRole === "ADMIN") {
     return target === "ADMIN" ? "ALLOW" : "ADMIN";
+  }
+  if (workspaceRole === "MEMBER") {
+    return target === "HOME" ? "ALLOW" : "HOME";
   }
   return "LOGIN";
 }
@@ -55,14 +57,17 @@ export async function resolveWebRouteAuthority(
 ): Promise<WebRouteAuthorityDecision> {
   try {
     const config = dependencies.loadConfig();
+    const pool = dependencies.getPool(config.databaseUrl);
     const session = await dependencies.authenticate(
       headers,
       config.sessionPepper,
-      dependencies.getPool(config.databaseUrl),
+      pool,
     );
+    if (!await requireCurrentDirectoryAuthority(session, pool)) {
+      return "LOGIN";
+    }
     return decisionForRole(target, session.context.workspaceRole);
-  } catch (error) {
-    if (error instanceof WebSessionAuthenticationError) return "LOGIN";
-    throw error;
+  } catch {
+    return "LOGIN";
   }
 }

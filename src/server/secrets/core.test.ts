@@ -173,3 +173,31 @@ test("secret operation boundary rejects empty values and masks provider failures
     },
   );
 });
+
+test("secret operation boundary clears its transient write-value clones after provider calls", async () => {
+  let createdValue: Uint8Array | undefined;
+  let replacedValue: Uint8Array | undefined;
+  const adapter = loadApprovedSecretAdapter({
+    providerId: "approved-kms",
+    configurationPresent: true,
+    createAdapter: () => ({
+      async create(value) {
+        createdValue = value;
+        return "provider-reference" as SecretReference;
+      },
+      async read() { return Uint8Array.from([1]); },
+      async replace(_reference, value) { replacedValue = value; },
+      async destroy() {},
+    }),
+  });
+
+  await adapter.create(Uint8Array.from([8, 9]), metadata);
+  await adapter.replace(
+    "provider-reference" as SecretReference,
+    Uint8Array.from([6, 7]),
+    metadata,
+  );
+
+  assert.deepEqual(createdValue, Uint8Array.from([0, 0]));
+  assert.deepEqual(replacedValue, Uint8Array.from([0, 0]));
+});

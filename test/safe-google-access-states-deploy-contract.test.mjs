@@ -30,8 +30,10 @@ test("production release requires an explicit one-shot flag before prebuild migr
   assert.match(script, /VERCEL_ENV === "production"/u);
   assert.match(script, /VERCEL_GIT_COMMIT_REF !== "main"/u);
   assert.match(script, /VERCEL_GIT_PROVIDER !== "github"/u);
-  assert.match(script, /0006_safe_google_access_states_a4\.sql/u);
   assert.match(script, /safe_google_access_states_a4\.sql/u);
+  assert.match(script, /0008_google_directory_production\.sql/u);
+  assert.match(script, /verify\/enterprise_login\.sql/u);
+  assert.match(script, /complete_web_google_login_directory_v1/u);
   assert.match(script, /pg_try_advisory_lock/u);
   assert.match(script, /UPTECH_ANDROID_APP_LINKS_SHA256/u);
   assert.match(script, /UPTECH_IOS_UNIVERSAL_LINKS_ENABLED/u);
@@ -46,7 +48,6 @@ test("production release requires an explicit one-shot flag before prebuild migr
   assert.match(script, /exchange_mobile_handoff_v2/u);
   assert.match(script, /vn\.uptech\.uptech_knowledge_mobile/u);
   assert.match(script, /vn\.uptech\.uptechKnowledgeMobile/u);
-  assert.doesNotMatch(script, /db\/migrations\/0007/u);
   assert.doesNotMatch(script, /GOOGLE_WORKSPACE_DOMAIN/u);
   assert.doesNotMatch(script, /console\.(?:log|error)\([^\n]*(?:connectionString|migrationSource|verificationSource)/u);
 });

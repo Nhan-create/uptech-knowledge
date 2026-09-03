@@ -38,6 +38,12 @@ test("directory sync stages read-only Google people and direct group edges befor
     },
     lease,
     transport: {
+      async getCustomer() {
+        return { googleCustomerId: "C012345", primaryDomain: "tenant-a.example" };
+      },
+      async listOrgUnits() {
+        return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") };
+      },
       async listUsers() {
         return {
           items: [
@@ -46,8 +52,10 @@ test("directory sync stages read-only Google people and direct group edges befor
               fullName: "Sales Person",
               primaryEmail: "sales@tenant-a.example",
               department: "Sales",
+              orgUnitPath: "/Sales",
               lifecycleState: "ACTIVE" as const,
               isAdmin: true,
+              isDelegatedAdmin: false,
             },
           ],
           traversalComplete: true,
@@ -65,7 +73,10 @@ test("directory sync stages read-only Google people and direct group edges befor
       },
       async listDirectMembers() {
         return {
-          items: [{ googleSubject: "tenant-a-sales-subject" }],
+          items: [
+            { googleSubject: "tenant-a-sales-subject" },
+            { googleSubject: "external-group-member-not-in-tenant-users" },
+          ],
           traversalComplete: true,
           freshUntil: new Date("2099-01-01T01:00:00.000Z"),
         };
@@ -91,7 +102,17 @@ test("directory sync stages read-only Google people and direct group edges befor
       ],
     },
     {
-      text: "SELECT * FROM uptech.stage_people_profile_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text,$7::text,$8::text)",
+      text: "SELECT * FROM uptech.stage_people_directory_customer_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text)",
+      values: [
+        "tenant-a",
+        "223e4567-e89b-42d3-a456-426614174000",
+        "123e4567-e89b-42d3-a456-426614174000",
+        "C012345",
+        "tenant-a.example",
+      ],
+    },
+    {
+      text: "SELECT * FROM uptech.stage_people_profile_v2($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::boolean,$11::boolean)",
       values: [
         "tenant-a",
         "223e4567-e89b-42d3-a456-426614174000",
@@ -101,6 +122,9 @@ test("directory sync stages read-only Google people and direct group edges befor
         "sales@tenant-a.example",
         "Sales",
         "ACTIVE",
+        "/Sales",
+        true,
+        false,
       ],
     },
     {
@@ -137,6 +161,74 @@ test("directory sync stages read-only Google people and direct group edges befor
   ]);
 });
 
+test("directory sync stages the bound customer, stable OUs, and admin metadata without assigning app roles", async () => {
+  const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+  await runDirectorySync({
+    client: {
+      async query(text: string, values: readonly unknown[]) {
+        calls.push({ text, values });
+        return routineResult(text);
+      },
+    },
+    lease,
+    transport: {
+      async getCustomer() {
+        return { googleCustomerId: "C012345", primaryDomain: "tenant-a.example" };
+      },
+      async listOrgUnits() {
+        return {
+          items: [{ googleOrgUnitId: "sales", orgUnitPath: "/Sales", parentGoogleOrgUnitId: "root" }],
+          traversalComplete: true,
+          freshUntil: new Date("2099-01-01T01:00:00.000Z"),
+        };
+      },
+      async listUsers() {
+        return {
+          items: [{
+            googleSubject: "tenant-a-sales-subject",
+            fullName: "Sales Person",
+            primaryEmail: "sales@tenant-a.example",
+            department: "Sales",
+            orgUnitPath: "/Sales",
+            lifecycleState: "ACTIVE" as const,
+            isAdmin: true,
+            isDelegatedAdmin: true,
+          }],
+          traversalComplete: true,
+          freshUntil: new Date("2099-01-01T01:00:00.000Z"),
+        };
+      },
+      async listGroups() {
+        return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") };
+      },
+      async listDirectMembers() {
+        throw new Error("no groups need members");
+      },
+    },
+    generationId: "223e4567-e89b-42d3-a456-426614174000",
+    requestId: "323e4567-e89b-42d3-a456-426614174000",
+  });
+
+  assert.deepEqual(
+    calls.filter(({ text }) => text.includes("stage_people_directory_customer_v1") || text.includes("stage_people_org_unit_v1") || text.includes("stage_people_profile_v2")),
+    [
+      {
+        text: "SELECT * FROM uptech.stage_people_directory_customer_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text)",
+        values: ["tenant-a", "223e4567-e89b-42d3-a456-426614174000", "123e4567-e89b-42d3-a456-426614174000", "C012345", "tenant-a.example"],
+      },
+      {
+        text: "SELECT * FROM uptech.stage_people_org_unit_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text)",
+        values: ["tenant-a", "223e4567-e89b-42d3-a456-426614174000", "123e4567-e89b-42d3-a456-426614174000", "sales", "/Sales", "root"],
+      },
+      {
+        text: "SELECT * FROM uptech.stage_people_profile_v2($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::boolean,$11::boolean)",
+        values: ["tenant-a", "223e4567-e89b-42d3-a456-426614174000", "123e4567-e89b-42d3-a456-426614174000", "tenant-a-sales-subject", "Sales Person", "sales@tenant-a.example", "Sales", "ACTIVE", "/Sales", true, true],
+      },
+    ],
+  );
+  assert.equal(calls.some(({ text }) => /assign.*role|effective_role/iu.test(text)), false);
+});
+
 test("directory sync refuses incomplete traversals without publishing a partial authority snapshot", async () => {
   const calls: string[] = [];
   await assert.rejects(
@@ -149,6 +241,8 @@ test("directory sync refuses incomplete traversals without publishing a partial 
       },
       lease,
       transport: {
+        async getCustomer() { return { googleCustomerId: "C012345", primaryDomain: "tenant-a.example" }; },
+        async listOrgUnits() { return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") }; },
         async listUsers() {
           return {
             items: [],
@@ -170,6 +264,7 @@ test("directory sync refuses incomplete traversals without publishing a partial 
   );
   assert.deepEqual(calls, [
     "SELECT * FROM uptech.begin_people_sync_generation_v1($1::uuid,$2::uuid,$3::uuid,$4::uuid)",
+    "SELECT * FROM uptech.stage_people_directory_customer_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text)",
   ]);
 });
 
@@ -180,6 +275,8 @@ test("directory sync refuses non-directory leases before calling Google", async 
       client: { async query() { return { rows: [] }; } },
       lease: { ...lease, jobKind: "DRIVE_SYNC", sourceId: "drive-source" },
       transport: {
+        async getCustomer() { calledGoogle = true; throw new Error("must not call Google"); },
+        async listOrgUnits() { calledGoogle = true; throw new Error("must not call Google"); },
         async listUsers() {
           calledGoogle = true;
           throw new Error("must not call Google");
@@ -205,6 +302,8 @@ test("directory sync fails closed when the lease-bound begin routine denies the 
       },
       lease,
       transport: {
+        async getCustomer() { throw new Error("must not call Google after a denied generation"); },
+        async listOrgUnits() { throw new Error("must not call Google"); },
         async listUsers() {
           throw new Error("must not call Google after a denied generation");
         },
@@ -224,6 +323,8 @@ test("directory sync refuses a generation attached to a different connector", as
       client: { async query() { return { rows: [{ outcome: "STARTED", connector_id: "other-directory-connector" }] }; } },
       lease,
       transport: {
+        async getCustomer() { throw new Error("must not call Google after connector mismatch"); },
+        async listOrgUnits() { throw new Error("must not call Google"); },
         async listUsers() { throw new Error("must not call Google after connector mismatch"); },
         async listGroups() { throw new Error("must not call Google"); },
         async listDirectMembers() { throw new Error("must not call Google"); },
@@ -241,25 +342,34 @@ test("directory sync stops when a stage routine loses its lease race", async () 
       client: {
         async query(text: string) {
           if (text.includes("begin_people")) return { rows: [{ outcome: "STARTED", connector_id: "directory-connector" }] };
+          if (text.includes("stage_people_directory_customer_v1") || text.includes("stage_people_org_unit_v1")) return { rows: [{ outcome: "STAGED" }] };
           return { rows: [{ outcome: "CONCURRENT_LOSER" }] };
         },
       },
       lease,
       transport: {
-        async listUsers() { return { items: [{ googleSubject: "tenant-a-subject", fullName: "Tenant A", primaryEmail: "a@tenant-a.example", department: null, lifecycleState: "ACTIVE" as const }], traversalComplete: true, freshUntil: new Date("2099-01-01T00:00:00.000Z") }; },
+        async getCustomer() { return { googleCustomerId: "C012345", primaryDomain: "tenant-a.example" }; },
+        async listOrgUnits() { return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") }; },
+        async listUsers() { return { items: [{ googleSubject: "tenant-a-subject", fullName: "Tenant A", primaryEmail: "a@tenant-a.example", department: null, orgUnitPath: "/", lifecycleState: "ACTIVE" as const, isAdmin: false, isDelegatedAdmin: false }], traversalComplete: true, freshUntil: new Date("2099-01-01T00:00:00.000Z") }; },
         async listGroups() { throw new Error("must not list groups after a failed stage"); },
         async listDirectMembers() { throw new Error("must not list members"); },
       },
       generationId: "223e4567-e89b-42d3-a456-426614174000",
       requestId: "323e4567-e89b-42d3-a456-426614174000",
     }),
-    /stage_people_profile_v1.*CONCURRENT_LOSER/u,
+    /stage_people_profile_v2.*CONCURRENT_LOSER/u,
   );
 });
 
 test("directory handler derives generation and request identifiers at the worker boundary", async () => {
   const handler = createDirectorySyncJobHandler({
     transportForLease: () => ({
+      async getCustomer() {
+        return { googleCustomerId: "C012345", primaryDomain: "tenant-a.example" };
+      },
+      async listOrgUnits() {
+        return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") };
+      },
       async listUsers() {
         return { items: [], traversalComplete: true, freshUntil: new Date("2099-01-01T01:00:00.000Z") };
       },

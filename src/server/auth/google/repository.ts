@@ -176,7 +176,7 @@ SELECT result.outcome::text AS outcome,
        result.access_state::text AS access_state,
        result.allowed_operations,
        result.expires_at
-FROM uptech.complete_web_google_login_v1(
+FROM uptech.complete_web_google_login_directory_v1(
   $1::uptech.google_auth_hash32_v1,
   ROW(
     $2::uptech.google_auth_issuer_v1,

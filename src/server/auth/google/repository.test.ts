@@ -218,7 +218,14 @@ test("complete sends exactly the approved typed assertion and credential hashes"
   });
 
   assert.equal(fake.calls.length, 1);
-  assert.match(fake.calls[0].text, /uptech\.complete_web_google_login_v1/u);
+  assert.match(
+    fake.calls[0].text,
+    /uptech\.complete_web_google_login_directory_v1/u,
+  );
+  assert.doesNotMatch(
+    fake.calls[0].text,
+    /FROM uptech\.complete_web_google_login_v1\(/u,
+  );
   assert.equal(fake.calls[0].values.length, 15);
   assert.deepEqual(fake.calls[0].values, [
     Buffer.from(COMPLETE_INPUT.completionHandleHash),

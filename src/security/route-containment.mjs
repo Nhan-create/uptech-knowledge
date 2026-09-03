@@ -25,6 +25,15 @@ const AUTH_INGRESS_PATHS = new Set([
   "/api/v1/auth/mobile/logout",
 ]);
 
+const INTERNAL_CRON_PATHS = new Set([
+  "/api/internal/cron/google-directory",
+]);
+
+const DIRECTORY_CONSENT_METHODS = new Map([
+  ["/api/v1/admin/connectors/google-directory/transactions", "POST"],
+  ["/api/v1/admin/connectors/google-directory/callback", "GET"],
+]);
+
 const PROTECTED_APPLICATION_PATHS = new Set([
   "/home",
   "/admin",
@@ -84,6 +93,16 @@ export function classifyUnconfiguredRoute(pathname, method) {
   // normalization so a trailing slash cannot expand the auth surface.
   if (AUTH_INGRESS_PATHS.has(pathname)) {
     return "allow-auth-ingress";
+  }
+
+  if (INTERNAL_CRON_PATHS.has(pathname)) {
+    return method === "GET" ? "allow-auth-ingress" : "deny-unconfigured";
+  }
+
+  if (DIRECTORY_CONSENT_METHODS.has(pathname)) {
+    return DIRECTORY_CONSENT_METHODS.get(pathname) === method
+      ? "allow-auth-ingress"
+      : "deny-unconfigured";
   }
 
   if (PROTECTED_APPLICATION_PATHS.has(pathname)) {

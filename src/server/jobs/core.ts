@@ -33,6 +33,8 @@ interface LeaseNextJobRow extends QueryResultRow {
 }
 
 const LEASE_NEXT_JOB_SQL = "SELECT * FROM uptech.lease_next_job()";
+const LEASE_NEXT_DIRECTORY_JOB_SQL =
+  "SELECT * FROM uptech.lease_next_directory_job_v1()";
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
@@ -85,10 +87,11 @@ function requireLeaseExpiry(value: unknown): Date {
   return new Date(value.getTime());
 }
 
-export async function leaseNextJobFromPool(
+async function leaseNextJobUsingRoutine(
   pool: Pick<Pool, "query">,
+  routine: string,
 ): Promise<LeasedJob | null> {
-  const result = await pool.query<LeaseNextJobRow>(LEASE_NEXT_JOB_SQL);
+  const result = await pool.query<LeaseNextJobRow>(routine);
 
   if (result.rows.length === 0) {
     return null;
@@ -133,4 +136,26 @@ export async function leaseNextJobFromPool(
     leaseFence: requireLeaseFence(row.lease_fence),
     leaseExpiresAt: requireLeaseExpiry(row.lease_expires_at),
   });
+}
+
+export function leaseNextJobFromPool(
+  pool: Pick<Pool, "query">,
+): Promise<LeasedJob | null> {
+  return leaseNextJobUsingRoutine(pool, LEASE_NEXT_JOB_SQL);
+}
+
+/** Leases only Directory work so a dedicated worker cannot consume Drive jobs. */
+export async function leaseNextDirectoryJobFromPool(
+  pool: Pick<Pool, "query">,
+): Promise<LeasedJob | null> {
+  const lease = await leaseNextJobUsingRoutine(
+    pool,
+    LEASE_NEXT_DIRECTORY_JOB_SQL,
+  );
+  if (lease !== null && lease.jobKind !== "DIRECTORY_SYNC") {
+    throw new JobLeaseBoundaryError(
+      "Directory lease routine returned a non-Directory job",
+    );
+  }
+  return lease;
 }

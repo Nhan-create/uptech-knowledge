@@ -61,6 +61,16 @@ async function readJson(relativePath) {
 
 const androidFingerprintPattern = /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/;
 const iosTeamIdPattern = /^[A-Z0-9]{10}$/;
+const strongCronSecretPattern = /^[\x21-\x7e]{32,256}$/;
+const gcpProjectIdPattern = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const gcpWorkloadIdentityProviderPattern =
+  /^https:\/\/iam\.googleapis\.com\/projects\/\d{6,20}\/locations\/global\/workloadIdentityPools\/[a-z0-9-]{4,63}\/providers\/[a-z0-9-]{4,63}$/;
+const gcpServiceAccountEmailPattern =
+  /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
+const directoryCron = Object.freeze({
+  path: "/api/internal/cron/google-directory",
+  schedule: "* * * * *",
+});
 
 function configuredAndroidFingerprint() {
   const fingerprint = process.env.UPTECH_ANDROID_APP_LINKS_SHA256?.trim() ?? "";
@@ -73,6 +83,12 @@ function iosUniversalLinksEnabled() {
   if (value === "true") return true;
   errors.push("iOS universal links flag must be true or false");
   return false;
+}
+
+function validDirectoryCronConfiguration(value) {
+  return Array.isArray(value?.crons) &&
+    value.crons.length === 1 &&
+    JSON.stringify(value.crons[0]) === JSON.stringify(directoryCron);
 }
 
 function validAssetLinks(value, fingerprint) {
@@ -114,6 +130,30 @@ const [publicNav, homePage, loginPage] = await Promise.all([
   readSource("src/app/page.tsx"),
   readSource("src/components/auth/GoogleWorkspaceLogin.tsx"),
 ]);
+
+if (!strongCronSecretPattern.test(process.env.CRON_SECRET ?? "")) {
+  errors.push("Directory cron secret is missing or invalid");
+}
+
+if (
+  !gcpProjectIdPattern.test(process.env.UPTECH_GCP_SECRET_MANAGER_PROJECT_ID ?? "") ||
+  !gcpWorkloadIdentityProviderPattern.test(
+    process.env.UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER ?? "",
+  ) ||
+  !gcpServiceAccountEmailPattern.test(
+    process.env.UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL ?? "",
+  )
+) {
+  errors.push("Google Cloud Directory workload identity metadata is missing or invalid");
+}
+
+const vercelConfiguration = await readJson("vercel.json");
+if (
+  !validDirectoryCronConfiguration(vercelConfiguration) ||
+  !await hasNonEmptyFile("src/app/api/internal/cron/google-directory/route.ts")
+) {
+  errors.push("Directory cron deployment contract is incomplete");
+}
 
 const hasEveryPublicRoute = publicRoutes.every(
   (route) =>

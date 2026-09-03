@@ -14,9 +14,25 @@ export interface GoogleDirectoryUser {
   readonly fullName: string;
   readonly primaryEmail: string;
   readonly department: string | null;
+  readonly orgUnitPath: string;
   readonly lifecycleState: "ACTIVE" | "SUSPENDED" | "DELETED";
   /** Setup eligibility metadata only; it is never membership authority. */
-  readonly isAdmin?: boolean;
+  readonly isAdmin: boolean;
+  /** Setup eligibility metadata only; it is never membership authority. */
+  readonly isDelegatedAdmin: boolean;
+}
+
+/** Immutable customer binding returned by Directory `customers.get(my_customer)`. */
+export interface GoogleDirectoryCustomer {
+  readonly googleCustomerId: string;
+  readonly primaryDomain: string;
+}
+
+/** Stable Directory organizational-unit identity and its immediate parent. */
+export interface GoogleDirectoryOrgUnit {
+  readonly googleOrgUnitId: string;
+  readonly orgUnitPath: string;
+  readonly parentGoogleOrgUnitId: string | null;
 }
 
 export interface GoogleDirectoryGroup {
@@ -29,7 +45,9 @@ export interface GoogleDirectoryDirectMember {
 }
 
 export interface GoogleDirectoryTransport {
+  getCustomer(): Promise<GoogleDirectoryCustomer>;
   listUsers(): Promise<DirectoryTraversal<GoogleDirectoryUser>>;
+  listOrgUnits(): Promise<DirectoryTraversal<GoogleDirectoryOrgUnit>>;
   listGroups(): Promise<DirectoryTraversal<GoogleDirectoryGroup>>;
   listDirectMembers(
     googleGroupId: string,

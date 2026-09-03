@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { JobLeaseBoundaryError, leaseNextJobFromPool } from "./core.ts";
+import {
+  JobLeaseBoundaryError,
+  leaseNextDirectoryJobFromPool,
+  leaseNextJobFromPool,
+} from "./core.ts";
 
 function result(rows: readonly Record<string, unknown>[]) {
   return { command: "SELECT", rowCount: rows.length, oid: 0, fields: [], rows };
@@ -133,4 +137,30 @@ test("leaseNextJob returns null on masked miss and fails closed on malformed row
       JobLeaseBoundaryError,
     );
   }
+});
+
+test("Directory worker leases only through the approved Directory-only routine", async () => {
+  const calls: string[] = [];
+  const pool = {
+    async query(text: string) {
+      calls.push(text);
+      return result([{
+        job_id: "job-directory-1",
+        job_kind: "DIRECTORY_SYNC",
+        workspace_id: "workspace-1",
+        service_actor_id: "service-actor-1",
+        connector_id: "connector-directory-1",
+        source_id: null,
+        lease_fence: "123e4567-e89b-42d3-a456-426614174000",
+        lease_expires_at: new Date("2099-08-25T00:05:00Z"),
+      }]);
+    },
+  };
+
+  const lease = await leaseNextDirectoryJobFromPool(pool as never);
+
+  assert.equal(lease?.jobKind, "DIRECTORY_SYNC");
+  assert.deepEqual(calls, [
+    "SELECT * FROM uptech.lease_next_directory_job_v1()",
+  ]);
 });

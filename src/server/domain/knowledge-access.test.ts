@@ -114,6 +114,33 @@ test("HR GET allows HR while denying Sales", () => {
   );
 });
 
+test("Finance GET allows Finance while denying Sales and HR without an ACL grant", () => {
+  assert.equal(
+    authorizeKnowledgeAccess(
+      TEST_PERSONAS.finance.subject,
+      "document.read",
+      TEST_DOCUMENTS.finance,
+    ).decision,
+    "ALLOW",
+  );
+  assert.equal(
+    authorizeKnowledgeAccess(
+      TEST_PERSONAS.finance.subject,
+      "document.read",
+      TEST_DOCUMENTS.sales,
+    ).decision,
+    "DENY",
+  );
+  assert.equal(
+    authorizeKnowledgeAccess(
+      TEST_PERSONAS.finance.subject,
+      "document.read",
+      TEST_DOCUMENTS.hr,
+    ).decision,
+    "DENY",
+  );
+});
+
 test("workspace role never bypasses an explicit Knowledge Space grant", () => {
   const ownerWithoutGrants = {
     ...TEST_PERSONAS.admin.subject,

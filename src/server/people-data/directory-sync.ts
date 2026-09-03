@@ -40,8 +40,16 @@ export interface DirectorySyncWorkerContext {
 
 const BEGIN_GENERATION_SQL =
   "SELECT * FROM uptech.begin_people_sync_generation_v1($1::uuid,$2::uuid,$3::uuid,$4::uuid)";
+/**
+ * Directory snapshot SQL contract. These routines stage source facts only:
+ * admin flags are metadata and must never assign an application role here.
+ */
+const STAGE_CUSTOMER_SQL =
+  "SELECT * FROM uptech.stage_people_directory_customer_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text)";
+const STAGE_ORG_UNIT_SQL =
+  "SELECT * FROM uptech.stage_people_org_unit_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text)";
 const STAGE_PROFILE_SQL =
-  "SELECT * FROM uptech.stage_people_profile_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text,$7::text,$8::text)";
+  "SELECT * FROM uptech.stage_people_profile_v2($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::boolean,$11::boolean)";
 const STAGE_GROUP_SQL =
   "SELECT * FROM uptech.stage_people_group_v1($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text)";
 const STAGE_DIRECT_MEMBER_SQL =
@@ -148,22 +156,61 @@ export async function runDirectorySync(
     throw new DirectorySyncError("begin_people_sync_generation_v1 returned the wrong connector");
   }
 
-  const users = requireFreshTraversal("Google users", await transport.listUsers());
-  for (const user of users.items) {
-    requireRoutineOutcome("stage_people_profile_v1", await client.query(STAGE_PROFILE_SQL, [
+  const customer = await transport.getCustomer();
+  requireRoutineOutcome(
+    "stage_people_directory_customer_v1",
+    await client.query(STAGE_CUSTOMER_SQL, [
       workspaceId,
       generationId,
       fence,
-      requireNonEmpty("googleSubject", user.googleSubject),
+      requireNonEmpty("googleCustomerId", customer.googleCustomerId),
+      requireNonEmpty("primaryDomain", customer.primaryDomain),
+    ]),
+    "STAGED",
+  );
+
+  const orgUnits = requireFreshTraversal(
+    "Google organizational units",
+    await transport.listOrgUnits(),
+  );
+  for (const orgUnit of orgUnits.items) {
+    requireRoutineOutcome("stage_people_org_unit_v1", await client.query(STAGE_ORG_UNIT_SQL, [
+      workspaceId,
+      generationId,
+      fence,
+      requireNonEmpty("googleOrgUnitId", orgUnit.googleOrgUnitId),
+      requireNonEmpty("orgUnitPath", orgUnit.orgUnitPath),
+      orgUnit.parentGoogleOrgUnitId === null
+        ? null
+        : requireNonEmpty("parentGoogleOrgUnitId", orgUnit.parentGoogleOrgUnitId),
+    ]), "STAGED");
+  }
+
+  const users = requireFreshTraversal("Google users", await transport.listUsers());
+  const tenantUserSubjects = new Set<string>();
+  for (const user of users.items) {
+    const googleSubject = requireNonEmpty("googleSubject", user.googleSubject);
+    tenantUserSubjects.add(googleSubject);
+    requireRoutineOutcome("stage_people_profile_v2", await client.query(STAGE_PROFILE_SQL, [
+      workspaceId,
+      generationId,
+      fence,
+      googleSubject,
       requireNonEmpty("fullName", user.fullName),
       requireNonEmpty("primaryEmail", user.primaryEmail),
       user.department === null ? "" : user.department,
       user.lifecycleState,
+      requireNonEmpty("orgUnitPath", user.orgUnitPath),
+      user.isAdmin,
+      user.isDelegatedAdmin,
     ]), "STAGED");
   }
 
   const groups = requireFreshTraversal("Google groups", await transport.listGroups());
-  let freshUntil = earliestFreshUntil(users.freshUntil, groups.freshUntil);
+  let freshUntil = earliestFreshUntil(
+    earliestFreshUntil(orgUnits.freshUntil, users.freshUntil),
+    groups.freshUntil,
+  );
   for (const group of groups.items) {
     const googleGroupId = requireNonEmpty("googleGroupId", group.googleGroupId);
     requireRoutineOutcome("stage_people_group_v1", await client.query(STAGE_GROUP_SQL, [
@@ -180,12 +227,19 @@ export async function runDirectorySync(
     );
     freshUntil = earliestFreshUntil(freshUntil, members.freshUntil);
     for (const member of members.items) {
+      const googleSubject = requireNonEmpty(
+        "googleSubject",
+        member.googleSubject,
+      );
+      // Google groups may contain external users. Only subjects from the
+      // complete tenant users traversal can become tenant permission edges.
+      if (!tenantUserSubjects.has(googleSubject)) continue;
       requireRoutineOutcome("stage_people_group_membership_v1", await client.query(STAGE_DIRECT_MEMBER_SQL, [
         workspaceId,
         generationId,
         fence,
         googleGroupId,
-        requireNonEmpty("googleSubject", member.googleSubject),
+        googleSubject,
       ]), "STAGED");
     }
   }

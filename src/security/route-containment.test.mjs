@@ -103,6 +103,49 @@ test("allows only the explicit public asset surface", () => {
   }
 });
 
+test("allows only the exact Google Directory cron GET ingress", () => {
+  const pathname = "/api/internal/cron/google-directory";
+  assert.equal(
+    classifyUnconfiguredRoute(pathname, "GET"),
+    "allow-auth-ingress",
+  );
+  for (const [candidate, method] of [
+    [pathname, "POST"],
+    [`${pathname}/`, "GET"],
+    [`${pathname}/extra`, "GET"],
+    [`${pathname}?workspace_id=tenant-a`, "GET"],
+  ]) {
+    assert.equal(
+      classifyUnconfiguredRoute(candidate, method),
+      "deny-unconfigured",
+      `${method} ${candidate}`,
+    );
+  }
+});
+
+test("allows only the exact authenticated Google Directory consent methods", () => {
+  const initiate = "/api/v1/admin/connectors/google-directory/transactions";
+  const callback = "/api/v1/admin/connectors/google-directory/callback";
+  assert.equal(classifyUnconfiguredRoute(initiate, "POST"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(callback, "GET"), "allow-auth-ingress");
+  for (const [candidate, method] of [
+    [initiate, "GET"],
+    [initiate, "PUT"],
+    [`${initiate}/`, "POST"],
+    [`${initiate}/tenant-b`, "POST"],
+    [callback, "POST"],
+    [callback, "DELETE"],
+    [`${callback}/`, "GET"],
+    [`${callback}/tenant-b`, "GET"],
+  ]) {
+    assert.equal(
+      classifyUnconfiguredRoute(candidate, method),
+      "deny-unconfigured",
+      `${method} ${candidate}`,
+    );
+  }
+});
+
 test("allows only the exact existing admin routes through to the admin layout guard", () => {
   for (const pathname of [
     "/admin",

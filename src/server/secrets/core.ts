@@ -151,6 +151,8 @@ export function loadApprovedSecretAdapter(
         return requireSecretReference(reference);
       } catch {
         throw providerOperationFailed();
+      } finally {
+        safeValue.fill(0);
       }
     },
     async read(reference, metadata) {
@@ -178,6 +180,8 @@ export function loadApprovedSecretAdapter(
         );
       } catch {
         throw providerOperationFailed();
+      } finally {
+        safeValue.fill(0);
       }
     },
     async destroy(reference, metadata) {

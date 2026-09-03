@@ -238,3 +238,51 @@ test("mobile repository preserves terminal refresh expiry and revocation outcome
     }), { outcome });
   }
 });
+
+test("mobile repository routes every authority-bearing operation through Directory-gated routines", async () => {
+  const sqlSeen: string[] = [];
+  const repository = createMobileSessionRepository({
+    async query(text: string) {
+      sqlSeen.push(text);
+      if (text.includes("exchange_mobile_handoff")) {
+        return { rows: [{ outcome: "DENIED" }] } as never;
+      }
+      if (text.includes("rotate_mobile_refresh")) {
+        return { rows: [{ outcome: "DENIED" }] } as never;
+      }
+      if (text.includes("authenticate_mobile_access")) {
+        return { rows: [{ outcome: "DENIED" }] } as never;
+      }
+      if (text.includes("list_mobile_workspaces")) {
+        return { rows: [{ outcome: "DENIED", memberships: null }] } as never;
+      }
+      return { rows: [{ outcome: "DENIED" }] } as never;
+    },
+  } as never);
+
+  await repository.exchangeHandoff({
+    networkHmac: bytes(0), handoffHash: bytes(1), appExchangeChallenge: bytes(2),
+    installationBinding: bytes(3), accessTokenHash: bytes(4), refreshTokenHash: bytes(5),
+    requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  });
+  await repository.refresh({
+    predecessorRefreshHash: bytes(1), installationBinding: bytes(2),
+    accessTokenHash: bytes(3), refreshTokenHash: bytes(4),
+    replayCapsule: Uint8Array.from(Buffer.alloc(115, 5)), idempotencyKey: "retry-1",
+    requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  });
+  await repository.authenticate({ accessTokenHash: bytes(8) });
+  await repository.listWorkspaces({ accessTokenHash: bytes(9) });
+  await repository.switchWorkspace({
+    accessTokenHash: bytes(1), targetWorkspaceId: "44f864e4-bbd5-470f-8878-a68c270ce849",
+    installationBinding: bytes(2), accessTokenHashCandidate: bytes(3),
+    refreshTokenHashCandidate: bytes(4), replayCapsule: Uint8Array.from(Buffer.alloc(115, 5)),
+    idempotencyKey: "switch-retry-01", requestId: "4d6e25c6-e7cb-45ad-9147-e93b1a2fca21",
+  });
+
+  assert.equal(sqlSeen[0].includes("exchange_mobile_handoff_directory_v1"), true);
+  assert.equal(sqlSeen[1].includes("rotate_mobile_refresh_directory_v1"), true);
+  assert.equal(sqlSeen[2].includes("authenticate_mobile_access_directory_v1"), true);
+  assert.equal(sqlSeen[3].includes("list_mobile_workspaces_directory_v1"), true);
+  assert.equal(sqlSeen[4].includes("switch_mobile_workspace_directory_v1"), true);
+});

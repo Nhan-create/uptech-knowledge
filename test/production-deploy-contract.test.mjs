@@ -12,6 +12,18 @@ const generatorPath = join(repoRoot, "scripts", "generate-mobile-association-art
 const publicRoutes = ["san-pham", "nguyen-tac", "nang-luc", "quy-trinh"];
 const androidFingerprint =
   "A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:12:23:34:45:56:67:78:89:9A:AB:BC:CD:DE:EF:F0:01";
+const cronSecret = "directory-cron-secret-with-at-least-32-chars";
+const gcpDirectoryEnvironment = {
+  UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: "uptech-secrets-prod",
+  UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER:
+    "https://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/vercel/providers/vercel",
+  UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL:
+    "directory-runtime@uptech-secrets-prod.iam.gserviceaccount.com",
+};
+const directoryCron = {
+  path: "/api/internal/cron/google-directory",
+  schedule: "* * * * *",
+};
 
 async function writeFixtureFile(root, relativePath, contents = "fixture") {
   const filePath = join(root, relativePath);
@@ -40,6 +52,14 @@ async function createValidProductionFixture() {
 
   await writeFixtureFile(root, "public/media/login-background.mp4", "video-bytes");
   await writeFixtureFile(root, "public/media/login-background-poster.jpg", "poster-bytes");
+  await writeFixtureFile(
+    root,
+    "src/app/api/internal/cron/google-directory/route.ts",
+    "export async function GET() { return new Response(null); }\n",
+  );
+  await writeFixtureFile(root, "vercel.json", JSON.stringify({
+    crons: [directoryCron],
+  }));
   await writeFixtureFile(root, "public/.well-known/assetlinks.json", JSON.stringify([{
     relation: ["delegate_permission/common.handle_all_urls"],
     target: {
@@ -64,6 +84,8 @@ function runGuard(root, overrides = {}) {
       VERCEL_GIT_PROVIDER: "github",
       VERCEL_GIT_REPO_SLUG: "uptech-knowledge",
       VERCEL_GIT_COMMIT_REF: "main",
+      CRON_SECRET: cronSecret,
+      ...gcpDirectoryEnvironment,
       UPTECH_ANDROID_APP_LINKS_SHA256: androidFingerprint,
       UPTECH_IOS_UNIVERSAL_LINKS_ENABLED: "false",
       ...overrides,
@@ -138,6 +160,7 @@ test("keeps Git pushes detached from production-domain promotion", async () => {
   );
 
   assert.deepEqual(configuration.git?.deploymentEnabled, { "*": false });
+  assert.deepEqual(configuration.crons, [directoryCron]);
   assert.deepEqual(configuration.headers, [
     {
       source: "/.well-known/apple-app-site-association",
@@ -148,6 +171,51 @@ test("keeps Git pushes detached from production-domain promotion", async () => {
       headers: [{ key: "Content-Type", value: "application/json" }],
     },
   ]);
+});
+
+test("requires an exact production Google Directory cron and a strong cron secret", async () => {
+  for (const cronSecretOverride of ["", "too-short", "contains whitespace despite length 1234567890"]) {
+    const fixtureRoot = await createValidProductionFixture();
+    const result = runGuard(fixtureRoot, { CRON_SECRET: cronSecretOverride });
+
+    assert.notEqual(result.status, 0, cronSecretOverride || "missing secret");
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /Directory cron secret is missing or invalid/,
+    );
+  }
+
+  for (const configuration of [
+    {},
+    { crons: [{ ...directoryCron, schedule: "0 0 * * *" }] },
+    { crons: [{ ...directoryCron, path: `${directoryCron.path}/` }] },
+  ]) {
+    const fixtureRoot = await createValidProductionFixture();
+    await writeFixtureFile(fixtureRoot, "vercel.json", JSON.stringify(configuration));
+    const result = runGuard(fixtureRoot);
+
+    assert.notEqual(result.status, 0, JSON.stringify(configuration));
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /Directory cron deployment contract is incomplete/,
+    );
+  }
+});
+
+test("requires exact Google Cloud Directory workload identity metadata", async () => {
+  for (const overrides of [
+    { UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: "" },
+    { UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/vercel/providers/vercel" },
+    { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "service-account-key.json" },
+  ]) {
+    const fixtureRoot = await createValidProductionFixture();
+    const result = runGuard(fixtureRoot, overrides);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /Google Cloud Directory workload identity metadata is missing or invalid/,
+    );
+  }
 });
 
 test("requires the configured uppercase Android release fingerprint", async () => {

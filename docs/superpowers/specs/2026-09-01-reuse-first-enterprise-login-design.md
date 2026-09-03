@@ -2,55 +2,45 @@
 
 ## Approved scope
 
-Complete the existing Google Workspace login and tenant permission path without changing the Web or Mobile login UI and without creating a second auth, tenant, membership, session, connector, job, or audit authority.
-
-The existing `users`, `identities`, `workspaces`, `workspace_domain_locators`, `workspace_memberships`, `sessions`, `session_tokens`, `connectors`, `sync_jobs`, `audit_events`, Google OIDC services, Web cookie flow, and Mobile A3 handoff/refresh flow remain authoritative.
+This is one 60-minute implementation task. Stop at the deadline and report exact status. Preserve the existing Web and Mobile login UI and reuse the existing Google OIDC, `oauth_transactions`, users, identities, workspaces, `workspace_domain_locators`, memberships, sessions, audit, connectors, `sync_jobs`, permission engine, RLS, and Web/Mobile auth. No parallel authority or `people_data_connections` relation may be introduced.
 
 ## Authority flow
 
-1. Existing Google OIDC verifies state, nonce, PKCE, signature, issuer, audience/azp, exp/iat, `email_verified`, `hd`, and `sub`.
-2. Existing `workspace_domain_locators` resolves the tenant from the verified hosted domain.
-3. Existing `(provider, issuer, provider_subject)` identity resolves the user.
-4. The current published Directory generation resolves the user's lifecycle, tenant-scoped groups, and department mapping.
-5. The configured tenant admin group maps to existing role `ADMIN`; every department mapping maps to `MEMBER` plus one of `SALES`, `HR`, or `IT`. Google Admin status is setup eligibility only and never grants `ADMIN`.
-6. Existing membership/session rows bind the tenant, user, identity, role, and security/authz versions. Current Directory authority is reloaded server-side for protected work.
-7. Web members land on `/home`; existing `OWNER` and `ADMIN` memberships are accepted only by the existing `/admin` route tree. Cross-role access redirects or denies server-side.
-8. Backend permission evaluates before data access. PostgreSQL tenant context and forced RLS remain the final isolation boundary.
+1. Existing Google OIDC verifies state, nonce, PKCE, signature, issuer, audience/azp, expiry/issued-at, `email_verified`, `hd`, and `sub`.
+2. The exact normalized verified `hd` resolves one active workspace through existing `workspace_domain_locators`; personal Google accounts and unknown workspaces are denied without enterprise authority.
+3. The user identity is resolved by `(provider=GOOGLE, issuer, provider_subject=sub)`. Email remains mutable metadata and is never a role or durable identity key.
+4. Authorization reads the latest `PUBLISHED`, complete, non-expired Directory generation for that workspace. It never calls Google Directory live during login.
+5. The active Directory profile, groups, department, OU, and tenant-owned mapping determine membership authority. Missing, unmapped, suspended, deleted, stale, or inconsistent authority denies.
+6. Configured admin group membership maps to existing `ADMIN`. Existing legitimately bootstrapped `OWNER` remains authorized for that tenant's Admin Control Plane without requiring admin-group membership. Google `isAdmin` and `isDelegatedAdmin` are stored only as Directory-setup eligibility signals and never grant `ADMIN`.
+7. Department mappings produce `MEMBER + SALES|HR|IT|FINANCE` with no email-name inference.
+8. Existing membership/session records bind workspace, user, identity, role, and security/authz versions. A changed or removed Directory authority bumps membership authorization version and revokes affected sessions/tokens.
+9. Existing `OWNER`/`ADMIN` route to `/admin`; `MEMBER` routes to `/home`. Every decision is tenant-scoped.
 
-## Directory and mapping data
+## Directory integration
 
-Reuse `connectors` rows with `purpose = 'DIRECTORY'` and `sync_jobs` rows with `job_kind = 'DIRECTORY_SYNC'`. Add only tenant-scoped Directory snapshot and mapping relations that do not already exist:
+Reuse existing `connectors` rows with `purpose='DIRECTORY'`, `sync_jobs` rows with `job_kind='DIRECTORY_SYNC'`, the existing secret adapter interface, worker lease fence, snapshot generation, and publish routines. Add only missing customer binding, secure credential reference metadata, OU/admin-signal snapshot fields, and worker dispatch needed to run the read-only sync.
 
-- published sync generations linked to the existing Directory connector;
-- people profiles keyed by Google immutable subject, including lifecycle state;
-- provider group snapshots and direct group edges;
-- tenant mapping rows for `ADMIN_GROUP` and `DEPARTMENT` sources;
-- a server-only routine that publishes a complete generation atomically, applies the mapping to the existing membership, bumps versions, and revokes sessions/tokens when a user is suspended, deleted, unmapped, or removed from the required group.
-
-No `people_data_connections`, enterprise login transaction, enterprise discovery limiter, per-tenant OIDC authority, setup session, or platform operator authority is introduced.
+Connector setup must prove the consenting account is Google `isAdmin` or `isDelegatedAdmin`, successfully read every required dataset, and belongs to the same Google customer as the resolved tenant. This is setup eligibility only. If the existing secret adapter cannot securely create/read/replace/destroy a credential reference, stop with `SHARED CONTRACT GAP`; do not add a second secret authority.
 
 ## Permission and routing
 
-The existing default-deny permission engine remains the only application policy engine. A trusted permission context loader reads the current membership and published Directory generation inside the existing request transaction. It never accepts workspace, role, department, group, or membership authority from a client.
+The current default-deny permission engine remains the only application policy engine. Server-side route/API authority reloads the current Directory context inside the existing authenticated request transaction. It never accepts workspace, role, department, group, membership, or customer authority from the client.
 
-`/home` authenticates the Web session and accepts only `MEMBER`; `OWNER`/`ADMIN` are redirected to `/admin`. The `/admin` layout authenticates the same Web session and accepts only `OWNER`/`ADMIN`; `MEMBER` is denied or redirected to `/home`. Existing login and dashboard components are unchanged.
+`OWNER`/`ADMIN` may enter only their tenant's existing Admin Control Plane. `MEMBER` may enter only the existing Employee Data Plane. Tenant A cannot access Tenant B; Sales cannot access HR; HR cannot access Sales; Finance cannot access Sales/HR unless an explicit same-tenant ACL grants it; employees cannot call admin APIs.
 
-The current fixture Search/Documents/RAG routes remain contained and are not promoted to production. No fetch-all or post-LLM filtering is added. Permission predicates must be applied before any protected adapter or retrieval operation.
+Knowledge, Search, Documents, and RAG have no secure production repository in this codebase. They remain denied and are not implemented or enabled by this task. No fetch-all/front-end filtering or retrieve-all/post-LLM filtering is permitted.
 
-## Mobile
+## Required proof
 
-The existing A3 system-browser, callback, handoff, access/refresh, workspace, and logout protocol remains unchanged. No Mobile login screen or login DTO is changed. Any actively used legacy refresh/session authority is migrated to the A3 repository or removed when safe; no new Mobile auth service is created.
-
-## Required behavior
-
-- Tenant A admin cannot access Tenant B.
-- Sales cannot access HR; HR cannot access Sales.
-- `MEMBER` cannot access admin routes or APIs.
-- Personal Gmail, unknown workspace/user, suspended/deprovisioned people, removed required group, stale Directory generation, replayed/mismatched OIDC transactions, and revoked sessions fail closed.
-- Logout and Directory lifecycle revocation make old sessions unusable.
-- Audit metadata remains fixed and redacted.
+- OWNER -> admin ALLOW; mapped ADMIN -> admin ALLOW; MEMBER -> admin DENY.
+- Sales -> HR DENY; HR -> Sales DENY; Finance -> Sales/HR DENY absent an explicit ACL.
+- Tenant A -> Tenant B DENY.
+- Unknown, unmapped, suspended, deprovisioned, and stale-Directory users deny.
+- A fresh last-known-good published generation authorizes without a live Google call.
+- Removed group membership revokes the old authority.
+- Logout makes the old session unusable.
+- Security, Directory mapping, route guard, tenant/department isolation, PostgreSQL/RLS, Flutter, typecheck, lint, and build verification are run before a completion claim.
 
 ## Non-goals
 
-No login UI change, new dashboard, Search/Documents/RAG implementation, full Drive connector, Directory settings UI, new platform-admin system, tenant selector, hard-coded production domain, or deployment/promotion is part of this delivery.
-
+No Login UI change, new dashboard, Knowledge/Search/RAG repository, document/chunk/vector schema, Drive feature, platform-admin authority, tenant selector, hard-coded domain, or production deployment.

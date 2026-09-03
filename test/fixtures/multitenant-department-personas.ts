@@ -8,6 +8,7 @@ export const TEST_WORKSPACE_ID = TEST_WORKSPACE_IDS.tenantA;
 export const TEST_SPACES = Object.freeze({
   sales: Object.freeze({ id: "space-sales", name: "Sales" }),
   hr: Object.freeze({ id: "space-hr", name: "HR" }),
+  finance: Object.freeze({ id: "space-finance", name: "Finance" }),
 });
 
 export const TEST_DOCUMENTS = Object.freeze({
@@ -38,6 +39,20 @@ export const TEST_DOCUMENTS = Object.freeze({
     sourceVersionId: "source-hr-v1",
     sourceAclVersionId: "source-hr-acl-v1",
     restrictionVersionId: "document-hr-restriction-v1",
+  }),
+  finance: Object.freeze({
+    workspaceId: TEST_WORKSPACE_ID,
+    spaceId: TEST_SPACES.finance.id,
+    documentId: "document-finance-confidential",
+    status: "READY" as const,
+    sourceGate: "ALLOW" as const,
+    restrictionGate: "ALLOW" as const,
+    securityVersionsCurrent: true,
+    spaceVersionId: "space-finance-v1",
+    documentVersionId: "document-finance-v1",
+    sourceVersionId: "source-finance-v1",
+    sourceAclVersionId: "source-finance-acl-v1",
+    restrictionVersionId: "document-finance-restriction-v1",
   }),
   tenantBSales: Object.freeze({
     workspaceId: TEST_WORKSPACE_IDS.tenantB,
@@ -132,6 +147,14 @@ export const TEST_PERSONAS = Object.freeze({
     department: "HR",
     membershipId: "membership-hr",
     grantedSpaceIds: [TEST_SPACES.hr.id],
+  }),
+  finance: persona({
+    workspaceId: TEST_WORKSPACE_IDS.tenantA,
+    email: "finance-user@tenant-a.example",
+    role: "MEMBER",
+    department: "Finance",
+    membershipId: "membership-finance",
+    grantedSpaceIds: [TEST_SPACES.finance.id],
   }),
   tenantBSales: persona({
     workspaceId: TEST_WORKSPACE_IDS.tenantB,

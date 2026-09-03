@@ -85,7 +85,7 @@ export function createMobileGoogleRepository(pool: Pick<DatabasePool, "query">):
       const c=input.claims;
       const row=one((await pool.query(`SELECT result.outcome::text outcome,result.app_return_uri::text app_return_uri,
         result.denial_category::text denial_category
-        FROM uptech.complete_mobile_google_callback_v1($1::uptech.google_auth_hash32_v1,
+        FROM uptech.complete_mobile_google_callback_directory_v1($1::uptech.google_auth_hash32_v1,
         ROW($2::uptech.google_auth_issuer_v1,$3::uptech.google_provider_subject_v1,$4::uptech.google_normalized_email_v1,
           $5::boolean,$6::uptech.google_normalized_domain_v1,$7::timestamptz,$8::timestamptz,
           $9::uptech.google_auth_configuration_key_v1,$10::uptech.google_auth_configuration_key_v1,

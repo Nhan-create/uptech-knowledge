@@ -285,17 +285,15 @@ function executableSql(source) {
     .join("\n");
 }
 
-const [migrationSource, verificationSource] = await Promise.all([
-  readFile("db/migrations/0006_safe_google_access_states_a4.sql", "utf8"),
+const [
+  safeAccessVerificationSource,
+  enterpriseLoginMigrationSource,
+  enterpriseLoginVerificationSource,
+] = await Promise.all([
   readFile("db/verify/safe_google_access_states_a4.sql", "utf8"),
+  readFile("db/migrations/0008_google_directory_production.sql", "utf8"),
+  readFile("db/verify/enterprise_login.sql", "utf8"),
 ]);
-
-if (
-  migrationSource.includes("0007_enterprise_login") ||
-  verificationSource.includes("0007_enterprise_login")
-) {
-  throw new Error("The login release boundary may apply only migration 0006");
-}
 
 const client = new pg.Client({
   connectionString,
@@ -322,6 +320,12 @@ try {
       pg_catalog.to_regprocedure(
         'uptech.complete_mobile_google_callback_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS mobile_boundary_present,
+      pg_catalog.to_regclass(
+        'uptech.people_sync_generations'
+      ) IS NOT NULL AS enterprise_login_baseline_present,
+      pg_catalog.to_regprocedure(
+        'uptech.complete_web_google_login_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
+      ) IS NOT NULL AS directory_upgrade_present,
       NOT EXISTS (
         SELECT 1
         FROM uptech.identities AS legacy_identity
@@ -344,14 +348,18 @@ try {
     state?.migration_member !== true ||
     state?.web_boundary_present !== true ||
     state?.mobile_boundary_present !== true ||
+    state?.enterprise_login_baseline_present !== true ||
     state?.issuer_reconciliation_safe !== true ||
     state?.release_lock !== true
   ) {
     throw new Error("Multi-tenant login database preflight failed");
   }
 
-  await client.query(executableSql(migrationSource));
-  await client.query(executableSql(verificationSource));
+  await client.query(executableSql(safeAccessVerificationSource));
+  if (state.directory_upgrade_present !== true) {
+    await client.query(executableSql(enterpriseLoginMigrationSource));
+  }
+  await client.query(executableSql(enterpriseLoginVerificationSource));
   await reconcileMobileRegistry(client);
 
   const verified = await client.query(`
@@ -363,8 +371,14 @@ try {
         'uptech.complete_web_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS web_boundary_present,
       pg_catalog.to_regprocedure(
+        'uptech.complete_web_google_login_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
+      ) IS NOT NULL AS directory_web_boundary_present,
+      pg_catalog.to_regprocedure(
         'uptech.complete_mobile_google_callback_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS mobile_boundary_present,
+      pg_catalog.to_regprocedure(
+        'uptech.complete_mobile_google_callback_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
+      ) IS NOT NULL AS directory_mobile_boundary_present,
       pg_catalog.to_regtype(
         'uptech.mobile_handoff_exchange_result_v2'
       ) IS NOT NULL AS mobile_exchange_result_present,
@@ -383,7 +397,9 @@ try {
   if (
     result?.result_type_present !== true ||
     result?.web_boundary_present !== true ||
+    result?.directory_web_boundary_present !== true ||
     result?.mobile_boundary_present !== true ||
+    result?.directory_mobile_boundary_present !== true ||
     result?.mobile_exchange_result_present !== true ||
     result?.mobile_denial_boundary_present !== true ||
     result?.mobile_exchange_boundary_present !== true ||
