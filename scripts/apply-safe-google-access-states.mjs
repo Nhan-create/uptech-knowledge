@@ -344,15 +344,18 @@ try {
       ) AS release_lock
   `);
   const state = preflight.rows[0];
-  if (
-    state?.migration_member !== true ||
-    state?.web_boundary_present !== true ||
-    state?.mobile_boundary_present !== true ||
-    state?.enterprise_login_baseline_present !== true ||
-    state?.issuer_reconciliation_safe !== true ||
-    state?.release_lock !== true
-  ) {
-    throw new Error("Multi-tenant login database preflight failed");
+  const failedPreflightChecks = [
+    ["migration_member", state?.migration_member],
+    ["web_boundary_present", state?.web_boundary_present],
+    ["mobile_boundary_present", state?.mobile_boundary_present],
+    ["enterprise_login_baseline_present", state?.enterprise_login_baseline_present],
+    ["issuer_reconciliation_safe", state?.issuer_reconciliation_safe],
+    ["release_lock", state?.release_lock],
+  ].filter(([, passed]) => passed !== true).map(([name]) => name);
+  if (failedPreflightChecks.length > 0) {
+    throw new Error(
+      `Multi-tenant login database preflight failed: ${failedPreflightChecks.join(", ")}`,
+    );
   }
 
   await client.query(executableSql(safeAccessVerificationSource));
