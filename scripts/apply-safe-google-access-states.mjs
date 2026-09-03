@@ -367,6 +367,8 @@ try {
     await client.query(executableSql(googleDirectoryMigrationSource));
   }
   await client.query(`
+    BEGIN;
+    SET LOCAL ROLE uptech_migration_owner;
     REVOKE ALL ON FUNCTION uptech.exchange_mobile_handoff_v1(
       uptech.google_auth_hash32_v1,
       uptech.google_auth_hash32_v1,
@@ -375,7 +377,8 @@ try {
       uptech.google_auth_hash32_v1,
       uptech.google_auth_hash32_v1,
       uuid
-    ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime
+    ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+    COMMIT;
   `);
   await client.query(executableSql(enterpriseLoginVerificationSource));
   await reconcileMobileRegistry(client);
