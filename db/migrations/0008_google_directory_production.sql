@@ -1015,10 +1015,14 @@ DECLARE
   selected_started_at timestamptz;
   selected_actor_id uuid;
   previous_generation_id uuid;
+  directory_controls_authority boolean;
   observed_at timestamptz := clock_timestamp();
 BEGIN
-  SELECT generation.connector_id, job.id, generation.started_at, job.service_actor_id
-  INTO selected_connector_id, selected_job_id, selected_started_at, selected_actor_id
+  SELECT generation.connector_id, job.id, generation.started_at,
+    job.service_actor_id,
+    workspace.provisioning_policy = 'GOOGLE_GROUP_CONTROLLED'
+  INTO selected_connector_id, selected_job_id, selected_started_at,
+    selected_actor_id, directory_controls_authority
   FROM uptech.people_sync_generations AS generation
   JOIN uptech.sync_jobs AS job
     ON job.workspace_id = generation.workspace_id AND job.id = generation.job_id
@@ -1169,9 +1173,12 @@ BEGIN
       completed_at = observed_at, fresh_until = p_fresh_until
   WHERE workspace_id = p_workspace_id AND id = p_generation_id;
 
-  -- Only changed or ineligible memberships lose their sessions. Unchanged
-  -- authorized members remain online across ordinary snapshot refreshes.
-  WITH new_authority AS MATERIALIZED (
+  -- Directory snapshots are informational for manually provisioned tenants.
+  -- They may change login authority only for GOOGLE_GROUP_CONTROLLED tenants.
+  IF directory_controls_authority THEN
+    -- Only changed or ineligible memberships lose their sessions. Unchanged
+    -- authorized members remain online across ordinary snapshot refreshes.
+    WITH new_authority AS MATERIALIZED (
     SELECT membership.id AS membership_id, membership.role, membership.status,
       profile.lifecycle_state AS lifecycle_state,
       profile.effective_role,
@@ -1226,28 +1233,28 @@ BEGIN
         AND direct_group_ids IS DISTINCT FROM old_direct_group_ids
       )
   )
-  UPDATE uptech.sessions session_row
-  SET status = 'REVOKED', revoked_at = observed_at,
-      revocation_reason = 'DIRECTORY_AUTHORIZATION_REFRESH',
-      security_version = session_row.security_version + 1
-  FROM affected
-  WHERE session_row.workspace_id = p_workspace_id AND session_row.status = 'ACTIVE'
-    AND session_row.membership_id = affected.membership_id;
+    UPDATE uptech.sessions session_row
+    SET status = 'REVOKED', revoked_at = observed_at,
+        revocation_reason = 'DIRECTORY_AUTHORIZATION_REFRESH',
+        security_version = session_row.security_version + 1
+    FROM affected
+    WHERE session_row.workspace_id = p_workspace_id AND session_row.status = 'ACTIVE'
+      AND session_row.membership_id = affected.membership_id;
 
-  UPDATE uptech.session_tokens AS token
-  SET token_status = 'REVOKED', revoked_at = observed_at,
-      became_previous_at = NULL, previous_valid_until = NULL
-  WHERE token.workspace_id = p_workspace_id
-    AND token.token_status <> 'REVOKED'
-    AND EXISTS (
-      SELECT 1 FROM uptech.sessions AS session_row
-      WHERE session_row.workspace_id = token.workspace_id
-        AND session_row.id = token.session_id
-        AND session_row.status = 'REVOKED'
-        AND session_row.revocation_reason = 'DIRECTORY_AUTHORIZATION_REFRESH'
-    );
+    UPDATE uptech.session_tokens AS token
+    SET token_status = 'REVOKED', revoked_at = observed_at,
+        became_previous_at = NULL, previous_valid_until = NULL
+    WHERE token.workspace_id = p_workspace_id
+      AND token.token_status <> 'REVOKED'
+      AND EXISTS (
+        SELECT 1 FROM uptech.sessions AS session_row
+        WHERE session_row.workspace_id = token.workspace_id
+          AND session_row.id = token.session_id
+          AND session_row.status = 'REVOKED'
+          AND session_row.revocation_reason = 'DIRECTORY_AUTHORIZATION_REFRESH'
+      );
 
-  WITH authority AS MATERIALIZED (
+    WITH authority AS MATERIALIZED (
     SELECT
       membership.id AS membership_id,
       profile.lifecycle_state AS lifecycle_state,
@@ -1308,35 +1315,36 @@ BEGIN
     ) old_profile ON true
     WHERE membership.workspace_id = p_workspace_id
   )
-  UPDATE uptech.workspace_memberships AS membership
-  SET role = COALESCE(authority.resolved_role, membership.role),
-      status = CASE
-        WHEN authority.lifecycle_state = 'DELETED' THEN 'DEPROVISIONED'
-        WHEN authority.resolved_role IS NOT NULL THEN 'ACTIVE'
-        ELSE 'SUSPENDED'
-      END,
-      authz_version = membership.authz_version + CASE
-        WHEN membership.role IS DISTINCT FROM COALESCE(authority.resolved_role,membership.role)
-          OR membership.status IS DISTINCT FROM CASE
-            WHEN authority.lifecycle_state='DELETED' THEN 'DEPROVISIONED'
-            WHEN authority.resolved_role IS NOT NULL THEN 'ACTIVE' ELSE 'SUSPENDED' END
-          OR EXISTS (SELECT 1 FROM uptech.sessions changed_session
-            WHERE changed_session.workspace_id=membership.workspace_id
-              AND changed_session.membership_id=membership.id
-              AND changed_session.revocation_reason='DIRECTORY_AUTHORIZATION_REFRESH'
-              AND changed_session.revoked_at=observed_at)
-          OR authority.lifecycle_state IS DISTINCT FROM authority.old_lifecycle_state
-          OR authority.effective_role IS DISTINCT FROM authority.old_effective_role
-          OR authority.effective_department_key IS DISTINCT FROM authority.old_effective_department_key
-          OR (
-            membership.role <> 'OWNER'
-            AND authority.direct_group_ids IS DISTINCT FROM authority.old_direct_group_ids
-          )
-        THEN 1 ELSE 0 END,
-      updated_at = observed_at
-  FROM authority
-  WHERE membership.workspace_id = p_workspace_id
-    AND membership.id = authority.membership_id;
+    UPDATE uptech.workspace_memberships AS membership
+    SET role = COALESCE(authority.resolved_role, membership.role),
+        status = CASE
+          WHEN authority.lifecycle_state = 'DELETED' THEN 'DEPROVISIONED'
+          WHEN authority.resolved_role IS NOT NULL THEN 'ACTIVE'
+          ELSE 'SUSPENDED'
+        END,
+        authz_version = membership.authz_version + CASE
+          WHEN membership.role IS DISTINCT FROM COALESCE(authority.resolved_role,membership.role)
+            OR membership.status IS DISTINCT FROM CASE
+              WHEN authority.lifecycle_state='DELETED' THEN 'DEPROVISIONED'
+              WHEN authority.resolved_role IS NOT NULL THEN 'ACTIVE' ELSE 'SUSPENDED' END
+            OR EXISTS (SELECT 1 FROM uptech.sessions changed_session
+              WHERE changed_session.workspace_id=membership.workspace_id
+                AND changed_session.membership_id=membership.id
+                AND changed_session.revocation_reason='DIRECTORY_AUTHORIZATION_REFRESH'
+                AND changed_session.revoked_at=observed_at)
+            OR authority.lifecycle_state IS DISTINCT FROM authority.old_lifecycle_state
+            OR authority.effective_role IS DISTINCT FROM authority.old_effective_role
+            OR authority.effective_department_key IS DISTINCT FROM authority.old_effective_department_key
+            OR (
+              membership.role <> 'OWNER'
+              AND authority.direct_group_ids IS DISTINCT FROM authority.old_direct_group_ids
+            )
+          THEN 1 ELSE 0 END,
+        updated_at = observed_at
+    FROM authority
+    WHERE membership.workspace_id = p_workspace_id
+      AND membership.id = authority.membership_id;
+  END IF;
 
   UPDATE uptech.workspaces
   SET permission_epoch = permission_epoch + 1, updated_at = observed_at
@@ -1388,19 +1396,11 @@ AS $function$
     SELECT
       membership.workspace_id,
       membership.role AS membership_role,
+      workspace.provisioning_policy,
       profile.google_subject,
       profile.effective_role,
       profile.effective_department_key,
       generation.id AS generation_id,
-      EXISTS (
-        SELECT 1 FROM uptech.connectors AS configured_directory
-        WHERE configured_directory.workspace_id = membership.workspace_id
-          AND configured_directory.purpose = 'DIRECTORY'
-          AND configured_directory.status IN ('ACTIVE', 'DEGRADED')
-          AND configured_directory.provider_customer_id IS NOT NULL
-          AND configured_directory.credential_reference IS NOT NULL
-          AND configured_directory.directory_authorized_by_identity_id IS NOT NULL
-      ) AS directory_required,
       COALESCE(ARRAY(
         SELECT edge.google_group_id
         FROM uptech.people_group_memberships AS edge
@@ -1424,6 +1424,7 @@ AS $function$
       ON workspace.workspace_id = membership.workspace_id
     LEFT JOIN uptech.people_sync_generations AS generation
       ON generation.workspace_id = membership.workspace_id
+     AND workspace.provisioning_policy = 'GOOGLE_GROUP_CONTROLLED'
      AND generation.status = 'PUBLISHED'
      AND generation.traversal_complete
      AND generation.fresh_until > statement_timestamp()
@@ -1475,21 +1476,28 @@ AS $function$
   )
   SELECT
     candidate.workspace_id,candidate.membership_role,
-    CASE WHEN candidate.membership_role='MEMBER'
+    CASE WHEN candidate.provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+          AND candidate.membership_role='MEMBER'
       THEN candidate.effective_department_key ELSE NULL::text END,
-    candidate.direct_group_ids
+    CASE WHEN candidate.provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+      THEN candidate.direct_group_ids ELSE ARRAY[]::text[] END
   FROM candidate
-  WHERE (candidate.membership_role='OWNER'
-       AND (NOT candidate.directory_required
-         OR candidate.google_subject IS NOT NULL))
-     OR (candidate.membership_role='ADMIN' AND candidate.effective_role='ADMIN')
-     OR (candidate.membership_role='MEMBER' AND candidate.effective_role='MEMBER'
-       AND candidate.effective_department_key IS NOT NULL)
+  WHERE candidate.provisioning_policy='INVITE_ONLY'
+     OR (
+       candidate.provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+       AND (
+         (candidate.membership_role='OWNER' AND candidate.google_subject IS NOT NULL)
+         OR (candidate.membership_role='ADMIN' AND candidate.effective_role='ADMIN')
+         OR (candidate.membership_role='MEMBER' AND candidate.effective_role='MEMBER'
+           AND candidate.effective_department_key IS NOT NULL)
+       )
+     )
 $function$;
 
 -- Shared, internal authority predicate for Web and native-session issuance.
--- OWNER is the bootstrap exception; every other role is derived from the
--- tenant's current complete, published and still-fresh Directory generation.
+-- INVITE_ONLY trusts an existing active UPTECH membership. The compatibility
+-- policy GOOGLE_GROUP_CONTROLLED is the Directory-controlled mode and remains
+-- fail-closed unless its published generation is complete and fresh.
 CREATE OR REPLACE FUNCTION uptech.has_current_people_authority_v1(
   p_workspace_id uuid,
   p_user_id uuid,
@@ -1522,16 +1530,10 @@ AS $function$
       AND identity_row.status = 'ACTIVE'
       AND workspace.status = 'ACTIVE'
       AND (
-        (membership.role = 'OWNER' AND NOT EXISTS (
-          SELECT 1 FROM uptech.connectors AS configured_directory
-          WHERE configured_directory.workspace_id = membership.workspace_id
-            AND configured_directory.purpose = 'DIRECTORY'
-            AND configured_directory.status IN ('ACTIVE', 'DEGRADED')
-            AND configured_directory.provider_customer_id IS NOT NULL
-            AND configured_directory.credential_reference IS NOT NULL
-            AND configured_directory.directory_authorized_by_identity_id IS NOT NULL
-        ))
-        OR EXISTS (
+        workspace.provisioning_policy = 'INVITE_ONLY'
+        OR (
+          workspace.provisioning_policy = 'GOOGLE_GROUP_CONTROLLED'
+          AND EXISTS (
           SELECT 1
           FROM uptech.people_sync_generations AS generation
           JOIN uptech.connectors AS directory_connector
@@ -1584,6 +1586,7 @@ AS $function$
                 AND profile.effective_role = 'MEMBER'
                 AND profile.effective_department_key IN ('SALES', 'HR', 'IT', 'FINANCE'))
             )
+          )
         )
       )
   )

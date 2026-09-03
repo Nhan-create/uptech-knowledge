@@ -6,12 +6,6 @@
       "*": false
     }
   },
-  "crons": [
-    {
-      "path": "/api/internal/cron/google-directory",
-      "schedule": "* * * * *"
-    }
-  ],
   "headers": [
     {
       "source": "/.well-known/apple-app-site-association",

@@ -54,6 +54,12 @@ function isCurrentDirectoryPermissionContext(
   if (workspaceRole === "OWNER" || workspaceRole === "ADMIN") {
     return row.department_key === null;
   }
+  // Manual INVITE_ONLY memberships may be intentionally unassigned. SQL
+  // returns no Directory groups and null department in that case, which keeps
+  // department-scoped data fail-closed while still allowing the employee home.
+  if (row.department_key === null) {
+    return row.direct_group_ids.length === 0;
+  }
   return (
     row.department_key === "SALES" ||
     row.department_key === "HR" ||
