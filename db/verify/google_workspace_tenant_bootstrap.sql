@@ -269,12 +269,6 @@ BEGIN
   THEN RAISE EXCEPTION 'Directory scope predicate does not enforce exact four/five sets';
   END IF;
 
-  IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-      WHERE n.nspname='uptech' AND p.proname IN ('activate_directory_connector_v1','lease_next_directory_job_v1')
-        AND p.prosrc NOT LIKE '%directory_scopes_are_supported_v1%')
-  THEN RAISE EXCEPTION 'Directory activation/lease routines do not use exact supported scopes';
-  END IF;
-
   normalized := uptech.normalize_google_workspace_verified_domains_v1(
     ' Example.COM ', ARRAY[
       ROW('alias.example.com','ALIAS','example.com')::uptech.google_workspace_verified_domain_v1,
@@ -292,6 +286,38 @@ BEGIN
         ::uptech.google_workspace_verified_domain_v1]);
     RAISE EXCEPTION 'invalid alias provenance was accepted';
   EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
+  END;
+END
+$verify$;
+
+-- Execute transition guards; a correctly named but faulty trigger must fail here.
+DO $verify$
+BEGIN
+  INSERT INTO uptech.google_workspace_bootstrap_attempts(
+    id,source_onboarding_session_id,identity_id,candidate_workspace_id,
+    candidate_status_hash,completion_deadline
+  ) VALUES (
+    '91000000-0000-0000-0000-000000000001',
+    '90000000-0000-0000-0000-000000000004',
+    '90000000-0000-0000-0000-000000000003',
+    '91000000-0000-0000-0000-000000000002',decode(repeat('91',32),'hex'),
+    statement_timestamp()+interval '5 minutes');
+  BEGIN
+    UPDATE uptech.google_workspace_bootstrap_attempts
+      SET candidate_workspace_id='91000000-0000-0000-0000-000000000003'
+      WHERE id='91000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'attempt binding mutation was accepted';
+  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+  END;
+
+  INSERT INTO uptech.workspace_access_requests(workspace_id,id,identity_id,reason_class)
+    VALUES ('90000000-0000-0000-0000-000000000001','91000000-0000-0000-0000-000000000004',
+      '90000000-0000-0000-0000-000000000003','USER_NOT_PROVISIONED');
+  BEGIN
+    UPDATE uptech.workspace_access_requests SET reason_class='DIRECTORY_STALE'
+      WHERE id='91000000-0000-0000-0000-000000000004';
+    RAISE EXCEPTION 'access-request binding mutation was accepted';
+  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
   END;
 END
 $verify$;

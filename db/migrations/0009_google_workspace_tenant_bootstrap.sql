@@ -62,6 +62,19 @@ ALTER TABLE uptech.onboarding_sessions
 ALTER TABLE uptech.onboarding_sessions
   VALIDATE CONSTRAINT onboarding_sessions_resource_workspace_fk;
 
+UPDATE uptech.onboarding_sessions AS capability
+SET allowed_operations = (
+  SELECT array_agg(deduplicated.operation_name ORDER BY deduplicated.first_position)
+  FROM (
+    SELECT operation_name, min(position) AS first_position
+    FROM unnest(capability.allowed_operations) WITH ORDINALITY AS operation(operation_name, position)
+    GROUP BY operation_name
+  ) AS deduplicated
+)
+WHERE cardinality(capability.allowed_operations) <> (
+  SELECT count(DISTINCT operation_name) FROM unnest(capability.allowed_operations) AS operation_name
+);
+
 UPDATE uptech.onboarding_sessions
 SET allowed_operations = ARRAY(
   SELECT operation_name FROM unnest(allowed_operations) AS operation_name
@@ -79,6 +92,12 @@ JOIN uptech.workspace_domain_locators AS locator
 WHERE capability.identity_id = identity_row.id
   AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
   AND capability.resource_workspace_id IS NULL;
+
+-- An access-only credential whose tenant cannot be reconstructed is unusable;
+-- remove it rather than inventing or broadening tenant authority.
+DELETE FROM uptech.onboarding_sessions
+WHERE allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+  AND resource_workspace_id IS NULL;
 
 ALTER TABLE uptech.onboarding_sessions
   DROP CONSTRAINT onboarding_sessions_operations_check,

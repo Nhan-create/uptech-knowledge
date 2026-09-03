@@ -20,7 +20,7 @@ async function sql(path: string): Promise<string> {
 
 before(async () => {
   pool = new Pool({ connectionString: databaseUrl(), max: 1 });
-  await pool.query("SET ROLE uptech_migration_owner; DROP SCHEMA IF EXISTS uptech CASCADE; RESET ROLE; CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner");
+  await pool.query("SET ROLE uptech_migration_owner; DROP SCHEMA IF EXISTS uptech CASCADE; RESET ROLE; CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner; SET ROLE uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime,uptech_worker_runtime; RESET ROLE");
   for (let number = 1; number <= 9; number += 1) {
     const names = [
       "phase1_foundation", "google_auth_a1", "initial_owner_bootstrap_a2",
@@ -32,13 +32,19 @@ before(async () => {
       await pool.query(`SET ROLE uptech_migration_owner;
         INSERT INTO uptech.workspaces(workspace_id,status,google_customer_id)
           VALUES ('90000000-0000-0000-0000-000000000001','ACTIVE','legacy-customer');
-        INSERT INTO uptech.users(id) VALUES ('90000000-0000-0000-0000-000000000002');
+        INSERT INTO uptech.users(id) VALUES ('90000000-0000-0000-0000-000000000002'),('90000000-0000-0000-0000-000000000012');
         INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
           VALUES ('90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','GOOGLE','https://accounts.google.com','legacy-sub','owner@legacy.example',true,'legacy.example',statement_timestamp());
+        INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
+          VALUES ('90000000-0000-0000-0000-000000000013','90000000-0000-0000-0000-000000000012','GOOGLE','https://accounts.google.com','unmatched-sub','owner@unmatched.example',true,'unmatched.example',statement_timestamp());
         INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
           VALUES ('legacy.example','90000000-0000-0000-0000-000000000001','VERIFIED',statement_timestamp());
         INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
           VALUES ('90000000-0000-0000-0000-000000000004','90000000-0000-0000-0000-000000000003',decode(repeat('09',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes');
+        INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at) VALUES
+          ('90000000-0000-0000-0000-000000000014','90000000-0000-0000-0000-000000000013',decode(repeat('14',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_READ'],statement_timestamp()+interval '20 minutes'),
+          ('90000000-0000-0000-0000-000000000015','90000000-0000-0000-0000-000000000013',decode(repeat('15',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_READ','ACCESS_REQUEST_READ'],statement_timestamp()+interval '20 minutes'),
+          ('90000000-0000-0000-0000-000000000016','90000000-0000-0000-0000-000000000003',decode(repeat('16',32),'hex'),ARRAY['ACCESS_REQUEST_SUBMIT','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes');
         RESET ROLE`);
     }
     await pool.query(await sql(`db/migrations/${String(number).padStart(4, "0")}_${names[number - 1]}.sql`));
@@ -99,6 +105,14 @@ test("0009 preserves a populated legacy access capability with its unique verifi
   assert.equal(result.rows[0]?.resource_workspace_id, "90000000-0000-0000-0000-000000000001");
 });
 
+test("0009 safely reconciles unmatched, mixed, and duplicate legacy capabilities", async () => {
+  const result = await pool.query("SELECT id::text,allowed_operations,resource_workspace_id::text FROM uptech.onboarding_sessions WHERE id IN ('90000000-0000-0000-0000-000000000014','90000000-0000-0000-0000-000000000015','90000000-0000-0000-0000-000000000016') ORDER BY id");
+  assert.deepEqual(result.rows, [
+    { id: '90000000-0000-0000-0000-000000000015', allowed_operations: ['FIRST_DOMAIN_CLAIM_READ'], resource_workspace_id: null },
+    { id: '90000000-0000-0000-0000-000000000016', allowed_operations: ['ACCESS_REQUEST_SUBMIT'], resource_workspace_id: '90000000-0000-0000-0000-000000000001' },
+  ]);
+});
+
 test("connector scope authority accepts only the exact legacy-four or current-five set", async () => {
   const base = [
     'https://www.googleapis.com/auth/admin.directory.customer.readonly',
@@ -112,8 +126,32 @@ test("connector scope authority accepts only the exact legacy-four or current-fi
   assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, domain]])).rows[0].directory_scopes_are_supported_v1, true);
   assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, base[0]]])).rows[0].directory_scopes_are_supported_v1, false);
   assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, 'unknown']])).rows[0].directory_scopes_are_supported_v1, false);
-  const definitions = await pool.query(`SELECT proname,prosrc FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace
-    WHERE n.nspname='uptech' AND proname IN ('activate_directory_connector_v1','lease_next_directory_job_v1')`);
-  assert.ok(definitions.rows.every((row) => row.prosrc.includes('directory_scopes_are_supported_v1')));
+  await pool.query("RESET ROLE");
+});
+
+test("approved activation and lease routines execute with five scopes and reject duplicates", async () => {
+  const scopes = [
+    'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+    'https://www.googleapis.com/auth/admin.directory.group.readonly',
+    'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+    'https://www.googleapis.com/auth/admin.directory.domain.readonly',
+  ];
+  await pool.query(`SET ROLE uptech_migration_owner;
+    INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status) VALUES ('90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000021','90000000-0000-0000-0000-000000000002','OWNER','ACTIVE');
+    INSERT INTO uptech.service_actors(workspace_id,id,actor_kind) VALUES ('90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000022','SYNC_WORKER');
+    INSERT INTO uptech.connectors(workspace_id,id,purpose) VALUES ('90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000023','DIRECTORY');
+    INSERT INTO uptech.sessions(workspace_id,id,identity_id,user_id,membership_id,client_type,status,user_security_version,identity_security_version,workspace_security_version,membership_authz_version,idle_expires_at,absolute_expires_at)
+      VALUES ('90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000024','90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','90000000-0000-0000-0000-000000000021','WEB','ACTIVE',1,1,1,1,statement_timestamp()+interval '1 hour',statement_timestamp()+interval '1 day');
+    RESET ROLE`);
+  await pool.query("SET ROLE uptech_api_runtime");
+  await pool.query("SELECT set_config('app.workspace_id',$1,false),set_config('app.actor_id',$2,false),set_config('app.membership_id',$3,false),set_config('app.session_id',$4,false)", ['90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000002','90000000-0000-0000-0000-000000000021','90000000-0000-0000-0000-000000000024']);
+  const activated = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://five','legacy-sub','legacy.example',scopes,'90000000-0000-0000-0000-000000000025']);
+  assert.equal(activated.rows[0]?.outcome, 'ACTIVATED');
+  const denied = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://bad','legacy-sub','legacy.example',[...scopes.slice(0,4),scopes[0]],'90000000-0000-0000-0000-000000000026']);
+  assert.equal(denied.rows[0]?.outcome, 'DENIED');
+  await pool.query("RESET ROLE; SET ROLE uptech_worker_runtime");
+  const leased = await pool.query("SELECT connector_id::text FROM uptech.lease_next_directory_job_v1()");
+  assert.equal(leased.rows[0]?.connector_id, '90000000-0000-0000-0000-000000000023');
   await pool.query("RESET ROLE");
 });
