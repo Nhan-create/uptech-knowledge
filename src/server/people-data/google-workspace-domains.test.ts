@@ -12,7 +12,7 @@ test("normalizes verified primary, secondary, and alias domains deterministicall
     customerDomain,
     domains: [
       { domainName: "Company-A.VN", verified: true, isPrimary: false },
-      { domainName: "company-a.com", verified: true, isPrimary: true, domainAliases: [{ domainName: "STAFF.company-a.com" }] },
+      { domainName: "company-a.com", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "STAFF.company-a.com", verified: true }] },
     ],
   });
 
@@ -20,6 +20,30 @@ test("normalizes verified primary, secondary, and alias domains deterministicall
     { normalizedDomain: "company-a.com", kind: "PRIMARY", providerParentDomain: null, verified: true },
     { normalizedDomain: "company-a.vn", kind: "SECONDARY", providerParentDomain: null, verified: true },
     { normalizedDomain: "staff.company-a.com", kind: "ALIAS", providerParentDomain: "company-a.com", verified: true },
+  ]);
+});
+
+test("omits unverified aliases and aliases whose parent Domain resource is unverified", () => {
+  const result = normalizeVerifiedGoogleWorkspaceDomains({
+    customerDomain,
+    domains: [
+      {
+        domainName: customerDomain,
+        verified: true,
+        isPrimary: true,
+        domainAliases: [{ domainAliasName: "unverified.company-a.com", verified: false }],
+      },
+      {
+        domainName: "secondary.company-a.com",
+        verified: false,
+        isPrimary: false,
+        domainAliases: [{ domainAliasName: "alias.secondary.company-a.com", verified: true }],
+      },
+    ],
+  });
+
+  assert.deepEqual(result, [
+    { normalizedDomain: "company-a.com", kind: "PRIMARY", providerParentDomain: null, verified: true },
   ]);
 });
 

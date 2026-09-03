@@ -53,7 +53,8 @@ export function normalizeVerifiedGoogleWorkspaceDomains(input: {
       verified: true as const,
     }));
     for (const alias of recordList(item.domainAliases)) {
-      const aliasDomain = domain(alias.domainName);
+      if (alias.verified !== true) continue;
+      const aliasDomain = domain(alias.domainAliasName);
       const parent = alias.parentDomainName === undefined
         ? normalizedDomain
         : domain(alias.parentDomainName);

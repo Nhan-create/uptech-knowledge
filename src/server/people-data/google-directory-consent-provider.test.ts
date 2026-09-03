@@ -81,7 +81,7 @@ function directoryFetchFixture(options: {
     }
     if (url.pathname.endsWith("/customer/C0123abc/domains")) {
       return json({ domains: options.domains ?? [
-        { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainName: "staff.tenant-a.example" }] },
+        { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "staff.tenant-a.example", verified: true }] },
       ] });
     }
     if (url.pathname.includes("/users/") && !url.pathname.endsWith("/users")) {
