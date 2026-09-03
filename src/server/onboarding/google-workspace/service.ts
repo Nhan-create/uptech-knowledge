@@ -10,6 +10,7 @@ import {
   type SetupCookieKey,
 } from "./crypto.ts";
 import type { GoogleWorkspaceBootstrapRepository } from "./types.ts";
+import type { GoogleWorkspaceBootstrapOperationalReporter } from "./operational-report.ts";
 
 const REQUIRED_OPERATION = "FIRST_DOMAIN_CLAIM_RESERVE" as const;
 const SERVICE_IDENTITY = "GOOGLE_DIRECTORY_BOOTSTRAP_V1";
@@ -97,10 +98,7 @@ export interface GoogleWorkspaceBootstrapServiceDependencies {
   };
   readonly repository: GoogleWorkspaceBootstrapRepository;
   readonly secretAdapter: SecretAdapter;
-  readonly report?: (record: Readonly<
-    | { event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE"; request_id: string; outcome: "COMMITTED" | "NOT_COMMITTED" | "UNKNOWN" }
-    | { event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN"; request_id: string; outcome: "DESTROY_FAILED" }
-  >) => void;
+  readonly report: GoogleWorkspaceBootstrapOperationalReporter;
 }
 
 function denied(code: BootstrapServiceErrorCode): never { throw new BootstrapServiceError(code); }
@@ -181,6 +179,9 @@ function newStatusCredential(dependencies: GoogleWorkspaceBootstrapServiceDepend
 }
 
 export function createGoogleWorkspaceBootstrapService(dependencies: GoogleWorkspaceBootstrapServiceDependencies): GoogleWorkspaceBootstrapService {
+  if (typeof dependencies.report !== "function") {
+    throw new TypeError("Google Workspace bootstrap reporter is required");
+  }
   const nextId = dependencies.nextId ?? randomUUID;
   return Object.freeze({
     async initiate(input: Parameters<GoogleWorkspaceBootstrapService["initiate"]>[0]) {
@@ -294,11 +295,11 @@ export function createGoogleWorkspaceBootstrapService(dependencies: GoogleWorksp
         try {
           outcome = (await dependencies.repository.reconcile({ attemptId: transaction.attemptId, sourceTokenHash, statusTokenHash, credentialReference: reference, requestId: input.requestId })).outcome;
         } catch { outcome = "UNKNOWN"; }
-        try { dependencies.report?.({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE", request_id: input.requestId, outcome }); } catch { /* reporting never changes authority */ }
+        try { dependencies.report(Object.freeze({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE", request_id: input.requestId, outcome })); } catch { /* reporting never changes authority */ }
         if (outcome === "NOT_COMMITTED") {
           try { await dependencies.secretAdapter.destroy(reference, metadata); }
           catch {
-            try { dependencies.report?.({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN", request_id: input.requestId, outcome: "DESTROY_FAILED" }); } catch { /* reporting never changes authority */ }
+            try { dependencies.report(Object.freeze({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN", request_id: input.requestId, outcome: "DESTROY_FAILED" })); } catch { /* reporting never changes authority */ }
             return denied("PROVIDER_UNAVAILABLE");
           }
         }

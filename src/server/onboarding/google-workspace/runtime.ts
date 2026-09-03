@@ -15,6 +15,10 @@ import { createGoogleCloudSecretManagerRegistration } from "../../secrets/google
 import { createConfiguredGoogleDirectoryProductionWorker } from "../../../worker/google-directory-production.ts";
 import { createGoogleWorkspaceBootstrapRepository } from "./repository.ts";
 import {
+  reportGoogleWorkspaceBootstrapOperationalEvent,
+  type GoogleWorkspaceBootstrapOperationalReporter,
+} from "./operational-report.ts";
+import {
   createGoogleWorkspaceBootstrapService,
   type GoogleWorkspaceBootstrapService,
 } from "./service.ts";
@@ -44,6 +48,7 @@ export interface GoogleWorkspaceBootstrapRuntimeComposition {
     (config: GoogleDirectoryConsentProviderConfig) => GoogleDirectoryConsentProvider;
   readonly createDirectoryWorker:
     (environment: Environment) => ZeroInputDirectoryWorker;
+  readonly report?: GoogleWorkspaceBootstrapOperationalReporter;
   readonly now: () => Date;
 }
 
@@ -58,6 +63,7 @@ const productionComposition: GoogleWorkspaceBootstrapRuntimeComposition =
     },
     createProvider: createGoogleDirectoryConsentProvider,
     createDirectoryWorker: createConfiguredGoogleDirectoryProductionWorker,
+    report: reportGoogleWorkspaceBootstrapOperationalEvent,
     now: () => new Date(),
   });
 
@@ -93,6 +99,7 @@ export function createConfiguredGoogleWorkspaceBootstrapRuntime(
     repository: createGoogleWorkspaceBootstrapRepository(pool),
     provider,
     secretAdapter,
+    report: composition.report ?? reportGoogleWorkspaceBootstrapOperationalEvent,
   });
 
   return Object.freeze({

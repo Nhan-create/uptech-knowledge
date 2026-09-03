@@ -6,6 +6,7 @@ import type { GoogleLoginRuntimeConfig } from "../../auth/google/config.ts";
 import type { SecretReference } from "../../secrets/core.ts";
 import { GOOGLE_DIRECTORY_READ_ONLY_SCOPES } from "../../people-data/google-directory-scopes.ts";
 import { openGoogleWorkspaceSetupCookie } from "./crypto.ts";
+import { reportGoogleWorkspaceBootstrapOperationalEvent } from "./operational-report.ts";
 import {
   createConfiguredGoogleWorkspaceBootstrapRuntime,
   GOOGLE_WORKSPACE_BOOTSTRAP_CALLBACK_PATH,
@@ -211,6 +212,152 @@ test("configured bootstrap runtime closes the production worker when its zero-in
 
   await assert.rejects(runtime.runDirectoryWorker(), /worker unavailable/u);
   assert.equal(closed, 1);
+});
+
+test("production bootstrap reporter serializes only the three allowlisted fields", () => {
+  const messages: unknown[][] = [];
+  const originalInfo = console.info;
+  console.info = (...values: unknown[]) => { messages.push(values); };
+  try {
+    reportGoogleWorkspaceBootstrapOperationalEvent({
+      event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN",
+      request_id: REQUEST_ID,
+      outcome: "DESTROY_FAILED",
+      secret_reference: "gcp-sm:v1:do-not-log",
+      token: "token-do-not-log",
+      cookie: "cookie-do-not-log",
+      email: "owner@do-not-log.example",
+      domain: "do-not-log.example",
+      tenant_id: "tenant-do-not-log",
+      customer_id: "customer-do-not-log",
+      connector_id: "connector-do-not-log",
+      job_id: "job-do-not-log",
+      authority: "authority-do-not-log",
+      error: new Error("error-do-not-log"),
+      cause: new Error("cause-do-not-log"),
+    } as never);
+  } finally {
+    console.info = originalInfo;
+  }
+
+  assert.deepEqual(messages, [[JSON.stringify({
+    event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN",
+    request_id: REQUEST_ID,
+    outcome: "DESTROY_FAILED",
+  })]]);
+});
+
+test("configured runtime defaults to the production reporter for a proven orphan cleanup failure", async () => {
+  const forbidden = Object.freeze({
+    secretReference: "gcp-sm:v1:runtime-secret-reference",
+    token: "runtime-token-do-not-log",
+    email: "owner@runtime-do-not-log.example",
+    domain: "runtime-do-not-log.example",
+    tenant: "runtime-tenant-do-not-log",
+    customer: "runtime-customer-do-not-log",
+    connector: "runtime-connector-do-not-log",
+    job: "runtime-job-do-not-log",
+    authority: "runtime-authority-do-not-log",
+    error: "runtime-error-do-not-log",
+    cause: "runtime-cause-do-not-log",
+  });
+  const environment = Object.freeze({
+    UPTECH_TENANT_ID: forbidden.tenant,
+    UPTECH_GOOGLE_CUSTOMER_ID: forbidden.customer,
+    UPTECH_CONNECTOR_ID: forbidden.connector,
+    UPTECH_JOB_ID: forbidden.job,
+    UPTECH_AUTHORITY: forbidden.authority,
+  });
+  const pool = {
+    async query(text: string) {
+      if (text.includes("authenticate_google_workspace_bootstrap_source_v1")) {
+        return { rows: [{
+          identity_id: IDENTITY_ID,
+          provider_subject: "google-sub",
+          normalized_email: forbidden.email,
+          hosted_domain: forbidden.domain,
+          identity_active: true,
+          user_active: true,
+        }] };
+      }
+      if (text.includes("prepare_google_workspace_bootstrap_v1")) {
+        return { rows: [{ outcome: "PREPARED" }] };
+      }
+      if (text.includes("complete_google_workspace_bootstrap_v1")) {
+        throw new Error(forbidden.error, { cause: new Error(forbidden.cause) });
+      }
+      if (text.includes("reconcile_google_workspace_bootstrap_v1")) {
+        return { rows: [{ outcome: "NOT_COMMITTED" }] };
+      }
+      throw new Error("Unexpected bootstrap SQL");
+    },
+  };
+  const runtime = createConfiguredGoogleWorkspaceBootstrapRuntime(environment, {
+    loadConfig: () => CONFIG,
+    getPool: () => pool as never,
+    createSecretProviderRegistration: () => ({
+      providerId: "approved",
+      configurationPresent: true,
+      createAdapter: () => ({
+        async create() { return forbidden.secretReference as SecretReference; },
+        async read() { throw new Error("unused"); },
+        async replace() { throw new Error("unused"); },
+        async destroy() { throw new Error(forbidden.error, { cause: new Error(forbidden.cause) }); },
+      }),
+    }),
+    createProvider: () => ({
+      async createAuthorization() {
+        return {
+          state: issueOpaqueProof(), nonce: issueOpaqueProof(), pkceVerifier: issueOpaqueProof(),
+          authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth"),
+        };
+      },
+      async exchangeAndProbe() {
+        return {
+          customerId: forbidden.customer, directoryUserCustomerId: forbidden.customer, directoryUserActive: true as const,
+          primaryDomain: forbidden.domain,
+          verifiedDomains: [{ normalizedDomain: forbidden.domain, kind: "PRIMARY" as const, providerParentDomain: null, verified: true as const }],
+          providerSubject: "google-sub", normalizedEmail: forbidden.email, hostedDomain: forbidden.domain,
+          refreshToken: new TextEncoder().encode(forbidden.token), grantedScopes: GOOGLE_DIRECTORY_READ_ONLY_SCOPES,
+          isAdmin: true, isDelegatedAdmin: false,
+          readProbes: { customer: true as const, users: true as const, groups: true as const, groupMembers: true as const, orgUnits: true as const },
+        };
+      },
+    } as never),
+    createDirectoryWorker: () => ({ async runNext() {}, async close() {} }),
+    now: () => new Date(NOW),
+  });
+
+  const initiated = await runtime.service.initiate({ onboardingCredential: SOURCE, requestId: REQUEST_ID });
+  const transaction = openGoogleWorkspaceSetupCookie(initiated.transactionCookie, {
+    environmentId: CONFIG.environmentId, keyVersion: CONFIG.pkceKeyVersion, key: KEY, now: NOW,
+  });
+  assert.ok(transaction);
+
+  const messages: unknown[][] = [];
+  const originalInfo = console.info;
+  console.info = (...values: unknown[]) => { messages.push(values); };
+  try {
+    await assert.rejects(runtime.service.callback({
+      onboardingCredential: SOURCE,
+      callbackSearch: `?code=${forbidden.token}&state=${transaction.state}`,
+      transactionCookie: initiated.transactionCookie,
+      requestId: REQUEST_ID,
+    }), (error: unknown) => String(error) === "BootstrapServiceError: Google Workspace bootstrap could not be completed");
+  } finally {
+    console.info = originalInfo;
+  }
+
+  const records = messages.map(([message]) => JSON.parse(String(message)) as Record<string, unknown>);
+  assert.deepEqual(records, [
+    { event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE", request_id: REQUEST_ID, outcome: "NOT_COMMITTED" },
+    { event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN", request_id: REQUEST_ID, outcome: "DESTROY_FAILED" },
+  ]);
+  for (const record of records) assert.deepEqual(Object.keys(record).sort(), ["event", "outcome", "request_id"]);
+  const serialized = messages.flat().join("\n");
+  for (const value of [...Object.values(forbidden), initiated.transactionCookie]) {
+    assert.equal(serialized.includes(value), false, value);
+  }
 });
 
 function providerStub() {

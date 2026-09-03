@@ -24,6 +24,7 @@ const SECRET = "gcp-sm:v1:candidate" as SecretReference;
 
 function fixture(overrides: Record<string, unknown> = {}) {
   const calls: string[] = [];
+  const reports: unknown[] = [];
   let id = 0;
   const refreshToken = new TextEncoder().encode("refresh-token");
   const statusBytes = Uint8Array.from(Buffer.from(STATUS, "base64url"));
@@ -75,9 +76,10 @@ function fixture(overrides: Record<string, unknown> = {}) {
   const service = createGoogleWorkspaceBootstrapService({
     now: () => new Date(NOW), nextId: () => IDS[id++]!, issueCredentialBytes: () => statusBytes,
     cookieKey: COOKIE_KEY, sourceAuthority, provider, repository, secretAdapter,
+    report: (record: unknown) => reports.push(record),
     ...overrides,
   } as never);
-  return { service, calls, sourceAuthority, provider, repository, secretAdapter, evidence, refreshToken, statusBytes };
+  return { service, calls, reports, sourceAuthority, provider, repository, secretAdapter, evidence, refreshToken, statusBytes };
 }
 
 async function initiated(f = fixture()) {
@@ -102,6 +104,7 @@ test("callback prepares before secret creation, completes, returns status author
   assert.deepEqual(f.calls.slice(-5), ["authenticate", "exchange", "prepare", "secret.create", "complete"]);
   assert.equal(output.outcome, "PROVISIONING");
   assert.equal(output.statusCredential, STATUS);
+  assert.deepEqual(output.statusExpiresAt, new Date("2026-09-05T00:00:00.000Z"));
   assert.equal(f.refreshToken.every((byte) => byte === 0), true);
   assert.equal(f.statusBytes.every((byte) => byte === 0), true);
   assert.deepEqual(f.secretAdapter.createCalls[0].metadata, {
@@ -144,6 +147,32 @@ test("callback retries one indeterminate prepare with the exact original binding
   assert.equal(secondPrepare.sourceTokenHash, firstPrepare.sourceTokenHash);
   assert.equal(secondPrepare.statusTokenHash, firstPrepare.statusTokenHash);
   assert.equal(f.secretAdapter.createCalls.length, 1);
+});
+
+test("callback stops after two indeterminate prepare results without creating a secret", async () => {
+  const f = fixture();
+  f.repository.prepare = async (input: unknown) => {
+    f.repository.prepareCalls.push(input);
+    f.calls.push("prepare");
+    throw new Error(`indeterminate ${SECRET}`);
+  };
+  const started = await initiated(f);
+
+  await assert.rejects(f.service.callback({
+    onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,
+    transactionCookie: started.result.transactionCookie, requestId: REQUEST_ID,
+  }), (error: unknown) => error instanceof BootstrapServiceError &&
+    error.code === "PROVIDER_UNAVAILABLE" && !String(error).includes(SECRET));
+
+  assert.equal(f.repository.prepareCalls.length, 2);
+  assert.equal(f.secretAdapter.createCalls.length, 0);
+  assert.equal(f.repository.completeCalls.length, 0);
+  assert.equal(f.refreshToken.every((byte) => byte === 0), true);
+  assert.equal(f.statusBytes.every((byte) => byte === 0), true);
+});
+
+test("service refuses a composition without an operational reporter", () => {
+  assert.throws(() => fixture({ report: undefined }), /reporter is required/iu);
 });
 
 test("every invalid provider proof is denied before prepare, secret creation, or completion", async () => {
