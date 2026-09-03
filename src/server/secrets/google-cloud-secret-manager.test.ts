@@ -83,6 +83,29 @@ test("create produces an opaque reference and stores bytes only in a secret vers
   });
 });
 
+test("create labels a bootstrap candidate with a normalized attempt correlation value", async () => {
+  const fake = dependencies([
+    response({ name: "projects/uptech-secrets-prod/secrets/uptech-123e4567-e89b-12d3-a456-426614174000" }),
+    response({ name: "projects/uptech-secrets-prod/secrets/uptech-123e4567-e89b-12d3-a456-426614174000/versions/1" }),
+  ]);
+  const adapter = new GoogleCloudSecretManagerAdapter(configuration, fake, () =>
+    "123e4567-e89b-12d3-a456-426614174000",
+  );
+  const bootstrapAttemptId = "10000000-0000-4000-8000-000000000001";
+
+  await adapter.create(Uint8Array.from([1]), { ...metadata, bootstrapAttemptId });
+
+  assert.deepEqual(JSON.parse(String(fake.requests[0].init.body)), {
+    replication: { automatic: {} },
+    labels: { uptech_bootstrap_attempt: `a_${bootstrapAttemptId}` },
+  });
+  assert.match(`a_${bootstrapAttemptId}`, /^[a-z][a-z0-9_-]{0,62}$/u);
+  const requestReasons = fake.requests.map(({ init }) =>
+    (init.headers as Headers).get("x-goog-request-reason"),
+  ).join(" ");
+  assert.doesNotMatch(requestReasons, /10000000|gcp-sm:v1|AQ==/u);
+});
+
 test("read decodes the current provider version only when its resource matches the opaque reference", async () => {
   const fake = dependencies([
     response({

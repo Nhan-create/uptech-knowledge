@@ -66,7 +66,8 @@ function fixture(overrides: Record<string, unknown> = {}) {
     async abort(input: unknown) { this.abortCalls.push(input); calls.push("abort"); return { outcome: "ABORTED" as const }; },
   };
   const secretAdapter = {
-    createCalls: [] as any[], destroyCalls: [] as any[],
+    createCalls: [] as Array<{ value: Uint8Array; metadata: unknown }>,
+    destroyCalls: [] as Array<{ reference: SecretReference; metadata: unknown }>,
     async create(value: Uint8Array, metadata: unknown) { this.createCalls.push({ value: Uint8Array.from(value), metadata }); calls.push("secret.create"); return SECRET; },
     async read() { throw new Error("unused"); }, async replace() { throw new Error("unused"); },
     async destroy(reference: SecretReference, metadata: unknown) { this.destroyCalls.push({ reference, metadata }); calls.push("secret.destroy"); },
@@ -103,9 +104,46 @@ test("callback prepares before secret creation, completes, returns status author
   assert.equal(output.statusCredential, STATUS);
   assert.equal(f.refreshToken.every((byte) => byte === 0), true);
   assert.equal(f.statusBytes.every((byte) => byte === 0), true);
-  assert.equal((f.secretAdapter.createCalls[0].metadata as any).bootstrapAttemptId, transaction.attemptId);
-  assert.equal((f.secretAdapter.createCalls[0].metadata as any).workspaceId, transaction.candidateWorkspaceId);
+  assert.deepEqual(f.secretAdapter.createCalls[0].metadata, {
+    workspaceId: transaction.candidateWorkspaceId,
+    serviceIdentity: "GOOGLE_DIRECTORY_BOOTSTRAP_V1",
+    purpose: "GOOGLE_WORKSPACE_DIRECTORY_REFRESH_TOKEN",
+    requestId: REQUEST_ID,
+    bootstrapAttemptId: transaction.attemptId,
+  });
+  assert.deepEqual(f.repository.prepareCalls[0], {
+    attemptId: transaction.attemptId,
+    sourceTokenHash: hashProof(SOURCE),
+    candidateWorkspaceId: transaction.candidateWorkspaceId,
+    statusTokenHash: hashProof(STATUS),
+    requestId: REQUEST_ID,
+  });
   assert.deepEqual(f.secretAdapter.destroyCalls, []);
+});
+
+test("callback retries one indeterminate prepare with the exact original bindings before creating once", async () => {
+  const f = fixture();
+  const prepareInputs: unknown[] = [];
+  f.repository.prepare = async (input: unknown) => {
+    prepareInputs.push(input);
+    f.calls.push("prepare");
+    if (prepareInputs.length === 1) throw new Error("response lost");
+    return { outcome: "PREPARED" };
+  };
+  const started = await initiated(f);
+  const output = await f.service.callback({
+    onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,
+    transactionCookie: started.result.transactionCookie, requestId: REQUEST_ID,
+  });
+  assert.equal(output.outcome, "PROVISIONING");
+  assert.equal(f.provider.exchanges, 1);
+  assert.equal(prepareInputs.length, 2);
+  assert.deepEqual(prepareInputs[1], prepareInputs[0]);
+  const firstPrepare = prepareInputs[0] as { sourceTokenHash: unknown; statusTokenHash: unknown };
+  const secondPrepare = prepareInputs[1] as { sourceTokenHash: unknown; statusTokenHash: unknown };
+  assert.equal(secondPrepare.sourceTokenHash, firstPrepare.sourceTokenHash);
+  assert.equal(secondPrepare.statusTokenHash, firstPrepare.statusTokenHash);
+  assert.equal(f.secretAdapter.createCalls.length, 1);
 });
 
 test("every invalid provider proof is denied before prepare, secret creation, or completion", async () => {
@@ -167,14 +205,48 @@ test("inactive source identity is rejected before exchanging or storing provider
   assert.equal(started.f.secretAdapter.createCalls.length, 0);
 });
 
+test("inactive user and callback source identity mismatches are rejected before exchange or create", async () => {
+  const changes = [
+    { userActive: false },
+    { providerSubject: "different-sub" },
+    { normalizedEmail: "different@company.example" },
+    { hostedDomain: "different.example" },
+  ];
+  for (const change of changes) {
+    const started = await initiated();
+    started.f.sourceAuthority.authenticate = async () => ({
+      identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@company.example",
+      hostedDomain: "company.example", identityActive: true, userActive: true, ...change,
+    });
+    await assert.rejects(started.f.service.callback({
+      onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,
+      transactionCookie: started.result.transactionCookie, requestId: REQUEST_ID,
+    }), BootstrapServiceError);
+    assert.equal(started.f.provider.exchanges, 0);
+    assert.equal(started.f.secretAdapter.createCalls.length, 0);
+  }
+});
+
 test("candidate destroy failures never expose provider details or issue status authority", async () => {
   const f = fixture();
+  const reports: unknown[] = [];
   f.repository.complete = async () => { throw new Error("ambiguous"); };
   f.repository.reconcile = async () => ({ outcome: "NOT_COMMITTED" });
   f.secretAdapter.destroy = async () => { throw new Error(`provider leaked ${SECRET}`); };
-  const started = await initiated(f);
-  await assert.rejects(f.service.callback({
-    onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,
-    transactionCookie: started.result.transactionCookie, requestId: REQUEST_ID,
+  const service = createGoogleWorkspaceBootstrapService({
+    now: () => new Date(NOW), nextId: (() => { let id = 0; return () => IDS[id++]!; })(),
+    issueCredentialBytes: () => f.statusBytes, cookieKey: COOKIE_KEY,
+    sourceAuthority: f.sourceAuthority, provider: f.provider, repository: f.repository,
+    secretAdapter: f.secretAdapter, report: (record: unknown) => reports.push(record),
+  } as never);
+  const initiatedResult = await service.initiate({ onboardingCredential: SOURCE, requestId: REQUEST_ID });
+  const transaction = openGoogleWorkspaceSetupCookie(initiatedResult.transactionCookie, { ...COOKIE_KEY, now: NOW })!;
+  await assert.rejects(service.callback({
+    onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${transaction.state}`,
+    transactionCookie: initiatedResult.transactionCookie, requestId: REQUEST_ID,
   }), (error: unknown) => error instanceof BootstrapServiceError && error.code === "PROVIDER_UNAVAILABLE" && !String(error).includes(SECRET));
+  assert.deepEqual(reports, [
+    { event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE", request_id: REQUEST_ID, outcome: "NOT_COMMITTED" },
+    { event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN", request_id: REQUEST_ID, outcome: "DESTROY_FAILED" },
+  ]);
 });

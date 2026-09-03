@@ -97,7 +97,10 @@ export interface GoogleWorkspaceBootstrapServiceDependencies {
   };
   readonly repository: GoogleWorkspaceBootstrapRepository;
   readonly secretAdapter: SecretAdapter;
-  readonly report?: (record: Readonly<{ event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE"; request_id: string; outcome: "COMMITTED" | "NOT_COMMITTED" | "UNKNOWN" }>) => void;
+  readonly report?: (record: Readonly<
+    | { event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE"; request_id: string; outcome: "COMMITTED" | "NOT_COMMITTED" | "UNKNOWN" }
+    | { event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN"; request_id: string; outcome: "DESTROY_FAILED" }
+  >) => void;
 }
 
 function denied(code: BootstrapServiceErrorCode): never { throw new BootstrapServiceError(code); }
@@ -240,10 +243,22 @@ export function createGoogleWorkspaceBootstrapService(dependencies: GoogleWorksp
         statusRaw = status.raw;
         const statusTokenHash = hashCredential(status.credential);
         if (status.credential === input.onboardingCredential || sameHash(statusTokenHash, sourceTokenHash)) return denied("PROVIDER_UNAVAILABLE");
-        let prepared;
-        try {
-          prepared = await dependencies.repository.prepare({ attemptId: transaction.attemptId, sourceTokenHash, candidateWorkspaceId: transaction.candidateWorkspaceId, statusTokenHash, requestId: input.requestId });
-        } catch { return denied("PROVIDER_UNAVAILABLE"); }
+        const prepareInput = Object.freeze({
+          attemptId: transaction.attemptId, sourceTokenHash,
+          candidateWorkspaceId: transaction.candidateWorkspaceId,
+          statusTokenHash, requestId: input.requestId,
+        });
+        let prepared: unknown;
+        try { prepared = await dependencies.repository.prepare(prepareInput); }
+        catch { prepared = undefined; }
+        const determinate = (value: unknown): value is { readonly outcome: "PREPARED" | "DENIED" } =>
+          typeof value === "object" && value !== null && Object.keys(value).length === 1 &&
+          ((value as { outcome?: unknown }).outcome === "PREPARED" || (value as { outcome?: unknown }).outcome === "DENIED");
+        if (!determinate(prepared)) {
+          try { prepared = await dependencies.repository.prepare(prepareInput); }
+          catch { return denied("PROVIDER_UNAVAILABLE"); }
+        }
+        if (!determinate(prepared)) return denied("PROVIDER_UNAVAILABLE");
         if (prepared.outcome !== "PREPARED") return denied("ORGANIZATION_ALREADY_REGISTERED");
 
         const metadata: SecretOperationMetadata = {
@@ -281,7 +296,11 @@ export function createGoogleWorkspaceBootstrapService(dependencies: GoogleWorksp
         } catch { outcome = "UNKNOWN"; }
         try { dependencies.report?.({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_RECONCILE", request_id: input.requestId, outcome }); } catch { /* reporting never changes authority */ }
         if (outcome === "NOT_COMMITTED") {
-          try { await dependencies.secretAdapter.destroy(reference, metadata); } catch { return denied("PROVIDER_UNAVAILABLE"); }
+          try { await dependencies.secretAdapter.destroy(reference, metadata); }
+          catch {
+            try { dependencies.report?.({ event: "GOOGLE_WORKSPACE_BOOTSTRAP_SECRET_ORPHAN", request_id: input.requestId, outcome: "DESTROY_FAILED" }); } catch { /* reporting never changes authority */ }
+            return denied("PROVIDER_UNAVAILABLE");
+          }
         }
         return denied("PROVIDER_UNAVAILABLE");
       } finally {

@@ -100,7 +100,10 @@ function requireMetadata(metadata: SecretOperationMetadata): SecretOperationMeta
         value.length > 0 &&
         value.length <= 512 &&
         !value.includes("\0"),
-    )
+    ) || (metadata.bootstrapAttemptId !== undefined && (
+      typeof metadata.bootstrapAttemptId !== "string" || metadata.bootstrapAttemptId.length === 0 ||
+      metadata.bootstrapAttemptId.length > 512 || metadata.bootstrapAttemptId.includes("\0")
+    ))
   ) {
     throw unavailable();
   }
@@ -156,8 +159,17 @@ function correlationReason(metadata: SecretOperationMetadata): string {
     metadata.serviceIdentity,
     metadata.purpose,
     metadata.requestId,
+    metadata.bootstrapAttemptId ?? "",
   ].join("\0");
   return `uptech-secret-${createHash("sha256").update(material, "utf8").digest("hex")}`;
+}
+
+function bootstrapAttemptLabel(value: string): string {
+  let normalized = value.toLowerCase().replace(/[^a-z0-9_-]+/gu, "_");
+  if (!/^[a-z]/u.test(normalized)) normalized = `a_${normalized}`;
+  if (normalized.length <= 63) return normalized;
+  const digest = createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+  return `${normalized.slice(0, 50)}_${digest}`;
 }
 
 function secretResource(configuration: GoogleCloudSecretManagerConfiguration, secretId: string): string {
@@ -273,7 +285,12 @@ export class GoogleCloudSecretManagerAdapter implements SecretAdapter {
         const created = await this.requestJson(
           "POST",
           `projects/${this.configuration.projectId}/secrets?secretId=${secretId}`,
-          { replication: { automatic: {} } },
+          {
+            replication: { automatic: {} },
+            ...(operationMetadata.bootstrapAttemptId === undefined ? {} : {
+              labels: { uptech_bootstrap_attempt: bootstrapAttemptLabel(operationMetadata.bootstrapAttemptId) },
+            }),
+          },
           operationMetadata,
         );
         requireSecretResource(created.name, secret);
