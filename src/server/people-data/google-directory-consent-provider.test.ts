@@ -186,6 +186,26 @@ test("authorization request fixes identity and Directory read-only scopes with o
   assert.equal(authorizationUrl.searchParams.has("hd"), false);
 });
 
+test("Directory consent accepts the exact bootstrap callback without weakening callback validation", () => {
+  const bootstrapRedirectUri =
+    "https://knowledge.uptech.example/api/v1/onboarding/google-workspace/callback";
+  assert.doesNotThrow(() => createGoogleDirectoryConsentProvider({
+    ...CONFIG,
+    redirectUri: bootstrapRedirectUri,
+  }, dependencies()));
+
+  for (const redirectUri of [
+    `${bootstrapRedirectUri}/extra`,
+    `${bootstrapRedirectUri}?next=/admin`,
+    "https://knowledge.uptech.example/api/v1/onboarding/google-workspace/other",
+  ]) {
+    assert.throws(
+      () => createGoogleDirectoryConsentProvider({ ...CONFIG, redirectUri }, dependencies()),
+      GoogleDirectoryConsentProviderError,
+    );
+  }
+});
+
 test("Directory scopes distinguish exact legacy and current grants", () => {
   assert.equal(classifyGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_LEGACY_READ_ONLY_SCOPES), "LEGACY_FOUR");
   assert.equal(classifyGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_READ_ONLY_SCOPES), "CURRENT_FIVE");

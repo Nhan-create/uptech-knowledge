@@ -23,6 +23,8 @@ import {
 const DIRECTORY_ORIGIN = "https://admin.googleapis.com/admin/directory/v1";
 const DIRECTORY_CALLBACK_PATH =
   "/api/v1/admin/connectors/google-directory/callback";
+const WORKSPACE_BOOTSTRAP_CALLBACK_PATH =
+  "/api/v1/onboarding/google-workspace/callback";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 30_000;
 
@@ -141,7 +143,8 @@ function requireConfig(
     (callback.hostname === "localhost" || callback.hostname === "127.0.0.1");
   if (
     (callback.protocol !== "https:" && !localDevelopment) ||
-    callback.pathname !== DIRECTORY_CALLBACK_PATH ||
+    (callback.pathname !== DIRECTORY_CALLBACK_PATH &&
+      callback.pathname !== WORKSPACE_BOOTSTRAP_CALLBACK_PATH) ||
     callback.search.length > 0 ||
     callback.hash.length > 0 ||
     callback.username.length > 0 ||
