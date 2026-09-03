@@ -7,6 +7,7 @@ export interface SecretOperationMetadata {
   readonly serviceIdentity: string;
   readonly purpose: string;
   readonly requestId: string;
+  readonly bootstrapAttemptId?: string;
 }
 
 export interface SecretAdapter {
@@ -101,6 +102,9 @@ function safeMetadata(
     ),
     purpose: requireMetadataValue("purpose", metadata.purpose),
     requestId: requireMetadataValue("requestId", metadata.requestId),
+    ...(metadata.bootstrapAttemptId === undefined
+      ? {}
+      : { bootstrapAttemptId: requireMetadataValue("bootstrapAttemptId", metadata.bootstrapAttemptId) }),
   });
 }
 

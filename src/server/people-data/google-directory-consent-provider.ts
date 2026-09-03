@@ -78,6 +78,8 @@ export interface GoogleDirectoryConsentProviderDependencies {
 
 export interface GoogleDirectoryConsentEvidence extends DirectoryConsentProviderGrant {
   readonly customerId: string;
+  readonly directoryUserCustomerId: string;
+  readonly directoryUserActive: true;
   readonly primaryDomain: string;
   readonly verifiedDomains: readonly VerifiedGoogleWorkspaceDomain[];
   readonly providerSubject: string;
@@ -489,10 +491,13 @@ export function createGoogleDirectoryConsentProvider(
             }),
             accessToken,
           );
+          const directoryUserCustomerId = requireText(currentUser.customerId, 512);
           if (
             requireText(currentUser.id, 255) !== claims.providerSubject ||
             normalizeEmail(currentUser.primaryEmail) !== claims.normalizedEmail ||
-            currentUser.suspended === true
+            directoryUserCustomerId !== customerId ||
+            currentUser.suspended === true ||
+            currentUser.archived === true
           ) {
             return fail();
           }
@@ -535,6 +540,8 @@ export function createGoogleDirectoryConsentProvider(
 
           return Object.freeze({
             customerId,
+            directoryUserCustomerId,
+            directoryUserActive: true as const,
             primaryDomain,
             verifiedDomains,
             providerSubject: claims.providerSubject,

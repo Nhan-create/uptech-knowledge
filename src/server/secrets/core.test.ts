@@ -15,13 +15,16 @@ class InMemorySecretAdapter implements SecretAdapter {
   readonly values = new Map<SecretReference, Uint8Array>();
   readonly operations: string[] = [];
   private nextId = 1;
+  lastMetadata: SecretOperationMetadata | undefined;
 
   async create(
     value: Uint8Array,
+    metadata: SecretOperationMetadata,
   ): Promise<SecretReference> {
     const reference = `test-secret-${this.nextId++}` as SecretReference;
     this.values.set(reference, Uint8Array.from(value));
     this.operations.push("create");
+    this.lastMetadata = metadata;
     return reference;
   }
 
@@ -129,7 +132,8 @@ test("approved adapter exposes only the required create/read/replace/destroy con
   assert.equal(Object.isFrozen(adapter), true);
 
   const initial = Uint8Array.from([1, 2, 3]);
-  const reference = await adapter.create(initial, metadata);
+  const reference = await adapter.create(initial, { ...metadata, bootstrapAttemptId: "attempt-1" });
+  assert.equal(fake.lastMetadata?.bootstrapAttemptId, "attempt-1");
   initial.fill(9);
   assert.deepEqual(await adapter.read(reference, metadata), Uint8Array.from([1, 2, 3]));
 

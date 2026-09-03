@@ -70,6 +70,8 @@ interface DirectoryFetchFixture {
 function directoryFetchFixture(options: {
   readonly groups?: readonly Record<string, unknown>[];
   readonly currentUserId?: string;
+  readonly currentUserCustomerId?: string;
+  readonly currentUserArchived?: boolean;
   readonly domains?: readonly Record<string, unknown>[];
 } = {}): DirectoryFetchFixture {
   const requests: Array<{ url: URL; init?: RequestInit }> = [];
@@ -87,8 +89,10 @@ function directoryFetchFixture(options: {
     if (url.pathname.includes("/users/") && !url.pathname.endsWith("/users")) {
       return json({
         id: options.currentUserId ?? "google-subject-admin",
+        customerId: options.currentUserCustomerId ?? "C0123abc",
         primaryEmail: "admin@tenant-a.example",
         suspended: false,
+        archived: options.currentUserArchived ?? false,
         isAdmin: true,
         isDelegatedAdmin: false,
       });
@@ -211,6 +215,8 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
     },
     {
       customerId: "C0123abc",
+      directoryUserCustomerId: "C0123abc",
+      directoryUserActive: true,
       primaryDomain: "tenant-a.example",
       verifiedDomains: [
         { normalizedDomain: "staff.tenant-a.example", kind: "ALIAS", providerParentDomain: "tenant-a.example", verified: true },
@@ -393,6 +399,25 @@ test("claims and current Directory user must describe the same Google account", 
       GoogleDirectoryConsentProviderError,
     );
     assert.equal(scenario.fixture.requests.length, scenario.expectedFetchCalls);
+  }
+});
+
+test("current Directory user must be active and belong to the probed customer", async () => {
+  for (const fixture of [
+    directoryFetchFixture({ currentUserCustomerId: "different-customer" }),
+    directoryFetchFixture({ currentUserArchived: true }),
+  ]) {
+    const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
+      exchange: validExchange(),
+      fetch: fixture.fetch,
+    }));
+    await assert.rejects(provider.exchangeAndProbe({
+      callbackSearch: `?code=provider-code&state=${TRANSACTION.state}`,
+      state: TRANSACTION.state,
+      nonce: TRANSACTION.nonce,
+      pkceVerifier: TRANSACTION.pkceVerifier,
+    }), GoogleDirectoryConsentProviderError);
+    assert.equal(fixture.requests.length, 3);
   }
 });
 
