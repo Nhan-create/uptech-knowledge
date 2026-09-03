@@ -696,6 +696,68 @@ FOR EACH ROW EXECUTE FUNCTION uptech.enforce_google_workspace_bootstrap_receipt_
 REVOKE ALL ON FUNCTION uptech.enforce_google_workspace_bootstrap_receipt_v1()
   FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+CREATE FUNCTION uptech.authenticate_google_workspace_bootstrap_source_v1(
+  p_source_token_hash uptech.google_auth_hash32_v1
+)
+RETURNS TABLE (
+  identity_id uuid,
+  provider_subject text,
+  normalized_email text,
+  hosted_domain text,
+  identity_active boolean,
+  user_active boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+  SELECT
+    identity_row.id,
+    identity_row.provider_subject,
+    pg_catalog.lower(pg_catalog.btrim(identity_row.email_claim)),
+    pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)),
+    identity_row.status = 'ACTIVE',
+    user_row.status = 'ACTIVE'
+  FROM uptech.onboarding_sessions AS source
+  JOIN uptech.identities AS identity_row ON identity_row.id = source.identity_id
+  JOIN uptech.users AS user_row ON user_row.id = identity_row.user_id
+  WHERE p_source_token_hash IS NOT NULL
+    AND source.token_hash = p_source_token_hash
+    AND source.status = 'ACTIVE'
+    AND source.expires_at > pg_catalog.statement_timestamp()
+    AND source.resource_workspace_id IS NULL
+    AND pg_catalog.cardinality(source.allowed_operations) = 3
+    AND source.allowed_operations @> ARRAY[
+      'FIRST_DOMAIN_CLAIM_READ',
+      'FIRST_DOMAIN_CLAIM_RESERVE',
+      'FIRST_DOMAIN_CLAIM_COMPLETE'
+    ]::text[]
+    AND identity_row.provider = 'GOOGLE'
+    AND identity_row.issuer IN ('https://accounts.google.com', 'accounts.google.com')
+    AND identity_row.status = 'ACTIVE'
+    AND identity_row.email_verified IS TRUE
+    AND identity_row.email_claim IS NOT NULL
+    AND pg_catalog.octet_length(pg_catalog.lower(pg_catalog.btrim(identity_row.email_claim))) BETWEEN 3 AND 320
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.email_claim)) ~ '^[^[:space:]@]+@[^[:space:]@]+$'
+    AND identity_row.hosted_domain_claim IS NOT NULL
+    AND pg_catalog.octet_length(pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim))) BETWEEN 3 AND 253
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)) !~ '[.]$'
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)) !~ '[.][.]'
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)) ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+    AND pg_catalog.lower(pg_catalog.btrim(identity_row.email_claim)) LIKE
+      '%@' || pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim))
+    AND user_row.status = 'ACTIVE'
+  LIMIT 1
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.authenticate_google_workspace_bootstrap_source_v1(
+  uptech.google_auth_hash32_v1
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.authenticate_google_workspace_bootstrap_source_v1(
+  uptech.google_auth_hash32_v1
+) TO uptech_api_runtime;
+
 CREATE FUNCTION uptech.prepare_google_workspace_bootstrap_v1(
   p_attempt_id uuid,
   p_source_token_hash uptech.google_auth_hash32_v1,

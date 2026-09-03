@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 
 import { createGoogleWorkspaceBootstrapRepository } from "../../src/server/onboarding/google-workspace/repository.ts";
+import { createGoogleWorkspaceBootstrapSourceAuthority } from "../../src/server/onboarding/google-workspace/source-authority.ts";
 
 const PREFIX = "uptech_phase1_test";
 let pool: Pool;
@@ -204,6 +205,76 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
     pending_request_index: true, request_owner_policy: true,
     connector_identity_fk: true, onboarding_constraints: true,
   });
+});
+
+test("API runtime alone authenticates a strictly bound active first-domain source without table access", async () => {
+  const source = bootstrapFixtures.abort;
+  const authority = await asApi((client) =>
+    createGoogleWorkspaceBootstrapSourceAuthority(client as never).authenticate({
+      credentialHash: hash32(source.sourceByte),
+      requiredOperation: "FIRST_DOMAIN_CLAIM_RESERVE",
+    }));
+  assert.deepEqual(authority, {
+    identityId: source.identityId,
+    providerSubject: source.subject,
+    normalizedEmail: `owner@${source.domain}`,
+    hostedDomain: source.domain,
+    identityActive: true,
+    userActive: true,
+  });
+
+  await assert.rejects(asApi((client) => client.query("SELECT id FROM uptech.identities LIMIT 1")), /permission denied/u);
+  await assert.rejects(asApi((client) => client.query("SELECT id FROM uptech.users LIMIT 1")), /permission denied/u);
+  await assert.rejects(asApi((client) => client.query("SELECT id FROM uptech.onboarding_sessions LIMIT 1")), /permission denied/u);
+
+  const acl = await pool.query(`SELECT
+    has_function_privilege('uptech_api_runtime', 'uptech.authenticate_google_workspace_bootstrap_source_v1(uptech.google_auth_hash32_v1)', 'EXECUTE') AS api_execute,
+    has_function_privilege('uptech_worker_runtime', 'uptech.authenticate_google_workspace_bootstrap_source_v1(uptech.google_auth_hash32_v1)', 'EXECUTE') AS worker_execute,
+    NOT EXISTS (
+      SELECT 1 FROM pg_proc AS procedure_row
+      CROSS JOIN LATERAL aclexplode(coalesce(procedure_row.proacl, acldefault('f', procedure_row.proowner))) AS acl_row
+      WHERE procedure_row.oid = 'uptech.authenticate_google_workspace_bootstrap_source_v1(uptech.google_auth_hash32_v1)'::regprocedure
+        AND acl_row.grantee = 0
+    ) AS public_denied`);
+  assert.deepEqual(acl.rows[0], { api_execute: true, worker_execute: false, public_denied: true });
+
+  const worker = await pool.connect();
+  try {
+    await worker.query("BEGIN");
+    await worker.query("SET LOCAL ROLE uptech_worker_runtime");
+    await assert.rejects(worker.query(
+      "SELECT * FROM uptech.authenticate_google_workspace_bootstrap_source_v1($1::uptech.google_auth_hash32_v1)",
+      [hash32(source.sourceByte)],
+    ), /permission denied/u);
+  } finally {
+    await worker.query("ROLLBACK");
+    worker.release();
+  }
+});
+
+test("revoked, expired, wrong-operation, and inactive bootstrap sources authenticate as masked misses", async () => {
+  const cases = [
+    { suffix: "31", byte: 0xd1, mutation: "UPDATE uptech.onboarding_sessions SET status='REVOKED',revoked_at=statement_timestamp() WHERE token_hash=$1" },
+    { suffix: "32", byte: 0xd2, mutation: "UPDATE uptech.onboarding_sessions SET expires_at=created_at+interval '1 microsecond' WHERE token_hash=$1" },
+    { suffix: "33", byte: 0xd3, mutation: "UPDATE uptech.onboarding_sessions SET allowed_operations=ARRAY['FIRST_DOMAIN_CLAIM_READ'] WHERE token_hash=$1" },
+    { suffix: "34", byte: 0xd4, mutation: "UPDATE uptech.identities SET status='REVOKED' WHERE id=$1" },
+    { suffix: "35", byte: 0xd5, mutation: "UPDATE uptech.users SET status='SUSPENDED' WHERE id=$1" },
+  ] as const;
+  for (const item of cases) {
+    const ids = {
+      userId: `96000000-0000-4000-8000-0000000000${item.suffix}`,
+      identityId: `96000000-0000-4000-9000-0000000000${item.suffix}`,
+      sourceId: `96000000-0000-4000-a000-0000000000${item.suffix}`,
+    };
+    await seedBootstrapSource({ ...ids, sourceByte: item.byte, subject: `masked-${item.suffix}`, domain: `masked-${item.suffix}.example` });
+    const mutationValues = item.suffix === "34" ? [ids.identityId]
+      : item.suffix === "35" ? [ids.userId] : [hash32(item.byte)];
+    await asMigrationOwner((client) => client.query(item.mutation, mutationValues));
+    assert.equal(await asApi((client) => createGoogleWorkspaceBootstrapSourceAuthority(client as never).authenticate({
+      credentialHash: hash32(item.byte),
+      requiredOperation: "FIRST_DOMAIN_CLAIM_RESERVE",
+    })), null);
+  }
 });
 
 test("Task 2 standalone verifier passes against the migrated disposable database", async () => {

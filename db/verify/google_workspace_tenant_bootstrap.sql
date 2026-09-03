@@ -279,6 +279,41 @@ DECLARE
   object_oid oid;
   routine_definition text;
 BEGIN
+  object_oid := 'uptech.authenticate_google_workspace_bootstrap_source_v1(uptech.google_auth_hash32_v1)'::regprocedure::oid;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid = object_oid
+      AND procedure_row.prokind = 'f'
+      AND procedure_row.provolatile = 's'
+      AND procedure_row.prosecdef
+      AND procedure_row.proowner = 'uptech_migration_owner'::regrole::oid
+      AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND pg_catalog.pg_get_function_result(procedure_row.oid) =
+        'TABLE(identity_id uuid, provider_subject text, normalized_email text, hosted_domain text, identity_active boolean, user_active boolean)'
+  ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime', object_oid, 'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime', object_oid, 'EXECUTE')
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+        procedure_row.proacl, pg_catalog.acldefault('f', procedure_row.proowner))) AS acl
+      WHERE procedure_row.oid = object_oid
+        AND (acl.privilege_type <> 'EXECUTE'
+          OR acl.grantee NOT IN (
+            'uptech_migration_owner'::regrole::oid,
+            'uptech_api_runtime'::regrole::oid
+          ))
+    )
+  THEN
+    RAISE EXCEPTION 'bootstrap source authenticator has wrong signature/definer/search_path/runtime grants';
+  END IF;
+
+  routine_definition := pg_catalog.pg_get_functiondef(object_oid);
+  IF pg_catalog.strpos(routine_definition, 'FIRST_DOMAIN_CLAIM_RESERVE') = 0
+    OR pg_catalog.strpos(routine_definition, 'resource_workspace_id IS NULL') = 0
+  THEN
+    RAISE EXCEPTION 'bootstrap source authenticator lacks its fixed operation or unbound-source guard';
+  END IF;
+
   FOREACH object_oid IN ARRAY ARRAY[
     'uptech.prepare_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uuid,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
     'uptech.complete_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,text,text,text,uptech.google_workspace_verified_domain_v1[],text,text[],uuid)'::regprocedure::oid,
