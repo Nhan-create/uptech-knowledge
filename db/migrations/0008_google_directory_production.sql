@@ -2220,6 +2220,11 @@ REVOKE ALL ON FUNCTION uptech.switch_mobile_workspace_directory_v1(
   uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
   bytea,uptech.google_auth_ascii_identifier_v1,uuid
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+REVOKE ALL ON FUNCTION uptech.exchange_mobile_handoff_v1(
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
 GRANT EXECUTE ON FUNCTION uptech.begin_people_sync_generation_v1(uuid,uuid,uuid,uuid)
   TO uptech_worker_runtime;

@@ -366,6 +366,17 @@ try {
   if (state.directory_upgrade_present !== true) {
     await client.query(executableSql(googleDirectoryMigrationSource));
   }
+  await client.query(`
+    REVOKE ALL ON FUNCTION uptech.exchange_mobile_handoff_v1(
+      uptech.google_auth_hash32_v1,
+      uptech.google_auth_hash32_v1,
+      uptech.google_auth_hash32_v1,
+      uptech.google_auth_hash32_v1,
+      uptech.google_auth_hash32_v1,
+      uptech.google_auth_hash32_v1,
+      uuid
+    ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime
+  `);
   await client.query(executableSql(enterpriseLoginVerificationSource));
   await reconcileMobileRegistry(client);
 
