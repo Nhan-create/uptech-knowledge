@@ -15,7 +15,7 @@ function databaseUrl(): string {
 }
 
 async function sql(path: string): Promise<string> {
-  return (await readFile(path, "utf8")).replace(/^\\set .*$/gm, "");
+  return (await readFile(path, "utf8")).replace(/^\\(?:set|echo) .*$/gm, "");
 }
 
 before(async () => {
@@ -75,4 +75,8 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
     pending_request_index: true, request_owner_policy: true,
     connector_identity_fk: true, onboarding_constraints: true,
   });
+});
+
+test("Task 2 standalone verifier passes against the migrated disposable database", async () => {
+  await pool.query(await sql("db/verify/google_workspace_tenant_bootstrap.sql"));
 });
