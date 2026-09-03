@@ -12,6 +12,11 @@ import {
   type GoogleDirectoryConsentExchange,
   type GoogleDirectoryConsentProviderDependencies,
 } from "./google-directory-consent-provider.ts";
+import {
+  GOOGLE_DIRECTORY_LEGACY_READ_ONLY_SCOPES,
+  classifyGoogleDirectoryReadOnlyScopes,
+  hasExactGoogleDirectoryReadOnlyScopes,
+} from "./google-directory-scopes.ts";
 
 const NOW = 1_788_224_400;
 const CONFIG = Object.freeze({
@@ -65,6 +70,7 @@ interface DirectoryFetchFixture {
 function directoryFetchFixture(options: {
   readonly groups?: readonly Record<string, unknown>[];
   readonly currentUserId?: string;
+  readonly domains?: readonly Record<string, unknown>[];
 } = {}): DirectoryFetchFixture {
   const requests: Array<{ url: URL; init?: RequestInit }> = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -72,6 +78,11 @@ function directoryFetchFixture(options: {
     requests.push({ url, init });
     if (url.pathname.endsWith("/customers/my_customer")) {
       return json({ id: "C0123abc", customerDomain: "Tenant-A.Example" });
+    }
+    if (url.pathname.endsWith("/customer/C0123abc/domains")) {
+      return json({ domains: options.domains ?? [
+        { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainName: "staff.tenant-a.example" }] },
+      ] });
     }
     if (url.pathname.includes("/users/") && !url.pathname.endsWith("/users")) {
       return json({
@@ -171,6 +182,15 @@ test("authorization request fixes identity and Directory read-only scopes with o
   assert.equal(authorizationUrl.searchParams.has("hd"), false);
 });
 
+test("Directory scopes distinguish exact legacy and current grants", () => {
+  assert.equal(classifyGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_LEGACY_READ_ONLY_SCOPES), "LEGACY_FOUR");
+  assert.equal(classifyGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_READ_ONLY_SCOPES), "CURRENT_FIVE");
+  assert.equal(classifyGoogleDirectoryReadOnlyScopes([...GOOGLE_DIRECTORY_READ_ONLY_SCOPES, GOOGLE_DIRECTORY_READ_ONLY_SCOPES[0]]), null);
+  assert.equal(classifyGoogleDirectoryReadOnlyScopes([...GOOGLE_DIRECTORY_READ_ONLY_SCOPES, "https://www.googleapis.com/auth/drive.readonly"]), null);
+  assert.equal(hasExactGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_LEGACY_READ_ONLY_SCOPES), false);
+  assert.equal(hasExactGoogleDirectoryReadOnlyScopes(GOOGLE_DIRECTORY_READ_ONLY_SCOPES), true);
+});
+
 test("exchange verifies the Workspace identity and derives bounded Directory setup evidence", async () => {
   const fixture = directoryFetchFixture();
   const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
@@ -192,6 +212,10 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
     {
       customerId: "C0123abc",
       primaryDomain: "tenant-a.example",
+      verifiedDomains: [
+        { normalizedDomain: "staff.tenant-a.example", kind: "ALIAS", providerParentDomain: "tenant-a.example", verified: true },
+        { normalizedDomain: "tenant-a.example", kind: "PRIMARY", providerParentDomain: null, verified: true },
+      ],
       providerSubject: "google-subject-admin",
       normalizedEmail: "admin@tenant-a.example",
       hostedDomain: "tenant-a.example",
@@ -210,7 +234,7 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
   );
   assert.equal("accessToken" in result, false);
   assert.doesNotMatch(JSON.stringify(result), /directory-access-token/u);
-  assert.equal(fixture.requests.length, 6);
+  assert.equal(fixture.requests.length, 7);
   for (const request of fixture.requests) {
     const headers = new Headers(request.init?.headers);
     assert.equal(request.init?.method, "GET");
@@ -230,6 +254,23 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
   assert.equal(memberList?.url.pathname, "/admin/directory/v1/groups/group-1/members");
   assert.equal(memberList?.url.searchParams.get("includeDerivedMembership"), "false");
   assert.equal(memberList?.url.searchParams.get("maxResults"), "1");
+});
+
+test("consent rejects a hosted domain absent from verified Google Workspace domains", async () => {
+  const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
+    fetch: directoryFetchFixture({
+      domains: [{ domainName: "other.example", verified: true, isPrimary: true }],
+    }).fetch,
+  }));
+  await assert.rejects(
+    provider.exchangeAndProbe({
+      callbackSearch: `?code=provider-code&state=${TRANSACTION.state}`,
+      state: TRANSACTION.state,
+      nonce: TRANSACTION.nonce,
+      pkceVerifier: TRANSACTION.pkceVerifier,
+    }),
+    GoogleDirectoryConsentProviderError,
+  );
 });
 
 test("an empty groups response is a successful vacuous direct-members probe", async () => {
@@ -335,7 +376,7 @@ test("claims and current Directory user must describe the same Google account", 
     {
       exchange: validExchange(),
       fixture: directoryFetchFixture({ currentUserId: "different-google-subject" }),
-      expectedFetchCalls: 2,
+      expectedFetchCalls: 3,
     },
   ]) {
     const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({

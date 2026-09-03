@@ -15,6 +15,10 @@ import {
 import { isCanonicalProof } from "../auth/google/crypto.ts";
 import type { DirectoryConsentProviderGrant } from "./directory-consent.ts";
 import { GOOGLE_DIRECTORY_READ_ONLY_SCOPES } from "./google-directory-scopes.ts";
+import {
+  normalizeVerifiedGoogleWorkspaceDomains,
+  type VerifiedGoogleWorkspaceDomain,
+} from "./google-workspace-domains.ts";
 
 const DIRECTORY_ORIGIN = "https://admin.googleapis.com/admin/directory/v1";
 const DIRECTORY_CALLBACK_PATH =
@@ -75,6 +79,7 @@ export interface GoogleDirectoryConsentProviderDependencies {
 export interface GoogleDirectoryConsentEvidence extends DirectoryConsentProviderGrant {
   readonly customerId: string;
   readonly primaryDomain: string;
+  readonly verifiedDomains: readonly VerifiedGoogleWorkspaceDomain[];
   readonly providerSubject: string;
   readonly normalizedEmail: string;
   readonly hostedDomain: string;
@@ -460,7 +465,22 @@ export function createGoogleDirectoryConsentProvider(
             accessToken,
           );
           const customerId = requireText(customer.id, 512);
-          const primaryDomain = normalizeDomain(customer.customerDomain);
+          const customerDomain = normalizeDomain(customer.customerDomain);
+          const domainPayload = await requestJson(
+            url(`/customer/${encodeURIComponent(customerId)}/domains`),
+            accessToken,
+          );
+          const verifiedDomains = normalizeVerifiedGoogleWorkspaceDomains({
+            customerDomain,
+            domains: records(domainPayload, "domains"),
+          });
+          const primaryDomain = verifiedDomains.find((domain) => domain.kind === "PRIMARY")?.normalizedDomain;
+          if (
+            primaryDomain === undefined ||
+            !verifiedDomains.some((domain) => domain.normalizedDomain === claims.hostedDomain)
+          ) {
+            return fail();
+          }
 
           const currentUser = await requestJson(
             url(`/users/${encodeURIComponent(claims.normalizedEmail)}`, {
@@ -516,6 +536,7 @@ export function createGoogleDirectoryConsentProvider(
           return Object.freeze({
             customerId,
             primaryDomain,
+            verifiedDomains,
             providerSubject: claims.providerSubject,
             normalizedEmail: claims.normalizedEmail,
             hostedDomain: claims.hostedDomain,

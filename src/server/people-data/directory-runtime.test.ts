@@ -19,6 +19,7 @@ const DIRECTORY_SCOPES = [
   "https://www.googleapis.com/auth/admin.directory.group.readonly",
   "https://www.googleapis.com/auth/admin.directory.orgunit.readonly",
   "https://www.googleapis.com/auth/admin.directory.user.readonly",
+  "https://www.googleapis.com/auth/admin.directory.domain.readonly",
 ] as const;
 
 const LEASE = {
@@ -46,6 +47,7 @@ function connectionInput(): Omit<ConnectGoogleDirectoryInput, "secretAdapter"> {
       customerId: "C0123abc",
       providerSubject: "tenant-a-google-subject",
       hostedDomain: "tenant-a.example",
+      verifiedDomains: [{ normalizedDomain: "tenant-a.example", kind: "PRIMARY", providerParentDomain: null, verified: true }],
       refreshToken: Uint8Array.from(Buffer.from("refresh-token", "utf8")),
       grantedScopes: DIRECTORY_SCOPES,
       isAdmin: true,

@@ -1,6 +1,8 @@
 import type { AuthenticatedWebSession } from "../auth/web-session.ts";
 import type { ServerVerifiedGoogleDirectoryGrant } from "./directory-production.ts";
 import type { DirectoryConsentCookiePayload } from "./directory-consent-crypto.ts";
+import type { VerifiedGoogleWorkspaceDomain } from "./google-workspace-domains.ts";
+import { hasExactGoogleDirectoryReadOnlyScopes } from "./google-directory-scopes.ts";
 
 export class DirectoryConsentDeniedError extends Error {
   override readonly name = "DirectoryConsentDeniedError";
@@ -19,6 +21,7 @@ export interface DirectoryConsentProviderGrant {
   readonly hostedDomain: string;
   readonly customerId: string;
   readonly primaryDomain: string;
+  readonly verifiedDomains: readonly VerifiedGoogleWorkspaceDomain[];
   readonly refreshToken: Uint8Array;
   readonly grantedScopes: readonly string[];
   readonly isAdmin: boolean;
@@ -103,7 +106,12 @@ function eligibleGrant(grant: DirectoryConsentProviderGrant): boolean {
     grant.readProbes.groupMembers === true &&
     grant.readProbes.orgUnits === true &&
     grant.refreshToken instanceof Uint8Array &&
-    grant.refreshToken.byteLength > 0
+    grant.refreshToken.byteLength > 0 &&
+    hasExactGoogleDirectoryReadOnlyScopes(grant.grantedScopes) &&
+    Array.isArray(grant.verifiedDomains) &&
+    grant.verifiedDomains.some((domain) =>
+      domain.verified === true && domain.normalizedDomain === grant.hostedDomain
+    )
   );
 }
 

@@ -42,6 +42,7 @@ export function sealServerVerifiedGoogleDirectoryGrant(
       customerId: evidence.customerId,
       providerSubject: evidence.providerSubject,
       hostedDomain: evidence.hostedDomain,
+      verifiedDomains: Object.freeze(evidence.verifiedDomains.map((domain) => Object.freeze({ ...domain }))),
       refreshToken: Uint8Array.from(evidence.refreshToken),
       grantedScopes: Object.freeze([...evidence.grantedScopes]),
       isAdmin: evidence.isAdmin,

@@ -6,9 +6,17 @@ import {
   withRequestTransaction,
 } from "../db/core.ts";
 import { hasExactGoogleDirectoryReadOnlyScopes } from "./google-directory-scopes.ts";
+import type { VerifiedGoogleWorkspaceDomain } from "./google-workspace-domains.ts";
 
 export class DirectoryConnectionDeniedError extends Error {
   override readonly name = "DirectoryConnectionDeniedError";
+}
+
+export class DirectoryConnectionCommitUnknownError extends Error {
+  override readonly name = "DirectoryConnectionCommitUnknownError";
+  constructor() {
+    super("Directory connection commit outcome is unknown");
+  }
 }
 
 function isSafeIdentifier(value: unknown): value is string {
@@ -128,7 +136,7 @@ export function createPostgresDirectoryConnectionRepository(
           pool,
         );
       } catch {
-        return { outcome: "DENIED" as const };
+        throw new DirectoryConnectionCommitUnknownError();
       }
     },
   });
@@ -147,6 +155,7 @@ export interface ConnectGoogleDirectoryInput {
     readonly customerId: string;
     readonly providerSubject: string;
     readonly hostedDomain: string;
+    readonly verifiedDomains: readonly VerifiedGoogleWorkspaceDomain[];
     readonly refreshToken: Uint8Array;
     readonly grantedScopes: readonly string[];
     readonly isAdmin: boolean;
@@ -161,6 +170,10 @@ export interface ConnectGoogleDirectoryInput {
   };
   readonly secretAdapter: SecretAdapter;
   readonly repository: DirectoryConnectionRepository;
+  readonly reportOperationalEvent?: (event: {
+    readonly event: "DIRECTORY_CONNECTION_COMMIT_UNKNOWN";
+    readonly request_id: string;
+  }) => void;
 }
 
 export async function connectGoogleDirectory(
@@ -193,11 +206,16 @@ export async function connectGoogleDirectory(
     google.providerSubject,
     google.hostedDomain,
   ].every(isSafeIdentifier);
+  const domainEvidenceValid = Array.isArray(google.verifiedDomains) &&
+    google.verifiedDomains.some((domain) =>
+      domain.verified === true && domain.normalizedDomain === google.hostedDomain
+    );
 
   if (
     !setupAuthorized ||
     !googleAuthorized ||
     !probesComplete ||
+    !domainEvidenceValid ||
     !identifiersValid ||
     !(google.refreshToken instanceof Uint8Array) ||
     google.refreshToken.byteLength === 0 ||
@@ -232,9 +250,12 @@ export async function connectGoogleDirectory(
       });
     } catch {
       try {
-        await secretAdapter.destroy(credentialReference, metadata);
+        input.reportOperationalEvent?.({
+          event: "DIRECTORY_CONNECTION_COMMIT_UNKNOWN",
+          request_id: setup.requestId,
+        });
       } catch {
-        // Keep the outward failure fail-closed and free of provider details.
+        // Operational reporting must never change the fail-closed outcome.
       }
       throw new DirectoryConnectionDeniedError("Directory connection is denied");
     }
@@ -271,7 +292,8 @@ export async function connectGoogleDirectory(
     });
   } catch (error) {
     if (credentialReference !== undefined) {
-      if (!(error instanceof DirectoryConnectionDeniedError)) {
+      if (!(error instanceof DirectoryConnectionDeniedError) &&
+        !(error instanceof DirectoryConnectionCommitUnknownError)) {
         try {
           await secretAdapter.destroy(credentialReference, metadata);
         } catch {

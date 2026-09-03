@@ -15,6 +15,7 @@ const DIRECTORY_SCOPES = [
   "https://www.googleapis.com/auth/admin.directory.group.readonly",
   "https://www.googleapis.com/auth/admin.directory.orgunit.readonly",
   "https://www.googleapis.com/auth/admin.directory.user.readonly",
+  "https://www.googleapis.com/auth/admin.directory.domain.readonly",
 ] as const;
 
 function harness(outcome: "ACTIVATED" | "DENIED" = "ACTIVATED") {
@@ -56,6 +57,7 @@ const BASE_INPUT = {
     customerId: "C0123abc",
     providerSubject: "tenant-a-google-subject",
     hostedDomain: "tenant-a.example",
+    verifiedDomains: [{ normalizedDomain: "tenant-a.example", kind: "PRIMARY" as const, providerParentDomain: null, verified: true as const }],
     refreshToken: Uint8Array.from([1, 2, 3, 4]),
     grantedScopes: DIRECTORY_SCOPES,
     isAdmin: false,
@@ -163,6 +165,25 @@ test("Directory connection destroys the newly-created credential when activation
   );
   assert.deepEqual(state.secretCalls.map((call) => call.operation), ["create", "destroy"]);
   assert.equal(state.secretCalls[1].reference, state.reference);
+});
+
+test("an unknown repository commit retains the candidate secret and emits one redacted event", async () => {
+  const state = harness();
+  const reportedEvents: unknown[] = [];
+  const repository: DirectoryConnectionRepository = {
+    async activate() { throw new Error("database connection failed: secret://directory/candidate"); },
+  };
+  await assert.rejects(
+    connectGoogleDirectory({
+      ...BASE_INPUT,
+      secretAdapter: state.secrets,
+      repository,
+      reportOperationalEvent: (event) => { reportedEvents.push(event); },
+    }),
+    DirectoryConnectionDeniedError,
+  );
+  assert.deepEqual(state.secretCalls.map((call) => call.operation), ["create"]);
+  assert.deepEqual(reportedEvents, [{ event: "DIRECTORY_CONNECTION_COMMIT_UNKNOWN", request_id: "00000000-0000-4000-8000-000000000001" }]);
 });
 
 test("Directory reauthorization destroys the prior credential only after the new reference commits", async () => {
@@ -392,7 +413,7 @@ test("reauthorization destroys the prior secret only after the real repository C
   assert.equal(events.includes("destroy-new"), false);
 });
 
-test("reauthorization COMMIT failure rolls back and destroys only the uncommitted new secret", async () => {
+test("reauthorization COMMIT failure retains the candidate secret because its outcome is unknown", async () => {
   const events: string[] = [];
   const newReference = "secret://directory/new-commit-failure" as SecretReference;
   const priorReference = "secret://directory/prior-kept" as SecretReference;
@@ -443,7 +464,6 @@ test("reauthorization COMMIT failure rolls back and destroys only the uncommitte
     "activate-new-reference",
     "commit-failed",
     "rollback",
-    "destroy-new",
   ]);
 });
 
