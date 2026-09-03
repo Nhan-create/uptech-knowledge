@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 
 import { createGoogleWorkspaceBootstrapRepository } from "../../src/server/onboarding/google-workspace/repository.ts";
@@ -61,6 +62,22 @@ async function asApi<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>
   }
 }
 
+async function asMigrationOwner<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE uptech_migration_owner");
+    const result = await operation(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function databaseUrl(): string {
   const value = process.env.UPTECH_TEST_DATABASE_URL;
   if (!value) throw new Error("UPTECH_TEST_DATABASE_URL is required; PostgreSQL integration tests never skip");
@@ -74,7 +91,7 @@ async function sql(path: string): Promise<string> {
 }
 
 before(async () => {
-  pool = new Pool({ connectionString: databaseUrl(), max: 1 });
+  pool = new Pool({ connectionString: databaseUrl(), max: 8 });
   await pool.query("SET ROLE uptech_migration_owner; DROP SCHEMA IF EXISTS uptech CASCADE; RESET ROLE; CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner; SET ROLE uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime,uptech_worker_runtime; RESET ROLE");
   for (let number = 1; number <= 9; number += 1) {
     const names = [
@@ -124,6 +141,27 @@ before(async () => {
 });
 
 after(async () => { await pool?.end(); });
+
+async function seedBootstrapSource(input: {
+  userId: string;
+  identityId: string;
+  sourceId: string;
+  sourceByte: number;
+  subject: string;
+  domain: string;
+}): Promise<void> {
+  await asMigrationOwner(async (client) => {
+    await client.query("INSERT INTO uptech.users(id) VALUES ($1)", [input.userId]);
+    await client.query(`INSERT INTO uptech.identities(
+      id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
+      hosted_domain_claim,claims_observed_at
+    ) VALUES ($1,$2,'GOOGLE','https://accounts.google.com',$3,'owner@' || $4,true,$4,statement_timestamp())`,
+    [input.identityId, input.userId, input.subject, input.domain]);
+    await client.query(`INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
+      VALUES ($1,$2,$3,ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes')`,
+    [input.sourceId, input.identityId, hash32(input.sourceByte)]);
+  });
+}
 
 test("0009 adds bootstrap state without widening runtime table access", async () => {
   const result = await pool.query(`
@@ -314,6 +352,7 @@ test("complete atomically creates the existing identity's tenant authority and n
   }));
   assert.equal(completed.outcome, "PROVISIONING");
   assert.ok(completed.outcome === "PROVISIONING" && completed.statusExpiresAt.getTime() > Date.now());
+  assert.deepEqual(Object.keys(completed).sort(), ["outcome", "statusExpiresAt"]);
 
   const created = await pool.query(`SELECT
     workspace.status AS workspace_status,workspace.provisioning_policy,workspace.google_customer_id,
@@ -354,6 +393,14 @@ test("complete atomically creates the existing identity's tenant authority and n
     system_audits: 1, platform_audits: 1,
     users: before.rows[0].users, identities: before.rows[0].identities,
   });
+  const encodedDomains = await pool.query(`SELECT normalized_domain::text,domain_kind::text,
+    provider_parent_domain::text FROM uptech.workspace_domain_locators
+    WHERE workspace_id=$1 ORDER BY normalized_domain`, [candidateWorkspaceId]);
+  assert.deepEqual(encodedDomains.rows, [
+    { normalized_domain: "alias.commit.example", domain_kind: "ALIAS", provider_parent_domain: "commit.example" },
+    { normalized_domain: "commit.example", domain_kind: "PRIMARY", provider_parent_domain: null },
+    { normalized_domain: "secondary.commit.example", domain_kind: "SECONDARY", provider_parent_domain: null },
+  ]);
 });
 
 test("complete denies mismatched proof without leaving partial tenant authority", async () => {
@@ -399,4 +446,214 @@ test("complete denies mismatched proof without leaving partial tenant authority"
     attempt_state: "PREPARED", workspaces: 0, memberships: 0, connectors: 0,
     actors: 0, jobs: 0, receipts: 0, source_status: "ACTIVE",
   });
+});
+
+test("two completions racing for one Google customer and domain commit exactly one workspace", async () => {
+  const sources = [
+    {
+      userId: "93000000-0000-0000-0000-000000000001",
+      identityId: "93000000-0000-0000-0000-000000000002",
+      sourceId: "93000000-0000-0000-0000-000000000003",
+      sourceByte: 0x51,
+      subject: "race-a-sub",
+      domain: "race.example",
+      attemptId: "93000000-0000-0000-0000-000000000004",
+      workspaceId: "93000000-0000-0000-0000-000000000005",
+      statusByte: 0x52,
+    },
+    {
+      userId: "93000000-0000-0000-0000-000000000011",
+      identityId: "93000000-0000-0000-0000-000000000012",
+      sourceId: "93000000-0000-0000-0000-000000000013",
+      sourceByte: 0x61,
+      subject: "race-b-sub",
+      domain: "race.example",
+      attemptId: "93000000-0000-0000-0000-000000000014",
+      workspaceId: "93000000-0000-0000-0000-000000000015",
+      statusByte: 0x62,
+    },
+  ] as const;
+  await Promise.all(sources.map(seedBootstrapSource));
+  for (const [index, source] of sources.entries()) {
+    assert.deepEqual(await asApi((client) => createGoogleWorkspaceBootstrapRepository(client as never).prepare({
+      attemptId: source.attemptId,
+      sourceTokenHash: hash32(source.sourceByte),
+      candidateWorkspaceId: source.workspaceId,
+      statusTokenHash: hash32(source.statusByte),
+      requestId: `93000000-0000-0000-0000-00000000002${index}`,
+    })), { outcome: "PREPARED" });
+  }
+
+  const completions = await Promise.all(sources.map((source, index) => asApi((client) =>
+    createGoogleWorkspaceBootstrapRepository(client as never).complete({
+      attemptId: source.attemptId,
+      sourceTokenHash: hash32(source.sourceByte),
+      statusTokenHash: hash32(source.statusByte),
+      customerId: "customer-race",
+      customerDomain: "race.example",
+      providerSubject: source.subject,
+      hostedDomain: source.domain,
+      verifiedDomains: [
+        { normalizedDomain: "race.example", domainKind: "PRIMARY", providerParentDomain: null },
+        { normalizedDomain: "alias.race.example", domainKind: "ALIAS", providerParentDomain: "race.example" },
+      ],
+      credentialReference: `secretref://google-workspace/race-${index}` as never,
+      authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+      requestId: `93000000-0000-0000-0000-00000000003${index}`,
+    }))));
+
+  assert.deepEqual(completions.map((result) => result.outcome).sort(), ["DENIED", "PROVISIONING"]);
+  const committed = await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.workspaces WHERE google_customer_id='customer-race') AS workspaces,
+    (SELECT count(*)::int FROM uptech.workspace_domain_locators WHERE normalized_domain='race.example') AS domains,
+    (SELECT count(*)::int FROM uptech.google_workspace_bootstrap_attempts WHERE id = ANY($1::uuid[]) AND state='COMMITTED') AS attempts`,
+    [sources.map((source) => source.attemptId)]);
+  assert.deepEqual(committed.rows[0], { workspaces: 1, domains: 1, attempts: 1 });
+});
+
+test("reconcile waits for the completion lock and proves only the matching committed receipt", async () => {
+  const source = {
+    userId: "94000000-0000-0000-0000-000000000001",
+    identityId: "94000000-0000-0000-0000-000000000002",
+    sourceId: "94000000-0000-0000-0000-000000000003",
+    sourceByte: 0x71,
+    subject: "lock-sub",
+    domain: "lock.example",
+  } as const;
+  const attemptId = "94000000-0000-0000-0000-000000000004";
+  const workspaceId = "94000000-0000-0000-0000-000000000005";
+  const statusTokenHash = hash32(0x72);
+  const credentialReference = "secretref://google-workspace/lock";
+  await seedBootstrapSource(source);
+  assert.deepEqual(await asApi((client) => createGoogleWorkspaceBootstrapRepository(client as never).prepare({
+    attemptId,
+    sourceTokenHash: hash32(source.sourceByte),
+    candidateWorkspaceId: workspaceId,
+    statusTokenHash,
+    requestId: "94000000-0000-0000-0000-000000000006",
+  })), { outcome: "PREPARED" });
+
+  const completingClient = await pool.connect();
+  let transactionOpen = false;
+  try {
+    await completingClient.query("BEGIN");
+    transactionOpen = true;
+    await completingClient.query("SET LOCAL ROLE uptech_api_runtime");
+    const completed = await createGoogleWorkspaceBootstrapRepository(completingClient as never).complete({
+      attemptId,
+      sourceTokenHash: hash32(source.sourceByte),
+      statusTokenHash,
+      customerId: "customer-lock",
+      customerDomain: source.domain,
+      providerSubject: source.subject,
+      hostedDomain: source.domain,
+      verifiedDomains: [{ normalizedDomain: source.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+      credentialReference: credentialReference as never,
+      authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+      requestId: "94000000-0000-0000-0000-000000000007",
+    });
+    assert.equal(completed.outcome, "PROVISIONING");
+
+    let reconcileSettled = false;
+    const reconcilePromise = asApi((client) => createGoogleWorkspaceBootstrapRepository(client as never).reconcile({
+      attemptId,
+      sourceTokenHash: hash32(source.sourceByte),
+      statusTokenHash,
+      credentialReference: credentialReference as never,
+      requestId: "94000000-0000-0000-0000-000000000008",
+    })).finally(() => { reconcileSettled = true; });
+    await delay(100);
+    assert.equal(reconcileSettled, false);
+    await completingClient.query("COMMIT");
+    transactionOpen = false;
+    assert.deepEqual(await reconcilePromise, { outcome: "COMMITTED" });
+  } finally {
+    if (transactionOpen) await completingClient.query("ROLLBACK");
+    completingClient.release();
+  }
+
+  assert.deepEqual(await asApi((client) => createGoogleWorkspaceBootstrapRepository(client as never).reconcile({
+    attemptId,
+    sourceTokenHash: hash32(source.sourceByte),
+    statusTokenHash,
+    credentialReference: "secretref://google-workspace/wrong" as never,
+    requestId: "94000000-0000-0000-0000-000000000009",
+  })), { outcome: "UNKNOWN" });
+});
+
+test("reconcile aborts an expired clean attempt, denies delayed complete, and keeps live state unknown", async () => {
+  const expired = {
+    userId: "95000000-0000-0000-0000-000000000001",
+    identityId: "95000000-0000-0000-0000-000000000002",
+    sourceId: "95000000-0000-0000-0000-000000000003",
+    sourceByte: 0x81,
+    subject: "expired-sub",
+    domain: "expired.example",
+  } as const;
+  const attemptId = "95000000-0000-0000-0000-000000000004";
+  const workspaceId = "95000000-0000-0000-0000-000000000005";
+  const statusTokenHash = hash32(0x82);
+  const credentialReference = "secretref://google-workspace/expired";
+  await seedBootstrapSource(expired);
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.google_workspace_bootstrap_attempts(
+      id,source_onboarding_session_id,identity_id,candidate_workspace_id,
+      candidate_status_hash,completion_deadline,created_at
+    ) VALUES ($1,$2,$3,$4,$5,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '11 minutes')`,
+  [attemptId, expired.sourceId, expired.identityId, workspaceId, statusTokenHash]));
+
+  const repositoryCall = <T>(operation: (repository: ReturnType<typeof createGoogleWorkspaceBootstrapRepository>) => Promise<T>) =>
+    asApi((client) => operation(createGoogleWorkspaceBootstrapRepository(client as never)));
+  assert.deepEqual(await repositoryCall((repository) => repository.reconcile({
+    attemptId,
+    sourceTokenHash: hash32(expired.sourceByte),
+    statusTokenHash,
+    credentialReference: credentialReference as never,
+    requestId: "95000000-0000-0000-0000-000000000006",
+  })), { outcome: "NOT_COMMITTED" });
+
+  const delayed = await repositoryCall((repository) => repository.complete({
+    attemptId,
+    sourceTokenHash: hash32(expired.sourceByte),
+    statusTokenHash,
+    customerId: "customer-expired",
+    customerDomain: expired.domain,
+    providerSubject: expired.subject,
+    hostedDomain: expired.domain,
+    verifiedDomains: [{ normalizedDomain: expired.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+    credentialReference: credentialReference as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "95000000-0000-0000-0000-000000000007",
+  }));
+  assert.deepEqual(delayed, { outcome: "DENIED" });
+  const proof = await pool.query(`SELECT
+    (SELECT state::text FROM uptech.google_workspace_bootstrap_attempts WHERE id=$1) AS state,
+    (SELECT count(*)::int FROM uptech.google_workspace_bootstrap_receipts WHERE attempt_id=$1) AS receipts,
+    (SELECT count(*)::int FROM uptech.connectors WHERE credential_reference=$2) AS connector_references`,
+    [attemptId, credentialReference]);
+  assert.deepEqual(proof.rows[0], { state: "ABORTED", receipts: 0, connector_references: 0 });
+
+  const live = {
+    userId: "95000000-0000-0000-0000-000000000011",
+    identityId: "95000000-0000-0000-0000-000000000012",
+    sourceId: "95000000-0000-0000-0000-000000000013",
+    sourceByte: 0x91,
+    subject: "live-sub",
+    domain: "live.example",
+  } as const;
+  const liveAttemptId = "95000000-0000-0000-0000-000000000014";
+  await seedBootstrapSource(live);
+  assert.deepEqual(await repositoryCall((repository) => repository.prepare({
+    attemptId: liveAttemptId,
+    sourceTokenHash: hash32(live.sourceByte),
+    candidateWorkspaceId: "95000000-0000-0000-0000-000000000015",
+    statusTokenHash: hash32(0x92),
+    requestId: "95000000-0000-0000-0000-000000000016",
+  })), { outcome: "PREPARED" });
+  assert.deepEqual(await repositoryCall((repository) => repository.reconcile({
+    attemptId: liveAttemptId,
+    sourceTokenHash: hash32(live.sourceByte),
+    statusTokenHash: hash32(0x92),
+    credentialReference: "secretref://google-workspace/live" as never,
+    requestId: "95000000-0000-0000-0000-000000000017",
+  })), { outcome: "UNKNOWN" });
 });

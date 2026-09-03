@@ -12,6 +12,10 @@ BEGIN
   FROM (VALUES
     ('google_workspace_domain_kind_v1', ARRAY['PRIMARY','SECONDARY','ALIAS']::text[]),
     ('google_workspace_bootstrap_attempt_state_v1', ARRAY['PREPARED','COMMITTED','ABORTED']::text[]),
+    ('google_workspace_bootstrap_prepare_outcome_v1', ARRAY['PREPARED','DENIED']::text[]),
+    ('google_workspace_bootstrap_complete_outcome_v1', ARRAY['PROVISIONING','DENIED']::text[]),
+    ('google_workspace_bootstrap_reconcile_outcome_v1', ARRAY['COMMITTED','NOT_COMMITTED','UNKNOWN']::text[]),
+    ('google_workspace_bootstrap_abort_outcome_v1', ARRAY['ABORTED','UNKNOWN']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
       'UNKNOWN_WORKSPACE','USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT',
@@ -39,6 +43,38 @@ BEGIN
         IS DISTINCT FROM ARRAY['normalized_domain','domain_kind','provider_parent_domain']::name[]
   THEN
     RAISE EXCEPTION 'verified-domain composite shape is missing or incorrect';
+  END IF;
+
+  SELECT count(*) INTO mismatch_count
+  FROM (VALUES
+    ('google_workspace_bootstrap_prepare_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_prepare_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_complete_result_v1', ARRAY['outcome','status_expires_at']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_complete_outcome_v1','timestamp with time zone']::text[]),
+    ('google_workspace_bootstrap_reconcile_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_reconcile_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_abort_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_abort_outcome_v1']::text[])
+  ) AS required(type_name, attribute_names, attribute_types)
+  WHERE required.attribute_names IS DISTINCT FROM (
+    SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum)
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = (
+      SELECT type_row.typrelid FROM pg_catalog.pg_type AS type_row
+      JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = type_row.typnamespace
+      WHERE namespace.nspname='uptech' AND type_row.typname=required.type_name)
+      AND attribute.attnum > 0 AND NOT attribute.attisdropped
+  ) OR required.attribute_types IS DISTINCT FROM (
+    SELECT array_agg(pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) ORDER BY attribute.attnum)
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = (
+      SELECT type_row.typrelid FROM pg_catalog.pg_type AS type_row
+      JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = type_row.typnamespace
+      WHERE namespace.nspname='uptech' AND type_row.typname=required.type_name)
+      AND attribute.attnum > 0 AND NOT attribute.attisdropped
+  );
+  IF mismatch_count <> 0 THEN
+    RAISE EXCEPTION 'bootstrap result composite shape is missing or incorrect';
   END IF;
 END
 $verify$;
@@ -238,6 +274,53 @@ BEGIN
 END
 $verify$;
 
+DO $verify$
+DECLARE
+  object_oid oid;
+  routine_definition text;
+BEGIN
+  FOREACH object_oid IN ARRAY ARRAY[
+    'uptech.prepare_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uuid,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.complete_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,text,text,text,uptech.google_workspace_verified_domain_v1[],text,text[],uuid)'::regprocedure::oid,
+    'uptech.reconcile_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,uuid)'::regprocedure::oid,
+    'uptech.abort_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
+  ] LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+      WHERE procedure_row.oid = object_oid
+        AND procedure_row.prokind = 'f'
+        AND procedure_row.provolatile = 'v'
+        AND procedure_row.prosecdef
+        AND procedure_row.proowner = 'uptech_migration_owner'::regrole::oid
+        AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, uptech']::text[]
+    ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime', object_oid, 'EXECUTE')
+      OR pg_catalog.has_function_privilege('uptech_worker_runtime', object_oid, 'EXECUTE')
+      OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+        CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+          procedure_row.proacl, pg_catalog.acldefault('f', procedure_row.proowner))) AS acl
+        WHERE procedure_row.oid = object_oid
+          AND (acl.privilege_type <> 'EXECUTE'
+            OR acl.grantee NOT IN (
+              'uptech_migration_owner'::regrole::oid,
+              'uptech_api_runtime'::regrole::oid
+            ))
+      )
+    THEN
+      RAISE EXCEPTION 'bootstrap entrypoint % has wrong signature/definer/search_path/runtime grants', object_oid::regprocedure;
+    END IF;
+
+    routine_definition := pg_catalog.pg_get_functiondef(object_oid);
+    IF pg_catalog.strpos(routine_definition, 'pg_advisory_xact_lock') = 0
+      OR pg_catalog.strpos(routine_definition, 'google-workspace-bootstrap:') = 0
+      OR pg_catalog.strpos(routine_definition, 'hashtextextended') = 0
+    THEN
+      RAISE EXCEPTION 'bootstrap entrypoint % lacks the attempt advisory-xact lock', object_oid::regprocedure;
+    END IF;
+  END LOOP;
+END
+$verify$;
+
 -- Catalog/ACL checks above intentionally evaluate the runtime roles' denied
 -- privileges. The normalization behavior probe itself is owner-only.
 RESET ROLE;
@@ -307,6 +390,23 @@ BEGIN
       SET candidate_workspace_id='91000000-0000-0000-0000-000000000003'
       WHERE id='91000000-0000-0000-0000-000000000001';
     RAISE EXCEPTION 'attempt binding mutation was accepted';
+  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+  END;
+
+  UPDATE uptech.google_workspace_bootstrap_attempts
+    SET state='ABORTED',aborted_at=statement_timestamp()
+    WHERE id='91000000-0000-0000-0000-000000000001';
+  BEGIN
+    UPDATE uptech.google_workspace_bootstrap_attempts
+      SET state='PREPARED',aborted_at=NULL
+      WHERE id='91000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'aborted attempt was reopened';
+  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM uptech.google_workspace_bootstrap_attempts
+      WHERE id='91000000-0000-0000-0000-000000000001';
+    RAISE EXCEPTION 'retained attempt was deleted';
   EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
   END;
 

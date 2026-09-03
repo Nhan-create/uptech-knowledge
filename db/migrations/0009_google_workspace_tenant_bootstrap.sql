@@ -58,6 +58,14 @@ CREATE TYPE uptech.google_workspace_bootstrap_abort_result_v1 AS (
   outcome uptech.google_workspace_bootstrap_abort_outcome_v1
 );
 
+CREATE TYPE uptech.google_workspace_bootstrap_reconcile_outcome_v1 AS ENUM (
+  'COMMITTED', 'NOT_COMMITTED', 'UNKNOWN'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_reconcile_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_reconcile_outcome_v1
+);
+
 CREATE FUNCTION uptech.onboarding_operations_are_unique_v1(p_values text[])
 RETURNS boolean
 LANGUAGE sql
@@ -1088,6 +1096,113 @@ BEGIN
 END
 $function$;
 
+CREATE FUNCTION uptech.reconcile_google_workspace_bootstrap_v1(
+  p_attempt_id uuid,
+  p_source_token_hash uptech.google_auth_hash32_v1,
+  p_status_token_hash uptech.google_auth_hash32_v1,
+  p_credential_reference text,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_reconcile_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_attempt uptech.google_workspace_bootstrap_attempts%ROWTYPE;
+BEGIN
+  IF p_attempt_id IS NULL OR p_source_token_hash IS NULL
+    OR p_status_token_hash IS NULL OR p_source_token_hash = p_status_token_hash
+    OR p_credential_reference IS NULL
+    OR pg_catalog.length(p_credential_reference) NOT BETWEEN 1 AND 1024
+    OR p_credential_reference <> pg_catalog.btrim(p_credential_reference)
+    OR p_request_id IS NULL
+  THEN
+    RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'google-workspace-bootstrap:' || p_attempt_id::text, 0
+  ));
+
+  SELECT attempt.* INTO selected_attempt
+  FROM uptech.google_workspace_bootstrap_attempts AS attempt
+  JOIN uptech.onboarding_sessions AS source
+    ON source.id = attempt.source_onboarding_session_id
+   AND source.token_hash = p_source_token_hash
+  WHERE attempt.id = p_attempt_id
+    AND attempt.candidate_status_hash = p_status_token_hash
+  FOR UPDATE OF attempt;
+
+  IF selected_attempt.id IS NULL THEN
+    RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+  END IF;
+
+  IF selected_attempt.state = 'COMMITTED' THEN
+    IF EXISTS (
+      SELECT 1
+      FROM uptech.google_workspace_bootstrap_receipts AS receipt
+      JOIN uptech.onboarding_sessions AS source
+        ON source.id = receipt.source_onboarding_session_id
+       AND source.token_hash = p_source_token_hash
+      JOIN uptech.onboarding_sessions AS status_capability
+        ON status_capability.id = receipt.initial_status_onboarding_session_id
+       AND status_capability.token_hash = p_status_token_hash
+      JOIN uptech.connectors AS connector
+        ON connector.workspace_id = receipt.workspace_id
+       AND connector.id = receipt.connector_id
+       AND connector.credential_reference = p_credential_reference
+      WHERE receipt.attempt_id = p_attempt_id
+        AND receipt.workspace_id = selected_attempt.candidate_workspace_id
+        AND receipt.identity_id = selected_attempt.identity_id
+    ) THEN
+      RETURN ROW('COMMITTED')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+    END IF;
+    RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+  END IF;
+
+  IF selected_attempt.state = 'PREPARED' THEN
+    IF selected_attempt.completion_deadline > pg_catalog.statement_timestamp()
+      OR EXISTS (
+        SELECT 1 FROM uptech.google_workspace_bootstrap_receipts
+        WHERE attempt_id = p_attempt_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM uptech.connectors
+        WHERE credential_reference = p_credential_reference
+      )
+    THEN
+      RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+    END IF;
+
+    UPDATE uptech.google_workspace_bootstrap_attempts
+    SET state = 'ABORTED', aborted_at = pg_catalog.statement_timestamp()
+    WHERE id = p_attempt_id AND state = 'PREPARED';
+
+    IF NOT FOUND THEN
+      RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+    END IF;
+    selected_attempt.state := 'ABORTED';
+  END IF;
+
+  IF selected_attempt.state = 'ABORTED'
+    AND NOT EXISTS (
+      SELECT 1 FROM uptech.google_workspace_bootstrap_receipts
+      WHERE attempt_id = p_attempt_id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM uptech.connectors
+      WHERE credential_reference = p_credential_reference
+    )
+  THEN
+    RETURN ROW('NOT_COMMITTED')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+  END IF;
+
+  RETURN ROW('UNKNOWN')::uptech.google_workspace_bootstrap_reconcile_result_v1;
+END
+$function$;
+
 REVOKE ALL ON FUNCTION uptech.prepare_google_workspace_bootstrap_v1(
   uuid, uptech.google_auth_hash32_v1, uuid, uptech.google_auth_hash32_v1, uuid
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
@@ -1104,6 +1219,13 @@ GRANT EXECUTE ON FUNCTION uptech.complete_google_workspace_bootstrap_v1(
   uuid, uptech.google_auth_hash32_v1, uptech.google_auth_hash32_v1,
   text, text, text, text, uptech.google_workspace_verified_domain_v1[],
   text, text[], uuid
+) TO uptech_api_runtime;
+
+REVOKE ALL ON FUNCTION uptech.reconcile_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uptech.google_auth_hash32_v1, text, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.reconcile_google_workspace_bootstrap_v1(
+  uuid, uptech.google_auth_hash32_v1, uptech.google_auth_hash32_v1, text, uuid
 ) TO uptech_api_runtime;
 
 REVOKE ALL ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
