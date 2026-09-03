@@ -731,19 +731,13 @@ BEGIN
   FOR UPDATE;
 
   IF existing_attempt.id IS NOT NULL THEN
-    IF existing_attempt.state = 'PREPARED'
-      AND existing_attempt.completion_deadline > pg_catalog.statement_timestamp()
-      AND existing_attempt.candidate_workspace_id = p_candidate_workspace_id
-      AND existing_attempt.candidate_status_hash = p_status_token_hash
-      AND EXISTS (
-        SELECT 1 FROM uptech.onboarding_sessions AS source
-        WHERE source.id = existing_attempt.source_onboarding_session_id
-          AND source.token_hash = p_source_token_hash
-      )
+    IF existing_attempt.state <> 'PREPARED'
+      OR existing_attempt.completion_deadline <= pg_catalog.statement_timestamp()
+      OR existing_attempt.candidate_workspace_id <> p_candidate_workspace_id
+      OR existing_attempt.candidate_status_hash <> p_status_token_hash
     THEN
-      RETURN ROW('PREPARED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+      RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
     END IF;
-    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
   END IF;
 
   SELECT source.id, source.identity_id INTO selected_source_id, selected_identity_id
@@ -769,16 +763,33 @@ BEGIN
   FOR UPDATE OF source, identity_row, user_row;
 
   IF selected_identity_id IS NULL
+    OR (
+      existing_attempt.id IS NOT NULL
+      AND (
+        existing_attempt.source_onboarding_session_id <> selected_source_id
+        OR existing_attempt.identity_id <> selected_identity_id
+      )
+    )
     OR EXISTS (SELECT 1 FROM uptech.workspaces WHERE workspace_id = p_candidate_workspace_id)
     OR EXISTS (
       SELECT 1 FROM uptech.google_workspace_bootstrap_attempts
-      WHERE source_onboarding_session_id = selected_source_id AND state = 'PREPARED'
+      WHERE source_onboarding_session_id = selected_source_id
+        AND state = 'PREPARED'
+        AND id <> p_attempt_id
     )
     OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash = p_status_token_hash)
     OR EXISTS (SELECT 1 FROM uptech.session_tokens WHERE token_hash = p_status_token_hash)
-    OR EXISTS (SELECT 1 FROM uptech.google_workspace_bootstrap_attempts WHERE candidate_status_hash = p_status_token_hash)
+    OR EXISTS (
+      SELECT 1 FROM uptech.google_workspace_bootstrap_attempts
+      WHERE candidate_status_hash = p_status_token_hash
+        AND id <> p_attempt_id
+    )
   THEN
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_prepare_result_v1;
+  END IF;
+
+  IF existing_attempt.id IS NOT NULL THEN
+    RETURN ROW('PREPARED')::uptech.google_workspace_bootstrap_prepare_result_v1;
   END IF;
 
   BEGIN
@@ -911,26 +922,6 @@ BEGIN
     RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
   END IF;
 
-  IF selected_attempt.state = 'COMMITTED' THEN
-    SELECT status_capability.expires_at INTO selected_status_expires_at
-    FROM uptech.google_workspace_bootstrap_receipts AS receipt
-    JOIN uptech.onboarding_sessions AS source
-      ON source.id = receipt.source_onboarding_session_id
-     AND source.token_hash = p_source_token_hash
-    JOIN uptech.onboarding_sessions AS status_capability
-      ON status_capability.id = receipt.initial_status_onboarding_session_id
-     AND status_capability.token_hash = p_status_token_hash
-    JOIN uptech.connectors AS connector
-      ON connector.workspace_id = receipt.workspace_id
-     AND connector.id = receipt.connector_id
-     AND connector.credential_reference = p_credential_reference
-    WHERE receipt.attempt_id = p_attempt_id;
-    IF selected_status_expires_at IS NOT NULL THEN
-      RETURN ROW('PROVISIONING', selected_status_expires_at)::uptech.google_workspace_bootstrap_complete_result_v1;
-    END IF;
-    RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
-  END IF;
-
   IF selected_attempt.state <> 'PREPARED'
     OR selected_attempt.completion_deadline <= committed_time
   THEN
@@ -968,7 +959,11 @@ BEGIN
     AND identity_row.status = 'ACTIVE'
     AND identity_row.email_verified
     AND pg_catalog.lower(pg_catalog.btrim(identity_row.hosted_domain_claim)) = normalized_hosted_domain::text
-    AND normalized_hosted_domain = normalized_customer_domain
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.unnest(normalized_domains) AS supplied
+      WHERE supplied.normalized_domain = normalized_hosted_domain::text
+    )
     AND user_row.status = 'ACTIVE'
   FOR UPDATE OF source, identity_row, user_row;
 
