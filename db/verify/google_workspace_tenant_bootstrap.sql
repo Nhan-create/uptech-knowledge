@@ -147,16 +147,17 @@ BEGIN
 
   SELECT count(*) INTO missing_count
   FROM (VALUES
-    ('workspace_domain_locators_alias_parent_check'),
-    ('google_workspace_bootstrap_attempts_transition_guard'),
-    ('google_workspace_bootstrap_receipts_committed_attempt'),
-    ('google_workspace_bootstrap_receipts_immutable'),
-    ('workspace_access_requests_transition_guard')
-  ) AS required(trigger_name)
+    ('workspace_domain_locators_alias_parent_check','enforce_workspace_domain_alias_parent_v1'),
+    ('google_workspace_bootstrap_attempts_transition_guard','enforce_google_workspace_bootstrap_attempt_transition_v1'),
+    ('google_workspace_bootstrap_receipts_committed_attempt','enforce_google_workspace_bootstrap_receipt_v1'),
+    ('google_workspace_bootstrap_receipts_immutable','enforce_google_workspace_bootstrap_receipt_v1'),
+    ('workspace_access_requests_transition_guard','enforce_workspace_access_request_transition_v1')
+  ) AS required(trigger_name, function_name)
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
     WHERE trigger_row.tgname = required.trigger_name
       AND NOT trigger_row.tgisinternal AND trigger_row.tgenabled <> 'D'
+      AND trigger_row.tgfoid = pg_catalog.to_regprocedure('uptech.' || required.function_name || '()')
   );
   IF missing_count <> 0 THEN
     RAISE EXCEPTION 'Task 2 enforcement trigger is missing or disabled';
@@ -193,6 +194,7 @@ DECLARE
 BEGIN
   FOREACH object_oid IN ARRAY ARRAY[
     'uptech.onboarding_operations_are_unique_v1(text[])'::regprocedure::oid,
+    'uptech.directory_scopes_are_supported_v1(text[])'::regprocedure::oid,
     'uptech.enforce_workspace_domain_alias_parent_v1()'::regprocedure::oid,
     'uptech.normalize_google_workspace_verified_domains_v1(text,uptech.google_workspace_verified_domain_v1[])'::regprocedure::oid,
     'uptech.enforce_google_workspace_bootstrap_attempt_transition_v1()'::regprocedure::oid,
@@ -245,7 +247,34 @@ SET LOCAL ROLE uptech_migration_owner;
 DO $verify$
 DECLARE
   normalized uptech.google_workspace_verified_domain_v1[];
+  legacy_scopes text[] := ARRAY[
+    'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+    'https://www.googleapis.com/auth/admin.directory.group.readonly',
+    'https://www.googleapis.com/auth/admin.directory.orgunit.readonly'];
 BEGIN
+  IF EXISTS (SELECT 1 FROM uptech.onboarding_sessions
+      WHERE allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+        AND resource_workspace_id IS NULL)
+     OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions
+      WHERE allowed_operations && ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE']::text[]
+        AND allowed_operations && ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[])
+  THEN RAISE EXCEPTION 'legacy onboarding capabilities were not safely reconciled';
+  END IF;
+
+  IF NOT uptech.directory_scopes_are_supported_v1(legacy_scopes)
+     OR NOT uptech.directory_scopes_are_supported_v1(legacy_scopes || ARRAY['https://www.googleapis.com/auth/admin.directory.domain.readonly'])
+     OR uptech.directory_scopes_are_supported_v1(legacy_scopes || ARRAY[legacy_scopes[1]])
+     OR uptech.directory_scopes_are_supported_v1(legacy_scopes || ARRAY['unknown'])
+  THEN RAISE EXCEPTION 'Directory scope predicate does not enforce exact four/five sets';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='uptech' AND p.proname IN ('activate_directory_connector_v1','lease_next_directory_job_v1')
+        AND p.prosrc NOT LIKE '%directory_scopes_are_supported_v1%')
+  THEN RAISE EXCEPTION 'Directory activation/lease routines do not use exact supported scopes';
+  END IF;
+
   normalized := uptech.normalize_google_workspace_verified_domains_v1(
     ' Example.COM ', ARRAY[
       ROW('alias.example.com','ALIAS','example.com')::uptech.google_workspace_verified_domain_v1,

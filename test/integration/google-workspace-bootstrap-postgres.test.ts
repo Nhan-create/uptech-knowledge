@@ -28,6 +28,19 @@ before(async () => {
       "safe_google_access_states_a4", "enterprise_login", "google_directory_production",
       "google_workspace_tenant_bootstrap",
     ];
+    if (number === 9) {
+      await pool.query(`SET ROLE uptech_migration_owner;
+        INSERT INTO uptech.workspaces(workspace_id,status,google_customer_id)
+          VALUES ('90000000-0000-0000-0000-000000000001','ACTIVE','legacy-customer');
+        INSERT INTO uptech.users(id) VALUES ('90000000-0000-0000-0000-000000000002');
+        INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
+          VALUES ('90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','GOOGLE','https://accounts.google.com','legacy-sub','owner@legacy.example',true,'legacy.example',statement_timestamp());
+        INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
+          VALUES ('legacy.example','90000000-0000-0000-0000-000000000001','VERIFIED',statement_timestamp());
+        INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
+          VALUES ('90000000-0000-0000-0000-000000000004','90000000-0000-0000-0000-000000000003',decode(repeat('09',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes');
+        RESET ROLE`);
+    }
     await pool.query(await sql(`db/migrations/${String(number).padStart(4, "0")}_${names[number - 1]}.sql`));
   }
 });
@@ -79,4 +92,28 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
 
 test("Task 2 standalone verifier passes against the migrated disposable database", async () => {
   await pool.query(await sql("db/verify/google_workspace_tenant_bootstrap.sql"));
+});
+
+test("0009 preserves a populated legacy access capability with its unique verified tenant binding", async () => {
+  const result = await pool.query("SELECT resource_workspace_id::text FROM uptech.onboarding_sessions WHERE id='90000000-0000-0000-0000-000000000004'");
+  assert.equal(result.rows[0]?.resource_workspace_id, "90000000-0000-0000-0000-000000000001");
+});
+
+test("connector scope authority accepts only the exact legacy-four or current-five set", async () => {
+  const base = [
+    'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+    'https://www.googleapis.com/auth/admin.directory.group.readonly',
+    'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+  ];
+  const domain = 'https://www.googleapis.com/auth/admin.directory.domain.readonly';
+  await pool.query("SET ROLE uptech_migration_owner");
+  assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [base])).rows[0].directory_scopes_are_supported_v1, true);
+  assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, domain]])).rows[0].directory_scopes_are_supported_v1, true);
+  assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, base[0]]])).rows[0].directory_scopes_are_supported_v1, false);
+  assert.equal((await pool.query("SELECT uptech.directory_scopes_are_supported_v1($1::text[])", [[...base, 'unknown']])).rows[0].directory_scopes_are_supported_v1, false);
+  const definitions = await pool.query(`SELECT proname,prosrc FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace
+    WHERE n.nspname='uptech' AND proname IN ('activate_directory_connector_v1','lease_next_directory_job_v1')`);
+  assert.ok(definitions.rows.every((row) => row.prosrc.includes('directory_scopes_are_supported_v1')));
+  await pool.query("RESET ROLE");
 });

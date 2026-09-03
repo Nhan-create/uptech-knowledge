@@ -62,6 +62,24 @@ ALTER TABLE uptech.onboarding_sessions
 ALTER TABLE uptech.onboarding_sessions
   VALIDATE CONSTRAINT onboarding_sessions_resource_workspace_fk;
 
+UPDATE uptech.onboarding_sessions
+SET allowed_operations = ARRAY(
+  SELECT operation_name FROM unnest(allowed_operations) AS operation_name
+  WHERE operation_name LIKE 'FIRST_DOMAIN_CLAIM_%'
+)
+WHERE allowed_operations && ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE']::text[]
+  AND allowed_operations && ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[];
+
+UPDATE uptech.onboarding_sessions AS capability
+SET resource_workspace_id = locator.workspace_id
+FROM uptech.identities AS identity_row
+JOIN uptech.workspace_domain_locators AS locator
+  ON locator.normalized_domain = lower(btrim(identity_row.hosted_domain_claim))
+ AND locator.status = 'VERIFIED'
+WHERE capability.identity_id = identity_row.id
+  AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+  AND capability.resource_workspace_id IS NULL;
+
 ALTER TABLE uptech.onboarding_sessions
   DROP CONSTRAINT onboarding_sessions_operations_check,
   DROP CONSTRAINT onboarding_sessions_expiry_check;
@@ -349,6 +367,30 @@ ALTER TABLE uptech.connectors
 ALTER TABLE uptech.connectors
   DROP CONSTRAINT connectors_directory_setup_metadata_check;
 
+CREATE FUNCTION uptech.directory_scopes_are_supported_v1(p_scopes text[])
+RETURNS boolean LANGUAGE sql IMMUTABLE
+SET search_path TO pg_catalog, uptech
+AS $function$
+  SELECT p_scopes IS NOT NULL
+    AND array_position(p_scopes, NULL) IS NULL
+    AND cardinality(p_scopes) IN (4, 5)
+    AND cardinality(p_scopes) = (SELECT count(DISTINCT scope_name) FROM unnest(p_scopes) AS scope_name)
+    AND p_scopes @> ARRAY[
+    'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+    'https://www.googleapis.com/auth/admin.directory.group.readonly',
+    'https://www.googleapis.com/auth/admin.directory.orgunit.readonly']::text[]
+    AND p_scopes <@ ARRAY[
+    'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+    'https://www.googleapis.com/auth/admin.directory.group.readonly',
+    'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+    'https://www.googleapis.com/auth/admin.directory.domain.readonly']::text[]
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.directory_scopes_are_supported_v1(text[])
+  FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
 ALTER TABLE uptech.connectors
   ADD CONSTRAINT connectors_directory_setup_metadata_check CHECK (
     (
@@ -366,26 +408,28 @@ ALTER TABLE uptech.connectors
       AND length(credential_reference) BETWEEN 1 AND 1024
       AND directory_authorized_by_identity_id IS NOT NULL
       AND directory_authorized_scopes IS NOT NULL
-      AND cardinality(directory_authorized_scopes) IN (4, 5)
-      AND array_position(directory_authorized_scopes, NULL) IS NULL
-      AND directory_authorized_scopes @> ARRAY[
-        'https://www.googleapis.com/auth/admin.directory.customer.readonly',
-        'https://www.googleapis.com/auth/admin.directory.user.readonly',
-        'https://www.googleapis.com/auth/admin.directory.group.readonly',
-        'https://www.googleapis.com/auth/admin.directory.orgunit.readonly'
-      ]::text[]
-      AND directory_authorized_scopes <@ ARRAY[
-        'https://www.googleapis.com/auth/admin.directory.customer.readonly',
-        'https://www.googleapis.com/auth/admin.directory.domain.readonly',
-        'https://www.googleapis.com/auth/admin.directory.user.readonly',
-        'https://www.googleapis.com/auth/admin.directory.group.readonly',
-        'https://www.googleapis.com/auth/admin.directory.orgunit.readonly'
-      ]::text[]
+      AND uptech.directory_scopes_are_supported_v1(directory_authorized_scopes)
     )
   ) NOT VALID;
 
 ALTER TABLE uptech.connectors
   VALIDATE CONSTRAINT connectors_directory_setup_metadata_check;
+
+DO $replace_directory_scope_checks$
+DECLARE routine_oid oid; definition text;
+BEGIN
+  FOR routine_oid IN SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='uptech' AND p.prosrc LIKE '%directory_authorized_scopes%'
+  LOOP
+    definition := pg_get_functiondef(routine_oid);
+    definition := replace(definition, 'cardinality(p_scopes) <> 4', 'NOT uptech.directory_scopes_are_supported_v1(p_scopes)');
+    definition := replace(definition, 'cardinality(connector.directory_authorized_scopes) = 4', 'uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)');
+    definition := replace(definition, 'cardinality(connector.directory_authorized_scopes)=4', 'uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)');
+    definition := replace(definition, 'cardinality(directory_connector.directory_authorized_scopes) = 4', 'uptech.directory_scopes_are_supported_v1(directory_connector.directory_authorized_scopes)');
+    EXECUTE definition;
+  END LOOP;
+END
+$replace_directory_scope_checks$;
 
 CREATE UNIQUE INDEX service_actors_one_active_sync_worker
   ON uptech.service_actors (workspace_id)
