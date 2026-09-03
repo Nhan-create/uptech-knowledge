@@ -287,10 +287,12 @@ function executableSql(source) {
 
 const [
   safeAccessVerificationSource,
-  enterpriseLoginMigrationSource,
+  enterpriseLoginBaselineMigrationSource,
+  googleDirectoryMigrationSource,
   enterpriseLoginVerificationSource,
 ] = await Promise.all([
   readFile("db/verify/safe_google_access_states_a4.sql", "utf8"),
+  readFile("db/migrations/0007_enterprise_login.sql", "utf8"),
   readFile("db/migrations/0008_google_directory_production.sql", "utf8"),
   readFile("db/verify/enterprise_login.sql", "utf8"),
 ]);
@@ -348,7 +350,6 @@ try {
     ["migration_member", state?.migration_member],
     ["web_boundary_present", state?.web_boundary_present],
     ["mobile_boundary_present", state?.mobile_boundary_present],
-    ["enterprise_login_baseline_present", state?.enterprise_login_baseline_present],
     ["issuer_reconciliation_safe", state?.issuer_reconciliation_safe],
     ["release_lock", state?.release_lock],
   ].filter(([, passed]) => passed !== true).map(([name]) => name);
@@ -359,8 +360,11 @@ try {
   }
 
   await client.query(executableSql(safeAccessVerificationSource));
+  if (state.enterprise_login_baseline_present !== true) {
+    await client.query(executableSql(enterpriseLoginBaselineMigrationSource));
+  }
   if (state.directory_upgrade_present !== true) {
-    await client.query(executableSql(enterpriseLoginMigrationSource));
+    await client.query(executableSql(googleDirectoryMigrationSource));
   }
   await client.query(executableSql(enterpriseLoginVerificationSource));
   await reconcileMobileRegistry(client);
