@@ -2678,7 +2678,7 @@ BEGIN
     OR p_reason_class NOT IN (
       'USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT','USER_SUSPENDED','USER_REMOVED',
       'DIRECTORY_SYNC_PENDING','DIRECTORY_STALE','WORKSPACE_SUSPENDED',
-      'DIRECTORY_AUTHORITY_UNAVAILABLE','IDENTITY_INELIGIBLE')
+      'DIRECTORY_AUTHORITY_UNAVAILABLE','IDENTITY_INELIGIBLE','AUTHORITY_COMMIT_FAILED')
   THEN
     RAISE EXCEPTION 'invalid controlled-login denial audit' USING ERRCODE='22023';
   END IF;
@@ -2849,6 +2849,7 @@ BEGIN
       RETURN ROW('DENIED','USER_REMOVED',NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
     END IF;
 
+    BEGIN
     SELECT id,role,status,authz_version INTO selected_membership_id,selected_membership_role,
       selected_membership_status,selected_membership_authz_version
     FROM uptech.workspace_memberships WHERE workspace_id=selected_workspace_id
@@ -2900,7 +2901,12 @@ BEGIN
           SELECT (evaluation).outcome::text INTO mapping_outcome
           FROM uptech.evaluate_google_directory_mapping_v1(selected_workspace_id,
             selected_generation_id,(canonical_claims).provider_subject::text) AS evaluation;
-          denial_access_state:=mapping_outcome::uptech.google_login_access_state_v2;
+          IF mapping_outcome='USER_NOT_PROVISIONED' THEN
+            capability_reason:='USER_NOT_PROVISIONED';
+            capability_public_state:='USER_NOT_PROVISIONED';
+          ELSE
+            denial_access_state:=mapping_outcome::uptech.google_login_access_state_v2;
+          END IF;
         END IF;
       ELSE
         SELECT (evaluation).outcome::text,(evaluation).target_role,(evaluation).target_department_key
@@ -2999,6 +3005,8 @@ BEGIN
         WHERE workspace_id=selected_workspace_id AND id=selected_membership_id
         RETURNING role,authz_version INTO selected_membership_role,selected_membership_authz_version;
       ELSIF selected_membership_status <> 'ACTIVE' THEN
+        PERFORM uptech.append_google_controlled_login_denial_audit_v1(
+          selected_workspace_id,selected_identity_id,'USER_SUSPENDED','USER_SUSPENDED',p_request_id);
         UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=observed_at
         WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
         RETURN ROW('DENIED','USER_SUSPENDED',NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
@@ -3084,6 +3092,11 @@ BEGIN
     RETURN ROW('NORMAL',NULL,NULL,NULL,
       CASE WHEN selected_membership_role IN ('OWNER','ADMIN') THEN '/admin' ELSE '/home' END)
       ::uptech.google_login_completion_result_v3;
+    EXCEPTION WHEN SQLSTATE 'PGA01' THEN
+      PERFORM uptech.append_google_controlled_login_denial_audit_v1(
+        selected_workspace_id,selected_identity_id,'INTERNAL_ERROR','AUTHORITY_COMMIT_FAILED',p_request_id);
+      RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+    END;
   END IF;
 
   IF p_onboarding_token_hash IS NOT NULL THEN

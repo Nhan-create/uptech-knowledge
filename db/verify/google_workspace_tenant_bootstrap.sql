@@ -220,6 +220,7 @@ BEGIN
     OR pg_catalog.strpos(definition,'audit_events')=0
     OR pg_catalog.strpos(definition,'access_state')=0
     OR pg_catalog.strpos(definition,'reason_class')=0
+    OR pg_catalog.strpos(definition,'AUTHORITY_COMMIT_FAILED')=0
     OR pg_catalog.strpos(definition,'token')<>0
     OR pg_catalog.strpos(definition,'credential')<>0
     OR pg_catalog.strpos(definition,'domain')<>0
