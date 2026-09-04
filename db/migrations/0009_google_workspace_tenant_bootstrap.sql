@@ -3744,6 +3744,7 @@ BEGIN
      OR (p_claims).issuer::text NOT IN ('accounts.google.com','https://accounts.google.com')
      OR p_handoff_hash IS NULL OR p_request_id IS NULL OR p_request_id<>transaction_row.request_id
      OR transaction_row.completion_expires_at<=observed_at
+     OR (canonical_claims).normalized_email IS NULL
      OR (canonical_claims).email_verified IS NOT TRUE
      OR (canonical_claims).normalized_hosted_domain IS NULL
      OR (canonical_claims).web_nonce_hash IS DISTINCT FROM transaction_row.nonce_hash

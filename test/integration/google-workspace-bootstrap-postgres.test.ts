@@ -2984,3 +2984,60 @@ test("Mobile Directory V2 creates only mapped handoffs and preserves an active O
     assert.equal(authority.capabilities, 0);
   }
 });
+
+test("Mobile Directory V2 rejects a verified hosted-domain claim with no normalized email", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97800000-0000-4000-8000-000000000002";
+  const transactionId = "97900000-0000-4000-8000-000000000020";
+  const subject = "mobile-v2-null-email-sub";
+  const digest = (label: string) => createHash("sha256").update(`mobile-null-email:${label}`).digest();
+  const handle = digest("handle");
+  const nonce = digest("nonce");
+  const handoff = digest("handoff");
+  const environment = await ensureActiveGoogleEnvironment();
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`INSERT INTO uptech.people_profiles(
+      workspace_id,generation_id,google_subject,full_name,primary_email,lifecycle_state,
+      effective_role,effective_department_key
+    ) VALUES ($1,$2,$3,'Null Email','null-email@mapping-a.example','ACTIVE','ADMIN',NULL)`,
+    [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject
+    ) VALUES ($1,$2,'g-admin',$3)`, [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.mobile_google_transactions(
+      id,environment_name,platform,configuration_key,state_hash,nonce_hash,installation_binding_hash,
+      app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at
+    ) VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,
+      ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('mobile-null-email','UTF8'),'EXCHANGE_RESERVED',$10,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [transactionId, environment, digest("state"), nonce, digest("install"), digest("challenge"),
+      Buffer.alloc(12, 0xf1), Buffer.alloc(48, 0xf2), Buffer.alloc(16, 0xf3), handle]);
+  });
+
+  const row = (await asApi((client) => client.query(`SELECT outcome::text,denial_category::text
+    FROM uptech.complete_mobile_google_callback_directory_v2(
+      $1,ROW('accounts.google.com',$2,NULL,true,'mapping-a.example',
+        statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+        'GOOGLE_WEB_LOGIN_V1',NULL,$3)::uptech.google_verified_claims_assertion_v1,$4,$5)`,
+  [handle, subject, nonce, handoff, transactionId]))).rows[0];
+  assert.equal(row.outcome, "DENIED");
+  assert.equal(row.denial_category, "AUTH_ERROR");
+  assert.deepEqual((await pool.query(`SELECT
+      (SELECT count(*)::int FROM uptech.identities WHERE provider_subject=$1) AS identities,
+      (SELECT count(*)::int FROM uptech.workspace_memberships membership
+        JOIN uptech.identities identity_row ON identity_row.user_id=membership.user_id
+        WHERE identity_row.provider_subject=$1) AS memberships,
+      (SELECT count(*)::int FROM uptech.mobile_handoffs
+        WHERE handoff_hash=$2 AND identity_id IS NOT NULL) AS authoritative_handoffs,
+      (SELECT count(*)::int FROM uptech.platform_audit_events
+        WHERE request_id=$3 AND action='MOBILE_GOOGLE_HANDOFF_CREATED') AS success_audits,
+      (SELECT status::text FROM uptech.mobile_google_transactions WHERE id=$3) AS transaction_status`,
+  [subject, handoff, transactionId])).rows[0], {
+    identities: 0, memberships: 0, authoritative_handoffs: 0,
+    success_audits: 0, transaction_status: "REJECTED",
+  });
+});
