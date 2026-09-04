@@ -13,8 +13,10 @@ import {
   RECOVERY_ACTION_IDS,
   RECOVERY_OPERATION_FAMILIES,
   RECOVERY_STATES,
+  type RecoveryActionId,
   type RecoveryAuthority,
   type RecoveryOperation,
+  type RecoveryState,
 } from "../auth/recovery-actions.ts";
 
 const REQUEST_ID = "00000000-0000-4000-8000-000000000123";
@@ -68,6 +70,38 @@ const PROBLEM_CASES = [
   ["DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE", 503, "Directory data stale", "Google Workspace directory data is unavailable or stale."],
   ["ONBOARDING_EXPIRED", 401, "Onboarding expired", "The organization setup session has expired."],
 ] as const satisfies readonly (readonly [ProblemCode, number, string, string])[];
+
+const RECOVERY_STATE_CASES = [
+  ["PERSONAL_GOOGLE_ACCOUNT", ["SWITCH_GOOGLE_ACCOUNT", "OPEN_ENTERPRISE_LOGIN_HELP"], null],
+  ["UNKNOWN_WORKSPACE", ["START_ORGANIZATION_SETUP", "SWITCH_GOOGLE_ACCOUNT"], "FIRST_DOMAIN"],
+  ["SUPER_ADMIN_REQUIRED", ["SWITCH_GOOGLE_ACCOUNT", "COPY_SUPER_ADMIN_INSTRUCTIONS"], null],
+  ["DELEGATED_ADMIN_UNSUPPORTED", ["SWITCH_GOOGLE_ACCOUNT", "COPY_SUPER_ADMIN_INSTRUCTIONS"], null],
+  ["GOOGLE_CONSENT_CANCELLED", ["RESTART_DIRECTORY_CONSENT", "SWITCH_GOOGLE_ACCOUNT"], "FIRST_DOMAIN"],
+  ["DIRECTORY_SCOPE_REQUIRED", ["RESTART_DIRECTORY_CONSENT", "SWITCH_GOOGLE_ACCOUNT"], "FIRST_DOMAIN"],
+  ["CONSENT_ACCOUNT_MISMATCH", ["RESTART_DIRECTORY_CONSENT", "SWITCH_GOOGLE_ACCOUNT"], "FIRST_DOMAIN"],
+  ["DOMAIN_NOT_VERIFIED", ["OPEN_DOMAIN_VERIFICATION_HELP", "SWITCH_GOOGLE_ACCOUNT"], null],
+  ["GOOGLE_ORGANIZATION_MISMATCH", ["SWITCH_GOOGLE_ACCOUNT", "CONTACT_UPTECH"], null],
+  ["ORGANIZATION_ALREADY_REGISTERED", ["START_NORMAL_LOGIN", "CONTACT_UPTECH"], null],
+  ["ORGANIZATION_ALREADY_REGISTERED_ACCESS_REQUEST_AVAILABLE", ["SUBMIT_ACCESS_REQUEST", "SWITCH_GOOGLE_ACCOUNT"], "ACCESS_REQUEST"],
+  ["DIRECTORY_BOOTSTRAP_SYNC_PENDING", ["CHECK_BOOTSTRAP_STATUS", "EXIT_ONBOARDING"], "BOOTSTRAP_STATUS"],
+  ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE", ["RETRY_DIRECTORY_SYNC", "CONTACT_UPTECH"], "BOOTSTRAP_STATUS"],
+  ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", ["CONTACT_UPTECH", "EXIT_ONBOARDING"], "FIRST_DOMAIN"],
+  ["USER_NOT_PROVISIONED", ["SUBMIT_ACCESS_REQUEST", "SWITCH_GOOGLE_ACCOUNT"], "ACCESS_REQUEST"],
+  ["ACCESS_MAPPING_CONFLICT", ["SUBMIT_ACCESS_REQUEST", "EXIT_ONBOARDING"], "ACCESS_REQUEST"],
+  ["USER_SUSPENDED", ["SWITCH_GOOGLE_ACCOUNT", "COPY_WORKSPACE_ADMIN_INSTRUCTIONS"], null],
+  ["USER_REMOVED", ["SWITCH_GOOGLE_ACCOUNT", "COPY_WORKSPACE_ADMIN_INSTRUCTIONS"], null],
+  ["DIRECTORY_SYNC_PENDING", ["COPY_WORKSPACE_ADMIN_INSTRUCTIONS", "START_NORMAL_LOGIN"], null],
+  ["DIRECTORY_STALE", ["CONTACT_UPTECH", "START_NORMAL_LOGIN"], null],
+  ["DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE", ["SUBMIT_ACCESS_REQUEST", "START_NORMAL_LOGIN"], "ACCESS_REQUEST"],
+  ["WORKSPACE_SUSPENDED", ["CONTACT_UPTECH", "SWITCH_GOOGLE_ACCOUNT"], null],
+  ["SESSION_REVOKED", ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"], null],
+  ["SESSION_EXPIRED", ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"], null],
+  ["ONBOARDING_EXPIRED", ["START_NORMAL_LOGIN", "CONTACT_UPTECH"], null],
+  ["PROVIDER_UNAVAILABLE", ["START_NORMAL_LOGIN", "CONTACT_UPTECH"], null],
+  ["RATE_LIMITED", ["START_NORMAL_LOGIN_AFTER_COOLDOWN", "CONTACT_UPTECH"], null],
+  ["FORBIDDEN", ["SWITCH_GOOGLE_ACCOUNT", "CONTACT_UPTECH"], null],
+  ["INTERNAL_ERROR", ["START_NORMAL_LOGIN", "COPY_REQUEST_ID"], null],
+] as const satisfies readonly (readonly [RecoveryState, readonly RecoveryActionId[], keyof typeof RECOVERY_OPERATION_FAMILIES | null])[];
 
 if (false) {
   // @ts-expect-error Recovery actions are selected by the problem code, never supplied by callers.
@@ -177,18 +211,15 @@ test("maps legacy codes to their fixed recovery states", () => {
   }
 });
 
-test("uses the direct recovery state mapping", () => {
-  for (const state of RECOVERY_STATES) {
-    assert.equal(createSafeProblem(state, REQUEST_ID).code, state);
+test("maps every direct recovery-state problem code to its exact public actions", () => {
+  assert.deepEqual(RECOVERY_STATES, RECOVERY_STATE_CASES.map(([state]) => state));
+  for (const [state, expectedActionIds, family] of RECOVERY_STATE_CASES) {
+    assert.deepEqual(
+      createSafeProblem(state, REQUEST_ID, family === null ? null : authority(family)).recovery_actions,
+      expectedActionIds,
+      state,
+    );
   }
-  assert.deepEqual(
-    createSafeProblem("PERSONAL_GOOGLE_ACCOUNT", REQUEST_ID).recovery_actions,
-    ["SWITCH_GOOGLE_ACCOUNT", "OPEN_ENTERPRISE_LOGIN_HELP"],
-  );
-  assert.deepEqual(
-    createSafeProblem("SESSION_EXPIRED", REQUEST_ID).recovery_actions,
-    ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"],
-  );
 });
 
 test("only an exact authority family exposes privileged recovery actions", () => {
@@ -197,12 +228,15 @@ test("only an exact authority family exposes privileged recovery actions", () =>
     ["GOOGLE_CONSENT_CANCELLED", "FIRST_DOMAIN", "RESTART_DIRECTORY_CONSENT"],
     ["DIRECTORY_SCOPE_REQUIRED", "FIRST_DOMAIN", "RESTART_DIRECTORY_CONSENT"],
     ["CONSENT_ACCOUNT_MISMATCH", "FIRST_DOMAIN", "RESTART_DIRECTORY_CONSENT"],
+    ["ORGANIZATION_ALREADY_REGISTERED_ACCESS_REQUEST_AVAILABLE", "ACCESS_REQUEST", "SUBMIT_ACCESS_REQUEST"],
     ["USER_NOT_PROVISIONED", "ACCESS_REQUEST", "SUBMIT_ACCESS_REQUEST"],
     ["ACCESS_MAPPING_CONFLICT", "ACCESS_REQUEST", "SUBMIT_ACCESS_REQUEST"],
     ["DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE", "ACCESS_REQUEST", "SUBMIT_ACCESS_REQUEST"],
     ["DIRECTORY_BOOTSTRAP_SYNC_PENDING", "BOOTSTRAP_STATUS", "CHECK_BOOTSTRAP_STATUS"],
+    ["DIRECTORY_BOOTSTRAP_SYNC_PENDING", "BOOTSTRAP_STATUS", "EXIT_ONBOARDING"],
     ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE", "BOOTSTRAP_STATUS", "RETRY_DIRECTORY_SYNC"],
     ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", "BOOTSTRAP_STATUS", "EXIT_ONBOARDING"],
+    ["ACCESS_MAPPING_CONFLICT", "ACCESS_REQUEST", "EXIT_ONBOARDING"],
   ] as const satisfies readonly (readonly [ProblemCode, keyof typeof RECOVERY_OPERATION_FAMILIES, string])[];
   for (const [code, family, privilegedAction] of privilegedCases) {
     assert.ok(createSafeProblem(code, REQUEST_ID, authority(family)).recovery_actions.includes(privilegedAction), code);
@@ -222,6 +256,15 @@ test("only an exact authority family exposes privileged recovery actions", () =>
         false,
         `${code}: ${JSON.stringify(hostile)}`,
       );
+    }
+
+    for (const otherFamily of Object.keys(RECOVERY_OPERATION_FAMILIES) as (keyof typeof RECOVERY_OPERATION_FAMILIES)[]) {
+      const actionIds = createSafeProblem(code, REQUEST_ID, authority(otherFamily)).recovery_actions;
+      if (privilegedAction === "EXIT_ONBOARDING") {
+        assert.ok(actionIds.includes(privilegedAction), `${code}: ${otherFamily}`);
+      } else if (otherFamily !== family) {
+        assert.equal(actionIds.includes(privilegedAction), false, `${code}: ${otherFamily}`);
+      }
     }
   }
 });
