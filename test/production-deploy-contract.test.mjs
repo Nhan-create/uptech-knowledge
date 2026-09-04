@@ -9,6 +9,7 @@ import test from "node:test";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const guardPath = join(repoRoot, "scripts", "production-deploy-contract.mjs");
 const generatorPath = join(repoRoot, "scripts", "generate-mobile-association-artifacts.mjs");
+const browserHarnessPath = join(repoRoot, "scripts", "run-google-workspace-bootstrap-browser.mjs");
 const publicRoutes = ["san-pham", "nguyen-tac", "nang-luc", "quy-trinh"];
 const androidFingerprint =
   "A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:12:23:34:45:56:67:78:89:9A:AB:BC:CD:DE:EF:F0:01";
@@ -411,4 +412,27 @@ test("the checked-out source remains buildable outside production without associ
   const result = runGuard(repoRoot, { VERCEL_ENV: "preview" });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test("browser harness owns a disposable Chromium and NOBYPASSRLS acceptance boundary", async () => {
+  const result = spawnSync(process.execPath, [browserHarnessPath, "--contract"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, UPTECH_TEST_DATABASE_URL: "" },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    browser: "chromium-cdp-websocket",
+    canonicalOrigin: "https://browser-login.test:<ephemeral>",
+    cleanup: ["browser", "next", "proxies", "runtime-role", "child-database", "profile"],
+    database: "uptech_phase1_test_browser_[A-Za-z0-9_]+",
+    liveTests: [
+      "test/login-ui.test.mjs",
+      "test/login-auth-safety.test.mjs",
+      "test/login-browser-interactions.test.mjs",
+    ],
+    migrations: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"],
+    runtime: "session_user=ephemeral,current_user=uptech_api_runtime,NOBYPASSRLS",
+  });
 });

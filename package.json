@@ -14,6 +14,7 @@
     "test:security": "node --experimental-strip-types --test src/security/route-containment.test.mjs src/server/**/*.test.ts src/worker/**/*.test.ts && node --experimental-strip-types --experimental-loader ./test/next-alias-loader.mjs --test test/google-directory-cron-route.test.ts && node --test test/domain-fixture-safety.test.mjs",
     "test:login-routes": "node --experimental-strip-types --experimental-test-module-mocks --experimental-loader ./test/next-alias-loader.mjs --test test/google-login-route-safety.test.ts test/web-session-bootstrap-route.test.ts",
     "test:login-ui": "node --test test/login-ui.test.mjs test/login-auth-safety.test.mjs",
+    "test:browser:bootstrap": "node scripts/run-google-workspace-bootstrap-browser.mjs",
     "test:postgres": "node --experimental-strip-types --test test/integration/phase1-postgres.test.ts",
     "test:postgres:a1": "node --experimental-strip-types --test test/integration/google-auth-a1-postgres.test.ts",
     "test:postgres:a3": "node --experimental-strip-types --test test/integration/mobile-auth-a3-postgres.test.ts",
