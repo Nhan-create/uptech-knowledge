@@ -23,7 +23,6 @@ import {
   resolveWebRouteAuthorityDetailed,
   type DetailedWebRouteAuthorityDecision,
 } from "./web-route-authority.ts";
-import { clearedWebSessionCookie } from "./web-session.ts";
 
 export type LoginPageAuthorityDecision = "HOME" | "LOGIN" | "UNAVAILABLE";
 
@@ -34,8 +33,14 @@ export type LoginPageModel =
       state: RecoveryState | null;
       actions: readonly RecoveryActionDescriptor[];
       csrfToken: string | null;
-      staleCookieHeaders: readonly string[];
+      requestId: string | null;
+      retryAfterSeconds: number | null;
     }>;
+
+export interface LoginPagePublicInput {
+  readonly error?: unknown;
+  readonly request_id?: unknown;
+}
 
 export interface LoginPageModelDependencies {
   readonly loadConfig: () => {
@@ -89,12 +94,19 @@ const LEGACY_RECOVERY_STATES: Readonly<Record<string, RecoveryState>> = Object.f
   active_authority: "SESSION_REVOKED",
 });
 
+const CANONICAL_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const RATE_LIMIT_RETRY_AFTER_SECONDS = 30;
+
 function publicRecoveryState(input: unknown): RecoveryState | null {
   if (typeof input !== "string") return null;
   if ((RECOVERY_STATES as readonly string[]).includes(input)) {
     return input as RecoveryState;
   }
   return LEGACY_RECOVERY_STATES[input] ?? null;
+}
+
+function publicRequestId(input: unknown): string | null {
+  return typeof input === "string" && CANONICAL_UUID_V4.test(input) ? input : null;
 }
 
 function exactCookie(headers: Headers, name: string): string | null {
@@ -129,25 +141,31 @@ function render(
   state: RecoveryState | null,
   authority: RecoveryAuthority | null,
   csrfToken: string | null,
-  staleCookieHeaders: readonly string[],
+  requestId: string | null,
 ): LoginPageModel {
-  const actions = state === null
+  const selectedActions = state === null
     ? Object.freeze([RECOVERY_ACTION_DESCRIPTORS.START_NORMAL_LOGIN])
     : resolveRecoveryActions({ state, authority });
+  const actions = requestId === null
+    ? Object.freeze(selectedActions.filter((action) => action.id !== "COPY_REQUEST_ID"))
+    : selectedActions;
   return Object.freeze({
     kind: "RENDER",
     state,
     actions,
     csrfToken,
-    staleCookieHeaders: Object.freeze([...staleCookieHeaders]),
+    requestId,
+    retryAfterSeconds: state === "RATE_LIMITED" ? RATE_LIMIT_RETRY_AFTER_SECONDS : null,
   });
 }
 
-export async function resolveLoginPageModel(
+async function resolveLoginPageModelInternal(
   headers: Headers,
   requestedError: unknown,
-  dependencies: LoginPageModelDependencies = modelProductionDependencies,
+  requestedRequestId: unknown,
+  dependencies: LoginPageModelDependencies,
 ): Promise<LoginPageModel> {
+  const requestId = publicRequestId(requestedRequestId);
   try {
     const config = dependencies.loadConfig();
     const pool = dependencies.getPool(config.databaseUrl);
@@ -157,11 +175,12 @@ export async function resolveLoginPageModel(
     if (inspected.activeKind === "WEB_SESSION") {
       const route = await dependencies.resolveWebRoute(headers);
       if (route.kind === "UNAVAILABLE") {
-        return render("PROVIDER_UNAVAILABLE", null, null, []);
+        return render("PROVIDER_UNAVAILABLE", null, null, requestId);
       }
       if (route.kind === "NOT_CURRENT") {
-        const clears = [...inspected.staleCookieHeaders, clearedWebSessionCookie()];
-        return render("SESSION_REVOKED", null, null, [...new Set(clears)]);
+        // Cookie clearing is action-time only: the transaction endpoint
+        // revalidates this authority and performs its canonical 307 replay.
+        return render("SESSION_REVOKED", null, null, requestId);
       }
       if (route.decision === "ADMIN") return Object.freeze({ kind: "REDIRECT", destination: "/admin" });
       return Object.freeze({ kind: "REDIRECT", destination: "/home" });
@@ -182,10 +201,27 @@ export async function resolveLoginPageModel(
     const csrfToken = authority === null || rawCredential === null
       ? null
       : deriveCsrfCredential(rawCredential, config.sessionPepper);
-    return render(state, authority, csrfToken, inspected.staleCookieHeaders);
+    return render(state, authority, csrfToken, requestId);
   } catch {
-    return render("PROVIDER_UNAVAILABLE", null, null, []);
+    return render("PROVIDER_UNAVAILABLE", null, null, requestId);
   }
+}
+
+export async function resolveLoginPageViewModel(
+  headers: Headers,
+  input: LoginPagePublicInput,
+  dependencies: LoginPageModelDependencies = modelProductionDependencies,
+): Promise<LoginPageModel> {
+  return resolveLoginPageModelInternal(headers, input.error, input.request_id, dependencies);
+}
+
+/** @deprecated Prefer resolveLoginPageViewModel at the page boundary. */
+export async function resolveLoginPageModel(
+  headers: Headers,
+  requestedError: unknown,
+  dependencies: LoginPageModelDependencies = modelProductionDependencies,
+): Promise<LoginPageModel> {
+  return resolveLoginPageModelInternal(headers, requestedError, null, dependencies);
 }
 
 export function resolveLoginPageError(

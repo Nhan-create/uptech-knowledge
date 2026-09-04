@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveLoginPageModel, type LoginPageModelDependencies } from "./login-page-authority.ts";
+import {
+  resolveLoginPageModel,
+  resolveLoginPageViewModel,
+  type LoginPageModelDependencies,
+} from "./login-page-authority.ts";
 import { RECOVERY_OPERATION_FAMILIES, RECOVERY_STATES, type RecoveryAuthority, type RecoveryState } from "./recovery-actions.ts";
 import { deriveCsrfCredential, ONBOARDING_COOKIE_NAME } from "./google/crypto.ts";
 import { WEB_SESSION_COOKIE_NAME } from "../sessions/session-security.ts";
-import { clearedWebSessionCookie } from "./web-session.ts";
 import { inspectBrowserAuthority } from "./browser-authority.ts";
 
 const PEPPER = new Uint8Array(32).fill(0x41);
@@ -37,7 +40,56 @@ test("ordinary login is a closed render model with only normal login", async () 
   assert.equal(model.state, null);
   assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN"]);
   assert.equal(model.csrfToken, null);
-  assert.deepEqual(model.staleCookieHeaders, []);
+  assert.equal(model.requestId, null);
+  assert.equal(model.retryAfterSeconds, null);
+  assert.equal("staleCookieHeaders" in model, false);
+});
+
+test("page-facing input returns only one canonical UUID v4", async () => {
+  const valid = "772f7828-5e72-40d5-a6ba-096d7e09a3ce";
+  for (const [request_id, expected] of [
+    [valid, valid],
+    ["772f7828-5e72-10d5-a6ba-096d7e09a3ce", null],
+    ["772F7828-5E72-40D5-A6BA-096D7E09A3CE", null],
+    [[valid, "00000000-0000-4000-8000-000000000001"], null],
+    [{ value: valid }, null],
+  ] as const) {
+    const model = await resolveLoginPageViewModel(new Headers(), { request_id }, deps());
+    assert.equal(model.kind, "RENDER");
+    assert.equal(model.requestId, expected);
+  }
+});
+
+test("internal error exposes copy only when a validated request ID exists", async () => {
+  const requestId = "772f7828-5e72-40d5-a6ba-096d7e09a3ce";
+  const withId = await resolveLoginPageViewModel(new Headers(), {
+    error: "INTERNAL_ERROR",
+    request_id: requestId,
+  }, deps());
+  assert.deepEqual(actionIds(withId), ["START_NORMAL_LOGIN", "COPY_REQUEST_ID"]);
+
+  const withoutId = await resolveLoginPageViewModel(new Headers(), {
+    error: "INTERNAL_ERROR",
+  }, deps());
+  assert.deepEqual(actionIds(withoutId), ["START_NORMAL_LOGIN"]);
+});
+
+test("only rate limiting receives a fixed server-owned positive cooldown", async () => {
+  const rateLimited = await resolveLoginPageViewModel(new Headers(), {
+    error: "RATE_LIMITED",
+    retry_after_seconds: 999_999,
+  } as never, deps());
+  assert.equal(rateLimited.kind, "RENDER");
+  assert.equal(typeof rateLimited.retryAfterSeconds, "number");
+  assert.ok((rateLimited.retryAfterSeconds ?? 0) > 0);
+  assert.ok((rateLimited.retryAfterSeconds ?? Infinity) < 300);
+
+  const internal = await resolveLoginPageViewModel(new Headers(), {
+    error: "INTERNAL_ERROR",
+    retry_after_seconds: 999_999,
+  } as never, deps());
+  assert.equal(internal.kind, "RENDER");
+  assert.equal(internal.retryAfterSeconds, null);
 });
 
 const legacyMappings: Readonly<Record<string, RecoveryState>> = {
@@ -72,7 +124,7 @@ test("all uppercase states and legacy callback keys map through the closed regis
   }
 });
 
-test("current Web roles redirect only to fixed destinations and non-current authority clears without a login loop", async () => {
+test("current Web roles redirect only to fixed destinations and stale authority exposes no cookie header", async () => {
   for (const [route, destination] of [["ADMIN", "/admin"], ["ALLOW", "/home"]] as const) {
     const model = await resolveLoginPageModel(new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${RAW}` }), undefined, deps({
       inspectAuthority: async () => ({ ...inspection(), active: true, activeKind: "WEB_SESSION" }),
@@ -85,7 +137,7 @@ test("current Web roles redirect only to fixed destinations and non-current auth
   }));
   assert.equal(stale.kind, "RENDER");
   assert.equal(stale.state, "SESSION_REVOKED");
-  assert.deepEqual(stale.staleCookieHeaders, [clearedWebSessionCookie()]);
+  assert.equal("staleCookieHeaders" in stale, false);
   assert.deepEqual(actionIds(stale), ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"]);
   const afterClear = await resolveLoginPageModel(new Headers(), undefined, deps());
   assert.equal(afterClear.kind, "RENDER");
@@ -127,7 +179,6 @@ test("unrecognized onboarding family removes authority and CSRF", async () => {
 });
 
 test("real duplicate values and canonical authenticator failure never derive capability", async () => {
-  const clear = `${ONBOARDING_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   for (const [cookie, authenticatedContext] of [
     [`${ONBOARDING_COOKIE_NAME}=${RAW}; ${ONBOARDING_COOKIE_NAME}=${"B".repeat(43)}`, null],
     [`${ONBOARDING_COOKIE_NAME}=${RAW}`, null],
@@ -144,7 +195,7 @@ test("real duplicate values and canonical authenticator failure never derive cap
     }));
     assert.equal(model.kind, "RENDER");
     assert.equal(model.csrfToken, null);
-    assert.deepEqual(model.staleCookieHeaders, [clear]);
+    assert.equal("staleCookieHeaders" in model, false);
     assert.deepEqual(actionIds(model), ["SWITCH_GOOGLE_ACCOUNT"]);
   }
 });
@@ -168,8 +219,8 @@ test("runtime or database uncertainty returns unavailable without capability", a
 
 test("serialized result excludes raw credentials and every hostile query field", async () => {
   const hostile = "attacker@example.com/customer/tenant/javascript:alert(1)/OWNER/FIRST_DOMAIN_CLAIM_COMPLETE";
-  const model = await resolveLoginPageModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }),
-    { error: "UNKNOWN_WORKSPACE", action: hostile, returnUrl: hostile, tenant: hostile, domain: hostile, email: hostile, role: hostile, method: hostile },
+  const model = await resolveLoginPageViewModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }),
+    { error: "UNKNOWN_WORKSPACE", request_id: hostile, action: hostile, returnUrl: hostile, tenant: hostile, domain: hostile, email: hostile, role: hostile, method: hostile } as never,
     deps({ inspectAuthority: async () => inspection(authority(RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN)) }));
   const serialized = JSON.stringify(model);
   assert.equal(serialized.includes(RAW), false);
@@ -177,4 +228,14 @@ test("serialized result excludes raw credentials and every hostile query field",
   assert.equal(serialized.includes("FIRST_DOMAIN_CLAIM_COMPLETE"), false);
   assert.equal(model.kind, "RENDER");
   assert.equal(model.state, "UNKNOWN_WORKSPACE");
+  assert.equal(model.requestId, null);
+  assert.deepEqual(JSON.parse(serialized), model);
+  const keys = new Set<string>();
+  JSON.parse(serialized, (key, value) => {
+    keys.add(key);
+    return value;
+  });
+  for (const forbidden of ["cookie", "headers", "staleCookieHeaders", "authority", "operations", "workspaceId", "customerId", "tenantId", "destination"]) {
+    assert.equal(keys.has(forbidden), false, forbidden);
+  }
 });
