@@ -21,6 +21,22 @@ export class BootstrapCommitUnknownError extends Error {
   constructor() { super("Google Workspace bootstrap database outcome is unknown"); }
 }
 
+export type GoogleWorkspaceBootstrapStartAdmissionResult = Readonly<{
+  outcome: "ADMITTED" | "RATE_LIMITED" | "DENIED";
+}>;
+
+export type GoogleWorkspaceBootstrapStartAdmission = (input: Readonly<{
+  networkHmac: Uint8Array;
+  requestId: string;
+}>) => Promise<GoogleWorkspaceBootstrapStartAdmissionResult>;
+
+const ADMIT_START_SQL = `SELECT result.outcome::text AS outcome
+FROM uptech.admit_google_workspace_bootstrap_start_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
 const PREPARE_SQL = `SELECT result.outcome::text AS outcome
 FROM uptech.prepare_google_workspace_bootstrap_v1(
   $1::uuid,$2::uptech.google_auth_hash32_v1,$3::uuid,
@@ -80,10 +96,28 @@ async function unknownBoundary<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
+export function createGoogleWorkspaceBootstrapStartAdmission(
+  pool: Pick<DatabasePool, "query">,
+): GoogleWorkspaceBootstrapStartAdmission {
+  return (input: Parameters<GoogleWorkspaceBootstrapStartAdmission>[0]) => unknownBoundary(async () => {
+    if (!(input.networkHmac instanceof Uint8Array) || input.networkHmac.byteLength !== 32 ||
+        !CANONICAL_UUID.test(input.requestId)) {
+      throw new BootstrapCommitUnknownError();
+    }
+    const row = one((await pool.query(ADMIT_START_SQL, [
+      bytes(input.networkHmac), input.requestId,
+    ])).rows as QueryResultRow[]);
+    return {
+      outcome: outcomeOnly(row, ["ADMITTED", "RATE_LIMITED", "DENIED"]) as
+        GoogleWorkspaceBootstrapStartAdmissionResult["outcome"],
+    };
+  });
+}
+
 export function createGoogleWorkspaceBootstrapRepository(
   pool: Pick<DatabasePool, "query">,
 ): GoogleWorkspaceBootstrapRepository {
-  return Object.freeze({
+  const implementation: GoogleWorkspaceBootstrapRepository = {
     prepare: (input) => unknownBoundary(async () => {
       const row = one((await pool.query(PREPARE_SQL, [
         input.attemptId, bytes(input.sourceTokenHash), input.candidateWorkspaceId,
@@ -120,5 +154,6 @@ export function createGoogleWorkspaceBootstrapRepository(
       ])).rows as QueryResultRow[]);
       return { outcome: outcomeOnly(row, ["ABORTED", "UNKNOWN"]) as "ABORTED" | "UNKNOWN" };
     }),
-  });
+  };
+  return Object.freeze(implementation);
 }

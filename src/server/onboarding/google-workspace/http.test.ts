@@ -16,9 +16,11 @@ const STATUS = issueOpaqueProof();
 const SETUP = "1.AAAAAAAAAAAAAAAA.ciphertext.BBBBBBBBBBBBBBBBBBBBBB";
 const PEPPER = new Uint8Array(32).fill(9);
 const AUTHORIZATION = new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
+const NETWORK_HMAC = new Uint8Array(32).fill(4);
 
 function fixture() {
   const calls: unknown[] = [];
+  const admissions: unknown[] = [];
   const service = {
     async initiate(input: { readonly onboardingCredential: string; readonly requestId: string }) {
       calls.push(input);
@@ -38,10 +40,12 @@ function fixture() {
     loadRuntime: () => ({
       appOrigin: APP_ORIGIN,
       sessionPepper: PEPPER,
+      async admitStart(input) { admissions.push(input); return { outcome: "ADMITTED" as const }; },
       service,
     }),
+    networkHmac: () => NETWORK_HMAC,
   };
-  return { calls, dependencies, service };
+  return { admissions, calls, dependencies, service };
 }
 
 function startRequest(cookie = `__Host-uptech_onboarding=${ONBOARDING}`, headers: Record<string, string> = {}) {
@@ -79,6 +83,44 @@ test("setup POST accepts only the derived same-origin authority and redirects to
   assert.match(response.headers.get("set-cookie") ?? "", new RegExp(`^${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=`));
   assert.match(response.headers.get("set-cookie") ?? "", /Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=600/u);
   assert.deepEqual(fixtureValue.calls, [{ onboardingCredential: ONBOARDING, requestId: REQUEST_ID }]);
+  assert.deepEqual(fixtureValue.admissions, [{ networkHmac: NETWORK_HMAC, requestId: REQUEST_ID }]);
+  assertSafe(response);
+});
+
+test("setup POST rate-limit admission runs before and can prevent all service/provider work", async () => {
+  for (const [outcome, status] of [["RATE_LIMITED", 429], ["DENIED", 403]] as const) {
+    const f = fixture();
+    const dependencies = { ...f.dependencies, loadRuntime: () => ({
+      appOrigin: APP_ORIGIN,
+      sessionPepper: PEPPER,
+      admitStart: async () => ({ outcome }),
+      service: f.service,
+    }) } satisfies BootstrapHttpDependencies;
+    const response = await createGoogleWorkspaceBootstrapPost(dependencies)(startRequest());
+    assert.equal(response.status, status);
+    assert.equal(f.calls.length, 0);
+    assertSafe(response);
+  }
+  const f = fixture();
+  const uncertainDependencies = { ...f.dependencies, loadRuntime: () => ({
+    appOrigin: APP_ORIGIN,
+    sessionPepper: PEPPER,
+    async admitStart() { throw new Error("database uncertainty"); },
+    service: f.service,
+  }) } satisfies BootstrapHttpDependencies;
+  const response = await createGoogleWorkspaceBootstrapPost(uncertainDependencies)(startRequest());
+  assert.equal(response.status, 503);
+  assert.equal(f.calls.length, 0);
+  assertSafe(response);
+});
+
+test("callback runtime-load uncertainty is a terminal no-store problem that clears setup", async () => {
+  const f = fixture();
+  const dependencies = { ...f.dependencies, loadRuntime: () => { throw new Error("runtime unavailable"); } };
+  const response = await createGoogleWorkspaceBootstrapCallbackGet(dependencies)(callbackRequest());
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.has("location"), false);
+  assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`) && cookie.includes("Max-Age=0")));
   assertSafe(response);
 });
 
@@ -88,6 +130,7 @@ test("setup POST rejects missing or duplicate authority, setup/session coexisten
     startRequest(`__Host-uptech_onboarding=${ONBOARDING}; __Host-uptech_onboarding=${ONBOARDING}`),
     startRequest(`__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`),
     startRequest(`__Host-uptech_onboarding=${ONBOARDING}; __Host-uptech_session=${issueOpaqueProof()}`),
+    startRequest(undefined, { authorization: "Bearer browser-authority" }),
     startRequest(undefined, { origin: "https://evil.example" }),
     startRequest(undefined, { "sec-fetch-site": "same-site" }),
     startRequest(undefined, { "x-csrf-token": issueOpaqueProof() }),
@@ -139,14 +182,63 @@ test("callback success clears setup, replaces onboarding with status authority, 
   assertSafe(response);
 });
 
+test("callback enforces the 4,500-byte setup-cookie boundary", async () => {
+  const accepted = fixture();
+  const acceptedResponse = await createGoogleWorkspaceBootstrapCallbackGet(accepted.dependencies)(
+    callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${"A".repeat(4_500)}`),
+  );
+  assert.equal(acceptedResponse.status, 303);
+  assert.equal(accepted.calls.length, 1);
+
+  const rejected = fixture();
+  const rejectedResponse = await createGoogleWorkspaceBootstrapCallbackGet(rejected.dependencies)(
+    callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${"A".repeat(4_501)}`),
+  );
+  assert.equal(new URL(rejectedResponse.headers.get("location")!).pathname, "/login");
+  assert.equal(rejected.calls.length, 0);
+  assertSafe(rejectedResponse);
+});
+
+test("callback rejects expired and over-24-hour status authority", async () => {
+  const now = new Date("2030-01-01T00:00:00.000Z");
+  for (const statusExpiresAt of [now, new Date(now.getTime() + 86_401_000)]) {
+    const f = fixture();
+    f.service.callback = async () => ({ outcome: "PROVISIONING", statusCredential: STATUS, statusExpiresAt });
+    const response = await createGoogleWorkspaceBootstrapCallbackGet({ ...f.dependencies, now: () => now })(callbackRequest());
+    const location = new URL(response.headers.get("location")!);
+    assert.equal(location.pathname, "/login");
+    assert.equal(location.searchParams.get("error"), "PROVIDER_UNAVAILABLE");
+    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
+    assertSafe(response);
+  }
+});
+
+test("a replayed callback denial never republishes status authority", async () => {
+  const f = fixture();
+  let attempts = 0;
+  f.service.callback = async () => {
+    attempts += 1;
+    if (attempts === 2) throw Object.assign(new Error("consumed"), { code: "ONBOARDING_EXPIRED" });
+    return { outcome: "PROVISIONING", statusCredential: STATUS, statusExpiresAt: new Date(Date.now() + 60_000) };
+  };
+  assert.equal((await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(callbackRequest())).headers.get("location"), `${APP_ORIGIN}/setup/provisioning`);
+  const replay = await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(callbackRequest());
+  assert.equal(new URL(replay.headers.get("location")!).pathname, "/login");
+  assert.equal(replay.headers.getSetCookie().some((cookie) => cookie.startsWith(`__Host-uptech_onboarding=${STATUS};`)), false);
+  assertSafe(replay);
+});
+
 test("callback rejects malformed cookies and arbitrary or overlong Google query input while always clearing setup", async () => {
   for (const request of [
     callbackRequest("?code=ok&state=" + issueOpaqueProof() + "&tenant_id=caller-controlled"),
     callbackRequest("?code=ok&code=duplicate&state=" + issueOpaqueProof()),
     callbackRequest("?code=" + "x".repeat(4_097) + "&state=" + issueOpaqueProof()),
     callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}`),
+    callbackRequest(undefined, `${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`),
     callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}; __Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`),
+    callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`),
     callbackRequest(undefined, `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}; __Host-uptech_session=${issueOpaqueProof()}`),
+    new Request(`${APP_ORIGIN}/api/v1/onboarding/google-workspace/callback?code=ok&state=${issueOpaqueProof()}`, { headers: { cookie: `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`, authorization: "Bearer browser-authority" } }),
   ]) {
     const f = fixture();
     const response = await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(request);

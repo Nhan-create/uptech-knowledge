@@ -16,6 +16,7 @@ BEGIN
     ('google_workspace_bootstrap_complete_outcome_v1', ARRAY['PROVISIONING','DENIED']::text[]),
     ('google_workspace_bootstrap_reconcile_outcome_v1', ARRAY['COMMITTED','NOT_COMMITTED','UNKNOWN']::text[]),
     ('google_workspace_bootstrap_abort_outcome_v1', ARRAY['ABORTED','UNKNOWN']::text[]),
+    ('google_workspace_bootstrap_start_admission_outcome_v1', ARRAY['ADMITTED','RATE_LIMITED','DENIED']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
       'UNKNOWN_WORKSPACE','USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT',
@@ -54,7 +55,9 @@ BEGIN
     ('google_workspace_bootstrap_reconcile_result_v1', ARRAY['outcome']::text[],
       ARRAY['uptech.google_workspace_bootstrap_reconcile_outcome_v1']::text[]),
     ('google_workspace_bootstrap_abort_result_v1', ARRAY['outcome']::text[],
-      ARRAY['uptech.google_workspace_bootstrap_abort_outcome_v1']::text[])
+      ARRAY['uptech.google_workspace_bootstrap_abort_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_start_admission_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_start_admission_outcome_v1']::text[])
   ) AS required(type_name, attribute_names, attribute_types)
   WHERE required.attribute_names IS DISTINCT FROM (
     SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum)
@@ -227,6 +230,7 @@ $verify$;
 DO $verify$
 DECLARE
   object_oid oid;
+  routine_definition text;
 BEGIN
   FOREACH object_oid IN ARRAY ARRAY[
     'uptech.onboarding_operations_are_unique_v1(text[])'::regprocedure::oid,
@@ -271,6 +275,40 @@ BEGIN
       RAISE EXCEPTION 'Task 2 table % has non-owner grants or lacks owner grants', object_oid::regclass;
     END IF;
   END LOOP;
+
+  object_oid := 'uptech.admit_google_workspace_bootstrap_start_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid = object_oid
+      AND procedure_row.prokind = 'f'
+      AND procedure_row.provolatile = 'v'
+      AND procedure_row.prosecdef
+      AND procedure_row.proowner = 'uptech_migration_owner'::regrole::oid
+      AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, uptech']::text[]
+  ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime', object_oid, 'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime', object_oid, 'EXECUTE')
+    OR EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+        procedure_row.proacl, pg_catalog.acldefault('f', procedure_row.proowner))) AS acl
+      WHERE procedure_row.oid = object_oid
+        AND (acl.privilege_type <> 'EXECUTE'
+          OR acl.grantee NOT IN (
+            'uptech_migration_owner'::regrole::oid,
+            'uptech_api_runtime'::regrole::oid
+          ))
+    )
+  THEN
+    RAISE EXCEPTION 'bootstrap start admission has wrong signature/definer/search_path/runtime grants';
+  END IF;
+
+  routine_definition := pg_catalog.pg_get_functiondef(object_oid);
+  IF pg_catalog.strpos(routine_definition, 'GOOGLE_AUTH') = 0
+    OR pg_catalog.strpos(routine_definition, 'UPTECH_GOOGLE_AUTH_RATE_LIMIT_AUDIT_V1') = 0
+    OR pg_catalog.strpos(routine_definition, 'ON CONFLICT') = 0
+  THEN
+    RAISE EXCEPTION 'bootstrap start admission does not reuse the concurrency-safe GOOGLE_AUTH limiter';
+  END IF;
 END
 $verify$;
 

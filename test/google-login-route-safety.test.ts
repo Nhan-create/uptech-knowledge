@@ -15,6 +15,8 @@ let runtimeCreationError: Error | null = null;
 let webSessionResult: unknown = new WebSessionAuthenticationError("stale");
 let bootstrapInitiateResult: unknown;
 let bootstrapCallbackResult: unknown;
+let bootstrapAdmissionResult: unknown = { outcome: "ADMITTED" };
+const bootstrapAdmissionInputs: unknown[] = [];
 const bootstrapPepper = new Uint8Array(32).fill(7);
 
 mock.module("@/server/auth/web-session", {
@@ -33,6 +35,7 @@ mock.module("@/server/auth/google/config", {
       return {
         appOrigin,
         sessionPepper: bootstrapPepper,
+        rateHmacKey: new Uint8Array(32).fill(11),
       };
     },
     loadWebSessionRuntimeConfig() {
@@ -48,6 +51,11 @@ mock.module("@/server/onboarding/google-workspace/runtime", {
   namedExports: {
     createConfiguredGoogleWorkspaceBootstrapRuntime() {
       return {
+        async admitStart(input: unknown) {
+          bootstrapAdmissionInputs.push(input);
+          if (bootstrapAdmissionResult instanceof Error) throw bootstrapAdmissionResult;
+          return bootstrapAdmissionResult;
+        },
         service: {
           async initiate() {
             if (bootstrapInitiateResult instanceof Error) throw bootstrapInitiateResult;
@@ -312,6 +320,11 @@ test("Workspace bootstrap adapters expose only the guarded POST and callback GET
   assert.equal(start.status, 303);
   assert.equal(start.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
   assert.match(start.headers.get("set-cookie") ?? "", /__Host-uptech_workspace_setup_tx=/u);
+  assert.equal(bootstrapAdmissionInputs.length, 1);
+  const admission = bootstrapAdmissionInputs[0] as { readonly networkHmac: Uint8Array; readonly requestId: string };
+  assert.equal(admission.networkHmac.byteLength, 32);
+  assert.notEqual(Buffer.from(admission.networkHmac).toString("utf8"), trustedHeaders["x-vercel-forwarded-for"]);
+  assert.equal(admission.requestId, requestId);
 
   bootstrapCallbackResult = {
     outcome: "PROVISIONING",

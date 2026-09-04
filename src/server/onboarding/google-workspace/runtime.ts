@@ -13,7 +13,11 @@ import {
 } from "../../secrets/core.ts";
 import { createGoogleCloudSecretManagerRegistration } from "../../secrets/google-cloud-secret-manager.ts";
 import { createConfiguredGoogleDirectoryProductionWorker } from "../../../worker/google-directory-production.ts";
-import { createGoogleWorkspaceBootstrapRepository } from "./repository.ts";
+import {
+  createGoogleWorkspaceBootstrapRepository,
+  createGoogleWorkspaceBootstrapStartAdmission,
+  type GoogleWorkspaceBootstrapStartAdmission,
+} from "./repository.ts";
 import {
   reportGoogleWorkspaceBootstrapOperationalEvent,
   type GoogleWorkspaceBootstrapOperationalReporter,
@@ -35,6 +39,7 @@ interface ZeroInputDirectoryWorker {
 }
 
 export interface GoogleWorkspaceBootstrapRuntime {
+  readonly admitStart: GoogleWorkspaceBootstrapStartAdmission;
   readonly service: GoogleWorkspaceBootstrapService;
   readonly runDirectoryWorker: () => Promise<unknown>;
 }
@@ -103,6 +108,7 @@ export function createConfiguredGoogleWorkspaceBootstrapRuntime(
   });
 
   return Object.freeze({
+    admitStart: createGoogleWorkspaceBootstrapStartAdmission(pool),
     service,
     async runDirectoryWorker() {
       const worker = composition.createDirectoryWorker(environment);

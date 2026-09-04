@@ -1375,4 +1375,96 @@ REVOKE ALL ON uptech.google_workspace_bootstrap_attempts,
   uptech.workspace_access_requests
   FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+CREATE TYPE uptech.google_workspace_bootstrap_start_admission_outcome_v1 AS ENUM (
+  'ADMITTED', 'RATE_LIMITED', 'DENIED'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_start_admission_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_start_admission_outcome_v1
+);
+
+CREATE FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
+  p_network_hmac uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_start_admission_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz := pg_catalog.clock_timestamp();
+  window_start timestamptz;
+  active_environment uptech.google_auth_ascii_identifier_v1;
+  audit_hmac_key uptech.google_auth_hash32_v1;
+  audit_bucket_key uptech.google_auth_hash32_v1;
+  is_rate_limited boolean;
+BEGIN
+  IF p_network_hmac IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_start_admission_result_v1;
+  END IF;
+
+  SELECT environment_name, rate_limit_audit_hmac_key
+  INTO STRICT active_environment, audit_hmac_key
+  FROM uptech.google_auth_environment_registry
+  WHERE is_active;
+
+  window_start := pg_catalog.to_timestamp(
+    pg_catalog.floor(pg_catalog.date_part('epoch', observed_at) / 60) * 60
+  );
+
+  INSERT INTO uptech.google_auth_rate_limit_buckets (
+    environment_name, bucket_scope, network_hmac, window_started_at,
+    request_count, over_limit_observed, expires_at, updated_at
+  ) VALUES (
+    active_environment, 'GOOGLE_AUTH', p_network_hmac, window_start,
+    1, false, window_start + interval '1 minute', observed_at
+  )
+  ON CONFLICT (environment_name, bucket_scope, network_hmac, window_started_at)
+  DO UPDATE SET
+    request_count = CASE
+      WHEN uptech.google_auth_rate_limit_buckets.request_count < 10
+        THEN uptech.google_auth_rate_limit_buckets.request_count + 1
+      ELSE uptech.google_auth_rate_limit_buckets.request_count
+    END,
+    over_limit_observed =
+      uptech.google_auth_rate_limit_buckets.over_limit_observed
+      OR uptech.google_auth_rate_limit_buckets.request_count >= 10,
+    updated_at = observed_at
+  RETURNING over_limit_observed INTO is_rate_limited;
+
+  IF is_rate_limited THEN
+    audit_bucket_key := uptech.google_auth_hmac_sha256_v1(
+      audit_hmac_key,
+      pg_catalog.convert_to('UPTECH_GOOGLE_AUTH_RATE_LIMIT_AUDIT_V1', 'UTF8')
+      || pg_catalog.int8send(pg_catalog.date_part('epoch', window_start)::bigint)
+      || p_network_hmac
+    );
+    INSERT INTO uptech.platform_audit_events (
+      id, action, target_type, outcome, request_id, metadata, occurred_at,
+      google_auth_rate_limit_audit_key
+    ) VALUES (
+      pg_catalog.gen_random_uuid(), 'GOOGLE_AUTH_RATE_LIMITED', 'GOOGLE_AUTH',
+      'DENIED', p_request_id,
+      pg_catalog.jsonb_build_object('bucket_scope', 'GOOGLE_AUTH'), observed_at,
+      audit_bucket_key
+    )
+    ON CONFLICT (google_auth_rate_limit_audit_key)
+      WHERE google_auth_rate_limit_audit_key IS NOT NULL
+    DO NOTHING;
+    RETURN ROW('RATE_LIMITED')::uptech.google_workspace_bootstrap_start_admission_result_v1;
+  END IF;
+
+  RETURN ROW('ADMITTED')::uptech.google_workspace_bootstrap_start_admission_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
+  uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
+  uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
 COMMIT;

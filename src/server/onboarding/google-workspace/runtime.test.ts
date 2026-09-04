@@ -41,6 +41,9 @@ test("configured bootstrap runtime wires approved authorities and a zero-input w
   const pool = {
     async query(text: string) {
       sql.push(text);
+      if (text.includes("admit_google_workspace_bootstrap_start_v1")) {
+        return { rows: [{ outcome: "ADMITTED" }] };
+      }
       if (text.includes("authenticate_google_workspace_bootstrap_source_v1")) {
         return { rows: [{
           identity_id: IDENTITY_ID,
@@ -153,9 +156,12 @@ test("configured bootstrap runtime wires approved authorities and a zero-input w
     clientSecret: CONFIG.clientSecret,
     redirectUri: `${CONFIG.appOrigin}${GOOGLE_WORKSPACE_BOOTSTRAP_CALLBACK_PATH}`,
   });
-  assert.deepEqual(Object.keys(runtime).sort(), ["runDirectoryWorker", "service"]);
+  assert.deepEqual(Object.keys(runtime).sort(), ["admitStart", "runDirectoryWorker", "service"]);
   assert.equal(JSON.stringify(runtime).includes(Buffer.from(KEY).toString("base64url")), false);
 
+  assert.deepEqual(await runtime.admitStart({
+    networkHmac: new Uint8Array(32).fill(4), requestId: REQUEST_ID,
+  }), { outcome: "ADMITTED" });
   const initiated = await runtime.service.initiate({
     onboardingCredential: SOURCE,
     requestId: REQUEST_ID,
@@ -167,6 +173,7 @@ test("configured bootstrap runtime wires approved authorities and a zero-input w
     now: NOW,
   });
   assert.ok(transaction);
+  assert.match(sql[0]!, /admit_google_workspace_bootstrap_start_v1/u);
   const completed = await runtime.service.callback({
     onboardingCredential: SOURCE,
     callbackSearch: `?code=provider-code&state=${transaction.state}`,

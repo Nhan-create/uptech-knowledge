@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
-import { createGoogleWorkspaceBootstrapRepository } from "../../src/server/onboarding/google-workspace/repository.ts";
+import {
+  createGoogleWorkspaceBootstrapRepository,
+  createGoogleWorkspaceBootstrapStartAdmission,
+} from "../../src/server/onboarding/google-workspace/repository.ts";
 import { createGoogleWorkspaceBootstrapSourceAuthority } from "../../src/server/onboarding/google-workspace/source-authority.ts";
 
 const PREFIX = "uptech_phase1_test";
@@ -47,7 +50,7 @@ const bootstrapFixtures = {
 
 function hash32(byte: number): Buffer { return Buffer.alloc(32, byte); }
 
-async function asApi<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>) => Promise<T>): Promise<T> {
+async function asApi<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -63,7 +66,7 @@ async function asApi<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>
   }
 }
 
-async function asMigrationOwner<T>(operation: (client: Awaited<ReturnType<Pool["connect"]>>) => Promise<T>): Promise<T> {
+async function asMigrationOwner<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -207,6 +210,32 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
   });
 });
 
+test("bootstrap start admission atomically shares the GOOGLE_AUTH ten-per-minute bucket", async () => {
+  const networkHmac = new Uint8Array(32).fill(0x99);
+  await asMigrationOwner((client) => client.query(`
+    INSERT INTO uptech.google_auth_environment_registry(
+      environment_name, rate_limit_audit_hmac_key, is_active
+    ) VALUES ('bootstrap-admission-test', $1::uptech.google_auth_hash32_v1, true)
+  `, [hash32(0x98)]));
+  const outcomes = await Promise.all(Array.from({ length: 11 }, (_, index) =>
+    asApi(async (client) => createGoogleWorkspaceBootstrapStartAdmission(client)({
+      networkHmac,
+      requestId: `99000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    }))));
+  assert.equal(outcomes.filter(({ outcome }) => outcome === "ADMITTED").length, 10);
+  assert.equal(outcomes.filter(({ outcome }) => outcome === "RATE_LIMITED").length, 1);
+  const evidence = await asMigrationOwner((client) => client.query(`
+    SELECT bucket_scope,request_count,over_limit_observed,
+      (SELECT count(*)::int FROM uptech.platform_audit_events
+       WHERE action='GOOGLE_AUTH_RATE_LIMITED' AND target_type='GOOGLE_AUTH'
+         AND metadata=pg_catalog.jsonb_build_object('bucket_scope','GOOGLE_AUTH')) AS audits
+    FROM uptech.google_auth_rate_limit_buckets WHERE network_hmac=$1`, [Buffer.from(networkHmac)]));
+  assert.deepEqual(evidence.rows, [{
+    bucket_scope: "GOOGLE_AUTH", request_count: 10,
+    over_limit_observed: true, audits: 1,
+  }]);
+});
+
 test("API runtime alone authenticates a strictly bound active first-domain source without table access", async () => {
   const source = bootstrapFixtures.abort;
   const authority = await asApi((client) =>
@@ -267,9 +296,9 @@ test("revoked, expired, wrong-operation, and inactive bootstrap sources authenti
       sourceId: `96000000-0000-4000-a000-0000000000${item.suffix}`,
     };
     await seedBootstrapSource({ ...ids, sourceByte: item.byte, subject: `masked-${item.suffix}`, domain: `masked-${item.suffix}.example` });
-    const mutationValues = item.suffix === "34" ? [ids.identityId]
+    const mutationValues: readonly unknown[] = item.suffix === "34" ? [ids.identityId]
       : item.suffix === "35" ? [ids.userId] : [hash32(item.byte)];
-    await asMigrationOwner((client) => client.query(item.mutation, mutationValues));
+    await asMigrationOwner((client) => client.query(item.mutation, [...mutationValues]));
     assert.equal(await asApi((client) => createGoogleWorkspaceBootstrapSourceAuthority(client as never).authenticate({
       credentialHash: hash32(item.byte),
       requiredOperation: "FIRST_DOMAIN_CLAIM_RESERVE",
@@ -392,37 +421,37 @@ test("idempotent prepare retries revalidate every current source authority and c
   const scenarios = [
     {
       label: "revoked source",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, sourceId: string) =>
+      mutate: (client: PoolClient, sourceId: string) =>
         client.query("UPDATE uptech.onboarding_sessions SET status='REVOKED',revoked_at=statement_timestamp() WHERE id=$1", [sourceId]),
     },
     {
       label: "expired source",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, sourceId: string) =>
+      mutate: (client: PoolClient, sourceId: string) =>
         client.query("UPDATE uptech.onboarding_sessions SET expires_at=created_at+interval '1 microsecond' WHERE id=$1", [sourceId]),
     },
     {
       label: "wrong operation family",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, sourceId: string) =>
+      mutate: (client: PoolClient, sourceId: string) =>
         client.query("UPDATE uptech.onboarding_sessions SET allowed_operations=ARRAY['FIRST_DOMAIN_CLAIM_READ'] WHERE id=$1", [sourceId]),
     },
     {
       label: "revoked identity",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, _sourceId: string, identityId: string) =>
+      mutate: (client: PoolClient, _sourceId: string, identityId: string) =>
         client.query("UPDATE uptech.identities SET status='REVOKED' WHERE id=$1", [identityId]),
     },
     {
       label: "suspended user",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, _sourceId: string, _identityId: string, userId: string) =>
+      mutate: (client: PoolClient, _sourceId: string, _identityId: string, userId: string) =>
         client.query("UPDATE uptech.users SET status='SUSPENDED' WHERE id=$1", [userId]),
     },
     {
       label: "occupied candidate workspace",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, _sourceId: string, _identityId: string, _userId: string, candidateWorkspaceId: string) =>
+      mutate: (client: PoolClient, _sourceId: string, _identityId: string, _userId: string, candidateWorkspaceId: string) =>
         client.query("INSERT INTO uptech.workspaces(workspace_id) VALUES ($1)", [candidateWorkspaceId]),
     },
     {
       label: "colliding status hash",
-      mutate: (client: Awaited<ReturnType<Pool["connect"]>>, sourceId: string, identityId: string, _userId: string, _candidateWorkspaceId: string, statusTokenHash: Buffer) =>
+      mutate: (client: PoolClient, sourceId: string, identityId: string, _userId: string, _candidateWorkspaceId: string, statusTokenHash: Buffer) =>
         client.query(`INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
           VALUES (gen_random_uuid(),$1,$2,ARRAY['FIRST_DOMAIN_CLAIM_READ'],statement_timestamp()+interval '20 minutes')`, [identityId, statusTokenHash]),
     },
@@ -458,7 +487,7 @@ test("complete atomically creates the existing identity's tenant authority and n
   const sourceTokenHash = hash32(fixture.sourceByte);
   const statusTokenHash = hash32(0x32);
   const before = await pool.query("SELECT (SELECT count(*)::int FROM uptech.users) AS users,(SELECT count(*)::int FROM uptech.identities) AS identities");
-  const repository = (client: Awaited<ReturnType<Pool["connect"]>>) =>
+  const repository = (client: PoolClient) =>
     createGoogleWorkspaceBootstrapRepository(client as never);
 
   assert.deepEqual(await asApi((client) => repository(client).prepare({
@@ -552,7 +581,7 @@ test("complete accepts a hosted domain proven as a verified secondary or alias",
     const primaryDomain = domainCase.parent ?? "primary-secondary.accepted.example";
     const sourceByte = 0xb0 + index * 2;
     await seedBootstrapSource({ userId, identityId, sourceId, sourceByte, subject: `accepted-${index}-sub`, domain: domainCase.hostedDomain });
-    const repository = (client: Awaited<ReturnType<Pool["connect"]>>) => createGoogleWorkspaceBootstrapRepository(client as never);
+    const repository = (client: PoolClient) => createGoogleWorkspaceBootstrapRepository(client as never);
     assert.deepEqual(await asApi((client) => repository(client).prepare({
       attemptId, sourceTokenHash: hash32(sourceByte), candidateWorkspaceId, statusTokenHash: hash32(sourceByte + 1),
       requestId: `96100000-0000-0000-0000-0000000000${Number(suffix) + 5}`,
@@ -584,7 +613,7 @@ test("complete denies replay of an already committed attempt even when receipt b
   const statusTokenHash = hash32(0xc2);
   const credentialReference = "secretref://google-workspace/committed-replay";
   await seedBootstrapSource(fixture);
-  const repository = (client: Awaited<ReturnType<Pool["connect"]>>) => createGoogleWorkspaceBootstrapRepository(client as never);
+  const repository = (client: PoolClient) => createGoogleWorkspaceBootstrapRepository(client as never);
   assert.deepEqual(await asApi((client) => repository(client).prepare({
     attemptId, sourceTokenHash: hash32(fixture.sourceByte), candidateWorkspaceId, statusTokenHash,
     requestId: "96200000-0000-0000-0000-000000000006",
@@ -611,7 +640,7 @@ test("complete denies mismatched proof without leaving partial tenant authority"
   const fixture = bootstrapFixtures.deny;
   const attemptId = "92000000-0000-0000-0000-000000000024";
   const candidateWorkspaceId = "92000000-0000-0000-0000-000000000025";
-  const repository = (client: Awaited<ReturnType<Pool["connect"]>>) =>
+  const repository = (client: PoolClient) =>
     createGoogleWorkspaceBootstrapRepository(client as never);
   await asApi((client) => repository(client).prepare({
     attemptId,

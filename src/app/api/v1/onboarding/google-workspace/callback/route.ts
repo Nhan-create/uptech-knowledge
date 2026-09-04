@@ -12,12 +12,13 @@ export const maxDuration = 120;
 
 const dependencies: BootstrapHttpDependencies = Object.freeze({
   requestId: requestIdFromHeaders,
+  networkHmac() { throw new Error("callback has no rate-limit input"); },
   loadRuntime() {
     const config = loadGoogleLoginRuntimeConfig();
     return Object.freeze({
       appOrigin: config.appOrigin,
       sessionPepper: config.sessionPepper,
-      service: createConfiguredGoogleWorkspaceBootstrapRuntime().service,
+      ...createConfiguredGoogleWorkspaceBootstrapRuntime(),
     });
   },
 });

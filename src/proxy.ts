@@ -1,4 +1,4 @@
-import { type NextRequest, NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server.js";
 
 import { classifyUnconfiguredRoute } from "@/security/route-containment.mjs";
 
@@ -34,6 +34,7 @@ export function proxy(request: NextRequest) {
       headers: {
         "Cache-Control": "no-store, max-age=0",
         Pragma: "no-cache",
+        "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
         "X-Request-ID": requestId,
       },

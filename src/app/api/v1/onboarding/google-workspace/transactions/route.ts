@@ -1,4 +1,5 @@
 import { loadGoogleLoginRuntimeConfig } from "@/server/auth/google/config";
+import { clientNetworkHmac, trustedVercelClientIp } from "@/server/auth/google/crypto";
 import { requestIdFromHeaders } from "@/server/http/problem";
 import {
   createGoogleWorkspaceBootstrapPost,
@@ -12,12 +13,16 @@ export const maxDuration = 120;
 
 const dependencies: BootstrapHttpDependencies = Object.freeze({
   requestId: requestIdFromHeaders,
+  networkHmac(headers: Headers) {
+    const config = loadGoogleLoginRuntimeConfig();
+    return clientNetworkHmac(trustedVercelClientIp(headers), config.rateHmacKey);
+  },
   loadRuntime() {
     const config = loadGoogleLoginRuntimeConfig();
     return Object.freeze({
       appOrigin: config.appOrigin,
       sessionPepper: config.sessionPepper,
-      service: createConfiguredGoogleWorkspaceBootstrapRuntime().service,
+      ...createConfiguredGoogleWorkspaceBootstrapRuntime(),
     });
   },
 });

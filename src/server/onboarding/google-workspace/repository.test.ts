@@ -5,11 +5,41 @@ import type { QueryResultRow } from "pg";
 import type { SecretReference } from "../../secrets/core.ts";
 import {
   BootstrapCommitUnknownError,
+  createGoogleWorkspaceBootstrapStartAdmission,
   createGoogleWorkspaceBootstrapRepository,
 } from "./repository.ts";
 
 const hash = (value: number) => new Uint8Array(32).fill(value);
 const secret = "gcp-sm:v1:top-secret-reference" as SecretReference;
+
+test("bootstrap start admission calls only the closed v1 network gate", async () => {
+  for (const outcome of ["ADMITTED", "RATE_LIMITED", "DENIED"] as const) {
+    const fake = fakePool([{ outcome }]);
+    const admission = createGoogleWorkspaceBootstrapStartAdmission(fake.pool as never);
+    assert.deepEqual(await admission({
+      networkHmac: hash(7),
+      requestId: "10000000-0000-4000-8000-000000000003",
+    }), { outcome });
+    assert.match(fake.calls[0]!.text, /admit_google_workspace_bootstrap_start_v1/u);
+    assert.deepEqual(fake.calls[0]!.values, [
+      Buffer.from(hash(7)),
+      "10000000-0000-4000-8000-000000000003",
+    ]);
+  }
+});
+
+test("bootstrap start admission fails closed on malformed input, rows, and database uncertainty", async () => {
+  for (const [networkHmac, requestId, rows] of [
+    [new Uint8Array(31), "10000000-0000-4000-8000-000000000003", [{ outcome: "ADMITTED" }]],
+    [hash(7), "browser-value", [{ outcome: "ADMITTED" }]],
+    [hash(7), "10000000-0000-4000-8000-000000000003", [{ outcome: "UNKNOWN" }]],
+    [hash(7), "10000000-0000-4000-8000-000000000003", new Error("database uncertainty")],
+  ] as const) {
+    const fake = fakePool(rows as QueryResultRow[] | Error);
+    const admission = createGoogleWorkspaceBootstrapStartAdmission(fake.pool as never);
+    await assert.rejects(admission({ networkHmac, requestId }), BootstrapCommitUnknownError);
+  }
+});
 
 function fakePool(rows: QueryResultRow[] | Error) {
   const calls: Array<{ text: string; values: readonly unknown[] }> = [];

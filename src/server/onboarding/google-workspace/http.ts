@@ -16,6 +16,7 @@ import {
   type BootstrapServiceErrorCode,
   type GoogleWorkspaceBootstrapService,
 } from "./service.ts";
+import type { GoogleWorkspaceBootstrapStartAdmission } from "./repository.ts";
 
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const MAX_COOKIE_VALUE_BYTES = 4_500;
@@ -48,12 +49,14 @@ const CALLBACK_PARAMETER_LIMITS = new Map<string, number>([
 interface BootstrapHttpRuntime {
   readonly appOrigin: string;
   readonly sessionPepper: Uint8Array;
+  readonly admitStart: GoogleWorkspaceBootstrapStartAdmission;
   readonly service: GoogleWorkspaceBootstrapService;
 }
 
 export interface BootstrapHttpDependencies {
   readonly loadRuntime: () => BootstrapHttpRuntime;
   readonly requestId: (headers: Headers) => string;
+  readonly networkHmac: (headers: Headers) => Uint8Array;
   readonly now?: () => Date;
 }
 
@@ -67,10 +70,11 @@ function responseHeaders(requestId: string): Headers {
   });
 }
 
-function problem(code: ProblemCode, requestId: string): Response {
+function problem(code: ProblemCode, requestId: string, clearSetup = false): Response {
   const document = createSafeProblem(code, requestId);
   const headers = responseHeaders(requestId);
   headers.set("Content-Type", "application/problem+json");
+  if (clearSetup) headers.append("Set-Cookie", setupCookie("", 0));
   return new Response(JSON.stringify(document), { status: document.status, headers });
 }
 
@@ -197,6 +201,11 @@ export function createGoogleWorkspaceBootstrapPost(dependencies: BootstrapHttpDe
       return problem("FORBIDDEN", requestId);
     }
     try {
+      const networkHmac = dependencies.networkHmac(request.headers);
+      const admission = await runtime.admitStart({ networkHmac, requestId });
+      if (admission.outcome === "RATE_LIMITED") return problem("RATE_LIMITED", requestId);
+      if (admission.outcome === "DENIED") return problem("FORBIDDEN", requestId);
+      if (admission.outcome !== "ADMITTED") return problem("PROVIDER_UNAVAILABLE", requestId);
       const result = await runtime.service.initiate({ onboardingCredential, requestId });
       if (!approvedAuthorizationUrl(result.authorizationUrl) || !safeCookieValue(result.transactionCookie)) {
         return problem("PROVIDER_UNAVAILABLE", requestId);
@@ -246,6 +255,7 @@ export function createGoogleWorkspaceBootstrapCallbackGet(dependencies: Bootstra
       response.headers.append("Set-Cookie", onboardingCookie(result.statusCredential, maxAge));
       return response;
     } catch (error) {
+      if (appOrigin === null) return problem("PROVIDER_UNAVAILABLE", requestId, true);
       return callbackFailure(appOrigin, publicError(error), requestId);
     }
   };
