@@ -10,6 +10,7 @@ import type { GoogleOidcClient } from "./oidc.ts";
 import type {
   BeginGoogleLoginInput,
   GoogleLoginAccessState,
+  GoogleLoginCompletionResult,
   GoogleLoginRepository,
 } from "./repository.ts";
 import { createGoogleLoginService } from "./service.ts";
@@ -61,7 +62,7 @@ const oidc: GoogleOidcClient = {
   },
 };
 
-async function callbackFor(completion: unknown) {
+async function callbackFor(completion: GoogleLoginCompletionResult) {
   let transaction: BeginGoogleLoginInput | undefined;
   const repository: GoogleLoginRepository = {
     async begin(input) {
@@ -88,7 +89,7 @@ async function callbackFor(completion: unknown) {
       };
     },
     async complete() {
-      return completion as never;
+      return completion;
     },
     async rejectUnbound() {
       return "RECORDED";
@@ -115,7 +116,7 @@ async function callbackFor(completion: unknown) {
   });
 }
 
-for (const completion of [
+const completions = [
   {
     outcome: "ONBOARDING",
     accessState: "UNKNOWN_WORKSPACE",
@@ -123,8 +124,6 @@ for (const completion of [
       "FIRST_DOMAIN_CLAIM_READ",
       "FIRST_DOMAIN_CLAIM_RESERVE",
       "FIRST_DOMAIN_CLAIM_COMPLETE",
-      "ACCESS_REQUEST_READ",
-      "ACCESS_REQUEST_SUBMIT",
     ],
     expiresAt: new Date("2026-09-01T04:15:00.000Z"),
   },
@@ -151,7 +150,9 @@ for (const completion of [
   { outcome: "DENIED", accessState: "DIRECTORY_SYNC_PENDING" },
   { outcome: "DENIED", accessState: "DIRECTORY_STALE" },
   { outcome: "DENIED", accessState: "WORKSPACE_SUSPENDED" },
-] as const) {
+] as const satisfies readonly GoogleLoginCompletionResult[];
+
+for (const completion of completions) {
   test(`callback returns only the committed ${completion.accessState} authority`, async () => {
     const result = await callbackFor(completion);
     const expectedAccessState: GoogleLoginAccessState = completion.accessState;
