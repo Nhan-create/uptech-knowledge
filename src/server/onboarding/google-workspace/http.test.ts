@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveCsrfCredential, issueOpaqueProof } from "../../auth/google/crypto.ts";
+import { deriveCsrfCredential, hashProof, issueOpaqueProof } from "../../auth/google/crypto.ts";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "./crypto.ts";
 import {
   createGoogleWorkspaceBootstrapCallbackGet,
   createGoogleWorkspaceBootstrapPost,
+  createBootstrapFinishPost,
+  createBootstrapStatusGet,
+  createBootstrapSyncRetryPost,
   type BootstrapHttpDependencies,
+  type BootstrapStatusDependencies,
 } from "./http.ts";
 
 const APP_ORIGIN = "https://knowledge.uptech.example";
@@ -264,4 +268,184 @@ test("callback failures expose only an allowlisted code and server request UUID"
   assert.equal(JSON.stringify([...response.headers]).includes("secret-domain"), false);
   assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
   assertSafe(response);
+});
+
+function recoveryFixture() {
+  const calls: Array<{ readonly operation: string; readonly input: unknown }> = [];
+  let statusOutcome = "DIRECTORY_BOOTSTRAP_SYNC_PENDING";
+  let retryOutcome = "REQUEUED";
+  let finishOutcome = "FINISHED";
+  let loginOutcome: unknown = {
+    outcome: "REDIRECT",
+    authorizationUrl: AUTHORIZATION,
+    loginCookie: SETUP,
+    expiresAt: new Date(Date.now() + 600_000),
+  };
+  const dependencies: BootstrapStatusDependencies = {
+    requestId: () => REQUEST_ID,
+    canonicalClientIp: () => "203.0.113.10",
+    loadRuntime: () => ({
+      appOrigin: APP_ORIGIN,
+      sessionPepper: PEPPER,
+      repository: {
+        async readStatus(input) {
+          calls.push({ operation: "readStatus", input });
+          return { outcome: statusOutcome } as never;
+        },
+        async retrySync(input) {
+          calls.push({ operation: "retrySync", input });
+          return { outcome: retryOutcome } as never;
+        },
+        async finish(input) {
+          calls.push({ operation: "finish", input });
+          return { outcome: finishOutcome } as never;
+        },
+      },
+      normalLoginService: {
+        async initiate(input) {
+          calls.push({ operation: "initiate", input });
+          if (loginOutcome instanceof Error) throw loginOutcome;
+          return loginOutcome as never;
+        },
+      },
+    }),
+  };
+  return {
+    calls,
+    dependencies,
+    setStatus(outcome: string) { statusOutcome = outcome; },
+    setRetry(outcome: string) { retryOutcome = outcome; },
+    setFinish(outcome: string) { finishOutcome = outcome; },
+    setLogin(outcome: unknown) { loginOutcome = outcome; },
+  };
+}
+
+function recoveryRequest(path: "status" | "sync-retry" | "finish", options: {
+  readonly method?: "GET" | "POST";
+  readonly cookie?: string;
+  readonly headers?: Record<string, string>;
+  readonly body?: string;
+  readonly query?: string;
+} = {}) {
+  const method = options.method ?? (path === "status" ? "GET" : "POST");
+  return new Request(`${APP_ORIGIN}/api/v1/onboarding/google-workspace/${path}${options.query ?? ""}`, {
+    method,
+    headers: {
+      cookie: options.cookie ?? `__Host-uptech_onboarding=${STATUS}`,
+      ...(method === "POST" ? {
+        origin: APP_ORIGIN,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": deriveCsrfCredential(STATUS, PEPPER),
+      } : {}),
+      ...options.headers,
+    },
+    body: options.body,
+  });
+}
+
+test("status GET returns only the repository allowlisted public state", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapStatusGet(f.dependencies)(recoveryRequest("status"));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { state: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0]!.operation, "readStatus");
+  const input = f.calls[0]!.input as { readonly statusTokenHash: Uint8Array; readonly requestId: string };
+  assert.deepEqual(input.statusTokenHash, hashProof(STATUS));
+  assert.equal(input.requestId, REQUEST_ID);
+  assertSafe(response);
+});
+
+test("status GET rejects query/body authority and every cookie-family conflict before repository work", async () => {
+  for (const request of [
+    recoveryRequest("status", { cookie: "other=cookie" }),
+    recoveryRequest("status", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_onboarding=${STATUS}` }),
+    recoveryRequest("status", { cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}` }),
+    recoveryRequest("status", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` }),
+    recoveryRequest("status", { headers: { authorization: "Bearer caller-authority" } }),
+    recoveryRequest("status", { query: "?workspace_id=caller-controlled" }),
+  ]) {
+    const f = recoveryFixture();
+    const response = await createBootstrapStatusGet(f.dependencies)(request);
+    assert.ok([400, 401, 403].includes(response.status));
+    assert.equal(f.calls.length, 0);
+    assertSafe(response);
+  }
+});
+
+test("sync retry accepts only bodyless same-origin status authority and maps requeue to pending", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapSyncRetryPost(f.dependencies)(recoveryRequest("sync-retry"));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { state: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.equal(f.calls[0]!.operation, "retrySync");
+  assert.deepEqual((f.calls[0]!.input as { statusTokenHash: Uint8Array }).statusTokenHash, hashProof(STATUS));
+  assertSafe(response);
+
+  for (const request of [
+    recoveryRequest("sync-retry", { headers: { origin: "https://evil.example" } }),
+    recoveryRequest("sync-retry", { headers: { "sec-fetch-site": "same-site" } }),
+    recoveryRequest("sync-retry", { headers: { "x-csrf-token": issueOpaqueProof() } }),
+    recoveryRequest("sync-retry", { body: JSON.stringify({ job_id: "caller-controlled" }) }),
+    recoveryRequest("sync-retry", { query: "?connector_id=caller-controlled" }),
+  ]) {
+    const denied = recoveryFixture();
+    const deniedResponse = await createBootstrapSyncRetryPost(denied.dependencies)(request);
+    assert.ok([400, 403].includes(deniedResponse.status));
+    assert.equal(denied.calls.length, 0);
+    assertSafe(deniedResponse);
+  }
+});
+
+test("closed repository results expose only public expiry or generic unauthorized problems", async () => {
+  const expired = recoveryFixture();
+  expired.setStatus("ONBOARDING_EXPIRED");
+  const expiredResponse = await createBootstrapStatusGet(expired.dependencies)(recoveryRequest("status"));
+  assert.deepEqual(await expiredResponse.json(), { state: "ONBOARDING_EXPIRED" });
+
+  for (const invoke of [
+    (f: ReturnType<typeof recoveryFixture>) => { f.setStatus("DENIED"); return createBootstrapStatusGet(f.dependencies)(recoveryRequest("status")); },
+    (f: ReturnType<typeof recoveryFixture>) => { f.setRetry("DENIED"); return createBootstrapSyncRetryPost(f.dependencies)(recoveryRequest("sync-retry")); },
+  ]) {
+    const f = recoveryFixture();
+    const response = await invoke(f);
+    assert.equal(response.status, 401);
+    assert.equal(JSON.stringify(await response.json()).includes("workspace"), false);
+    assertSafe(response);
+  }
+});
+
+test("finish consumes READY status before starting a fresh normal login and clears transient authority", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapFinishPost(f.dependencies)(recoveryRequest("finish"));
+
+  assert.deepEqual(f.calls.map((call) => call.operation), ["finish", "initiate"]);
+  assert.deepEqual(f.calls[1]!.input, { canonicalClientIp: "203.0.113.10", requestId: REQUEST_ID });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), AUTHORIZATION.href);
+  const cookies = response.headers.getSetCookie();
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_login_tx=")));
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;") && cookie.includes("Max-Age=0")));
+  assert.ok(cookies.some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`) && cookie.includes("Max-Age=0")));
+  assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
+  assertSafe(response);
+});
+
+test("finish never starts login when atomic READY consumption denies or request authority is caller-controlled", async () => {
+  const denied = recoveryFixture();
+  denied.setFinish("DENIED");
+  const deniedResponse = await createBootstrapFinishPost(denied.dependencies)(recoveryRequest("finish"));
+  assert.equal(deniedResponse.status, 401);
+  assert.deepEqual(denied.calls.map((call) => call.operation), ["finish"]);
+
+  for (const key of ["workspace_id", "connector_id", "job_id", "role", "department", "reason", "recipient"]) {
+    const f = recoveryFixture();
+    const response = await createBootstrapFinishPost(f.dependencies)(recoveryRequest("finish", {
+      body: JSON.stringify({ [key]: "caller-controlled" }),
+    }));
+    assert.equal(response.status, 400);
+    assert.equal(f.calls.length, 0);
+  }
 });

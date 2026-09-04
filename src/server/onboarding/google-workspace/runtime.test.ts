@@ -156,7 +156,7 @@ test("configured bootstrap runtime wires approved authorities and a zero-input w
     clientSecret: CONFIG.clientSecret,
     redirectUri: `${CONFIG.appOrigin}${GOOGLE_WORKSPACE_BOOTSTRAP_CALLBACK_PATH}`,
   });
-  assert.deepEqual(Object.keys(runtime).sort(), ["admitStart", "runDirectoryWorker", "service"]);
+  assert.deepEqual(Object.keys(runtime).sort(), ["admitStart", "repository", "runDirectoryWorker", "service"]);
   assert.equal(JSON.stringify(runtime).includes(Buffer.from(KEY).toString("base64url")), false);
 
   assert.deepEqual(await runtime.admitStart({

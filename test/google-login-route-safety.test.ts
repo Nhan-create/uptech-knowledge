@@ -15,8 +15,12 @@ let runtimeCreationError: Error | null = null;
 let webSessionResult: unknown = new WebSessionAuthenticationError("stale");
 let bootstrapInitiateResult: unknown;
 let bootstrapCallbackResult: unknown;
-let bootstrapAdmissionResult: unknown = { outcome: "ADMITTED" };
+const bootstrapAdmissionResult: unknown = { outcome: "ADMITTED" };
 const bootstrapAdmissionInputs: unknown[] = [];
+let bootstrapStatusResult: unknown = { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" };
+let bootstrapRetryResult: unknown = { outcome: "REQUEUED" };
+let bootstrapFinishResult: unknown = { outcome: "FINISHED" };
+const bootstrapRecoveryInputs: Array<{ readonly operation: string; readonly input: unknown }> = [];
 const bootstrapPepper = new Uint8Array(32).fill(7);
 
 mock.module("@/server/auth/web-session", {
@@ -66,6 +70,20 @@ mock.module("@/server/onboarding/google-workspace/runtime", {
             return bootstrapCallbackResult;
           },
         },
+        repository: {
+          async readStatus(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "readStatus", input });
+            return bootstrapStatusResult;
+          },
+          async retrySync(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "retrySync", input });
+            return bootstrapRetryResult;
+          },
+          async finish(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "finish", input });
+            return bootstrapFinishResult;
+          },
+        },
       };
     },
   },
@@ -105,6 +123,9 @@ const callbackRoute = await import("../src/app/api/v1/auth/google/callback/route
 const sessionRoute = await import("../src/app/api/v1/auth/session/route.ts");
 const bootstrapTransactionRoute = await import("../src/app/api/v1/onboarding/google-workspace/transactions/route.ts");
 const bootstrapCallbackRoute = await import("../src/app/api/v1/onboarding/google-workspace/callback/route.ts");
+const bootstrapStatusRoute = await import("../src/app/api/v1/onboarding/google-workspace/status/route.ts");
+const bootstrapRetryRoute = await import("../src/app/api/v1/onboarding/google-workspace/sync-retry/route.ts");
+const bootstrapFinishRoute = await import("../src/app/api/v1/onboarding/google-workspace/finish/route.ts");
 const { issueSessionCredential } = await import("../src/server/sessions/session-security.ts");
 const { deriveCsrfCredential, issueOpaqueProof } = await import("../src/server/auth/google/crypto.ts");
 
@@ -339,4 +360,47 @@ test("Workspace bootstrap adapters expose only the guarded POST and callback GET
   assert.equal(callback.headers.get("location"), `${appOrigin}/setup/provisioning`);
   assert.equal(hasSessionCookie(callback), false);
   assert.ok(callback.headers.getSetCookie().some((cookie) => cookie.startsWith(`__Host-uptech_onboarding=${status};`)));
+});
+
+test("Workspace bootstrap recovery adapters expose only status, same-bound retry, and fresh normal login", async () => {
+  bootstrapRecoveryInputs.length = 0;
+  const statusCredential = issueOpaqueProof();
+  const baseHeaders = {
+    ...trustedHeaders,
+    cookie: `__Host-uptech_onboarding=${statusCredential}`,
+  };
+
+  bootstrapStatusResult = { outcome: "READY" };
+  const statusResponse = await bootstrapStatusRoute.GET(new Request(
+    `${appOrigin}/api/v1/onboarding/google-workspace/status`,
+    { headers: baseHeaders },
+  ));
+  assert.deepEqual(await statusResponse.json(), { state: "READY" });
+
+  bootstrapRetryResult = { outcome: "REQUEUED" };
+  const csrf = deriveCsrfCredential(statusCredential, bootstrapPepper);
+  const retryResponse = await bootstrapRetryRoute.POST(new Request(
+    `${appOrigin}/api/v1/onboarding/google-workspace/sync-retry`,
+    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf } },
+  ));
+  assert.deepEqual(await retryResponse.json(), { state: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+    expiresAt: new Date(Date.now() + 600_000),
+  };
+  bootstrapFinishResult = { outcome: "FINISHED" };
+  const finishResponse = await bootstrapFinishRoute.POST(new Request(
+    `${appOrigin}/api/v1/onboarding/google-workspace/finish`,
+    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf } },
+  ));
+  assert.equal(finishResponse.status, 303);
+  assert.equal(finishResponse.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
+  const cookies = finishResponse.headers.getSetCookie();
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_login_tx=")));
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;") && cookie.includes("Max-Age=0")));
+  assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
+  assert.deepEqual(bootstrapRecoveryInputs.map((entry) => entry.operation), ["readStatus", "retrySync", "finish"]);
 });

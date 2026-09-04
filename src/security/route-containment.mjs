@@ -37,6 +37,9 @@ const DIRECTORY_CONSENT_METHODS = new Map([
 const WORKSPACE_BOOTSTRAP_METHODS = new Map([
   ["/api/v1/onboarding/google-workspace/transactions", "POST"],
   ["/api/v1/onboarding/google-workspace/callback", "GET"],
+  ["/api/v1/onboarding/google-workspace/status", "GET"],
+  ["/api/v1/onboarding/google-workspace/sync-retry", "POST"],
+  ["/api/v1/onboarding/google-workspace/finish", "POST"],
 ]);
 
 const PROTECTED_APPLICATION_PATHS = new Set([

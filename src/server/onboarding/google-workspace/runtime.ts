@@ -16,6 +16,7 @@ import { createConfiguredGoogleDirectoryProductionWorker } from "../../../worker
 import {
   createGoogleWorkspaceBootstrapRepository,
   createGoogleWorkspaceBootstrapStartAdmission,
+  type GoogleWorkspaceBootstrapRepository,
   type GoogleWorkspaceBootstrapStartAdmission,
 } from "./repository.ts";
 import {
@@ -40,6 +41,7 @@ interface ZeroInputDirectoryWorker {
 
 export interface GoogleWorkspaceBootstrapRuntime {
   readonly admitStart: GoogleWorkspaceBootstrapStartAdmission;
+  readonly repository: GoogleWorkspaceBootstrapRepository;
   readonly service: GoogleWorkspaceBootstrapService;
   readonly runDirectoryWorker: () => Promise<unknown>;
 }
@@ -93,6 +95,7 @@ export function createConfiguredGoogleWorkspaceBootstrapRuntime(
       config.appOrigin,
     ).href,
   });
+  const repository = createGoogleWorkspaceBootstrapRepository(pool);
   const service = createGoogleWorkspaceBootstrapService({
     now: composition.now,
     cookieKey: Object.freeze({
@@ -101,7 +104,7 @@ export function createConfiguredGoogleWorkspaceBootstrapRuntime(
       key: config.pkceEncryptionKey,
     }),
     sourceAuthority: createGoogleWorkspaceBootstrapSourceAuthority(pool),
-    repository: createGoogleWorkspaceBootstrapRepository(pool),
+    repository,
     provider,
     secretAdapter,
     report: composition.report ?? reportGoogleWorkspaceBootstrapOperationalEvent,
@@ -109,6 +112,7 @@ export function createConfiguredGoogleWorkspaceBootstrapRuntime(
 
   return Object.freeze({
     admitStart: createGoogleWorkspaceBootstrapStartAdmission(pool),
+    repository,
     service,
     async runDirectoryWorker() {
       const worker = composition.createDirectoryWorker(environment);

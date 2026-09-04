@@ -57,11 +57,20 @@ test("allows only the exact approved auth ingress paths", () => {
 test("allows only the exact Workspace bootstrap methods", () => {
   const start = "/api/v1/onboarding/google-workspace/transactions";
   const callback = "/api/v1/onboarding/google-workspace/callback";
+  const status = "/api/v1/onboarding/google-workspace/status";
+  const retry = "/api/v1/onboarding/google-workspace/sync-retry";
+  const finish = "/api/v1/onboarding/google-workspace/finish";
   assert.equal(classifyUnconfiguredRoute(start, "POST"), "allow-auth-ingress");
   assert.equal(classifyUnconfiguredRoute(callback, "GET"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(status, "GET"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(retry, "POST"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(finish, "POST"), "allow-auth-ingress");
   for (const [pathname, method] of [
     [start, "GET"], [start + "/", "POST"], [start + "/tenant-a", "POST"],
     [callback, "POST"], [callback + "/", "GET"], [callback + "/tenant-a", "GET"],
+    [status, "POST"], [status + "/", "GET"], [status + "/tenant-a", "GET"],
+    [retry, "GET"], [retry + "/", "POST"], [retry + "/tenant-a", "POST"],
+    [finish, "GET"], [finish + "/", "POST"], [finish + "/tenant-a", "POST"],
   ]) {
     assert.equal(classifyUnconfiguredRoute(pathname, method), "deny-unconfigured", `${method} ${pathname}`);
   }

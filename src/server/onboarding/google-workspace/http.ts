@@ -2,9 +2,15 @@ import { timingSafeEqual } from "node:crypto";
 
 import {
   deriveCsrfCredential,
+  hashProof,
   isCanonicalProof,
+  LOGIN_TRANSACTION_COOKIE_NAME,
   ONBOARDING_COOKIE_NAME,
 } from "../../auth/google/crypto.ts";
+import type {
+  GoogleLoginInitiationResult,
+  GoogleLoginService,
+} from "../../auth/google/service.ts";
 import { WEB_SESSION_COOKIE_NAME } from "../../sessions/session-security.ts";
 import {
   createSafeProblem,
@@ -16,7 +22,11 @@ import {
   type BootstrapServiceErrorCode,
   type GoogleWorkspaceBootstrapService,
 } from "./service.ts";
-import type { GoogleWorkspaceBootstrapStartAdmission } from "./repository.ts";
+import type {
+  BootstrapStatusOutcome,
+  GoogleWorkspaceBootstrapRepository,
+  GoogleWorkspaceBootstrapStartAdmission,
+} from "./repository.ts";
 
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const MAX_COOKIE_VALUE_BYTES = 4_500;
@@ -53,11 +63,27 @@ interface BootstrapHttpRuntime {
   readonly service: GoogleWorkspaceBootstrapService;
 }
 
+interface BootstrapStatusRuntime {
+  readonly appOrigin: string;
+  readonly sessionPepper: Uint8Array;
+  readonly repository: Pick<
+    GoogleWorkspaceBootstrapRepository,
+    "readStatus" | "retrySync" | "finish"
+  >;
+  readonly normalLoginService?: Pick<GoogleLoginService, "initiate">;
+}
+
 export interface BootstrapHttpDependencies {
   readonly loadRuntime: () => BootstrapHttpRuntime;
   readonly requestId: (headers: Headers) => string;
   readonly networkHmac: (headers: Headers) => Uint8Array;
   readonly now?: () => Date;
+}
+
+export interface BootstrapStatusDependencies {
+  readonly loadRuntime: () => BootstrapStatusRuntime;
+  readonly requestId: (headers: Headers) => string;
+  readonly canonicalClientIp?: (headers: Headers) => string;
 }
 
 function responseHeaders(requestId: string): Headers {
@@ -118,6 +144,10 @@ function onboardingCookie(value: string, maxAge: number): string {
   return `${ONBOARDING_COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
+function loginTransactionCookie(value: string): string {
+  return `${LOGIN_TRANSACTION_COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`;
+}
+
 function approvedAuthorizationUrl(value: URL): boolean {
   return value instanceof URL &&
     `${value.origin}${value.pathname}` === GOOGLE_AUTHORIZATION_URL &&
@@ -175,6 +205,156 @@ function callbackRedirect(appOrigin: string | null, path: string, requestId: str
 function callbackFailure(appOrigin: string | null, code: BootstrapServiceErrorCode, requestId: string): Response {
   const query = new URLSearchParams({ error: code, request_id: requestId });
   return callbackRedirect(appOrigin, `/login?${query.toString()}`, requestId);
+}
+
+const STATUS_PUBLIC_STATES = new Set<BootstrapStatusOutcome>([
+  "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+  "READY",
+  "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE",
+  "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+  "ONBOARDING_EXPIRED",
+]);
+
+type StatusPublicState = Exclude<BootstrapStatusOutcome, "DENIED">;
+
+function stateResponse(state: StatusPublicState, requestId: string): Response {
+  const headers = responseHeaders(requestId);
+  headers.set("Content-Type", "application/json");
+  return new Response(JSON.stringify({ state }), { status: 200, headers });
+}
+
+function recoveryCredential(
+  request: Request,
+  runtime: BootstrapStatusRuntime,
+  requestId: string,
+  mutating: boolean,
+): { readonly credential: string } | { readonly response: Response } {
+  let url: URL;
+  try { url = new URL(request.url); } catch { return { response: problem("VALIDATION_FAILED", requestId) }; }
+  if (url.search !== "" || url.hash !== "") return { response: problem("VALIDATION_FAILED", requestId) };
+  if (url.origin !== runtime.appOrigin) return { response: problem("FORBIDDEN", requestId) };
+  if (request.body !== null) return { response: problem("VALIDATION_FAILED", requestId) };
+
+  const credential = exactlyOneCookie(request.headers, ONBOARDING_COOKIE_NAME);
+  if (credential === null || !isCanonicalProof(credential)) {
+    return { response: problem("UNAUTHENTICATED", requestId) };
+  }
+  if (!absentCookie(request.headers, GOOGLE_WORKSPACE_SETUP_COOKIE_NAME) ||
+      !absentCookie(request.headers, WEB_SESSION_COOKIE_NAME) ||
+      request.headers.has("authorization")) {
+    return { response: problem("FORBIDDEN", requestId) };
+  }
+  if (mutating && (request.headers.get("origin") !== runtime.appOrigin ||
+      !exactCsrf(request.headers, credential, runtime.sessionPepper))) {
+    return { response: problem("FORBIDDEN", requestId) };
+  }
+  return { credential };
+}
+
+function recoveryFailureRedirect(appOrigin: string, error: string, requestId: string): Response {
+  const location = new URL("/login", appOrigin);
+  location.search = new URLSearchParams({ error, request_id: requestId }).toString();
+  const headers = responseHeaders(requestId);
+  headers.set("Location", location.href);
+  headers.append("Set-Cookie", onboardingCookie("", 0));
+  headers.append("Set-Cookie", setupCookie("", 0));
+  return new Response(null, { status: 303, headers });
+}
+
+export function createBootstrapStatusGet(dependencies: BootstrapStatusDependencies) {
+  return async function GET(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: BootstrapStatusRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, false);
+    if ("response" in authority) return authority.response;
+    try {
+      const result = await runtime.repository.readStatus({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (result.outcome === "DENIED") return problem("UNAUTHENTICATED", requestId);
+      if (!STATUS_PUBLIC_STATES.has(result.outcome)) return problem("PROVIDER_UNAVAILABLE", requestId);
+      return stateResponse(result.outcome, requestId);
+    } catch {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createBootstrapSyncRetryPost(dependencies: BootstrapStatusDependencies) {
+  return async function POST(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: BootstrapStatusRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, true);
+    if ("response" in authority) return authority.response;
+    try {
+      const result = await runtime.repository.retrySync({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (result.outcome === "DENIED") return problem("UNAUTHENTICATED", requestId);
+      const state: BootstrapStatusOutcome = result.outcome === "REQUEUED"
+        ? "DIRECTORY_BOOTSTRAP_SYNC_PENDING"
+        : result.outcome;
+      if (!STATUS_PUBLIC_STATES.has(state)) return problem("PROVIDER_UNAVAILABLE", requestId);
+      return stateResponse(state as StatusPublicState, requestId);
+    } catch {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createBootstrapFinishPost(dependencies: BootstrapStatusDependencies) {
+  return async function POST(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: BootstrapStatusRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, true);
+    if ("response" in authority) return authority.response;
+    if (runtime.normalLoginService === undefined || dependencies.canonicalClientIp === undefined) {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+    let canonicalClientIp: string;
+    try { canonicalClientIp = dependencies.canonicalClientIp(request.headers); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    try {
+      const finished = await runtime.repository.finish({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (finished.outcome !== "FINISHED") return problem("UNAUTHENTICATED", requestId);
+
+      let login: GoogleLoginInitiationResult;
+      try {
+        login = await runtime.normalLoginService.initiate({ canonicalClientIp, requestId });
+      } catch {
+        return recoveryFailureRedirect(runtime.appOrigin, "temporarily_unavailable", requestId);
+      }
+      if (login.outcome !== "REDIRECT") {
+        return recoveryFailureRedirect(
+          runtime.appOrigin,
+          login.outcome === "RATE_LIMITED" ? "rate_limited" : "login_failed",
+          requestId,
+        );
+      }
+      if (!approvedAuthorizationUrl(login.authorizationUrl) || !safeCookieValue(login.loginCookie)) {
+        return recoveryFailureRedirect(runtime.appOrigin, "temporarily_unavailable", requestId);
+      }
+      const headers = responseHeaders(requestId);
+      headers.set("Location", login.authorizationUrl.href);
+      headers.append("Set-Cookie", loginTransactionCookie(login.loginCookie));
+      headers.append("Set-Cookie", onboardingCookie("", 0));
+      headers.append("Set-Cookie", setupCookie("", 0));
+      return new Response(null, { status: 303, headers });
+    } catch {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
 }
 
 export function createGoogleWorkspaceBootstrapPost(dependencies: BootstrapHttpDependencies) {
