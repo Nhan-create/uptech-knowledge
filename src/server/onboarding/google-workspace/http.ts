@@ -68,9 +68,18 @@ interface BootstrapStatusRuntime {
   readonly sessionPepper: Uint8Array;
   readonly repository: Pick<
     GoogleWorkspaceBootstrapRepository,
-    "readStatus" | "retrySync" | "finish"
+    "readStatus" | "retrySync" | "finish" | "revokeCapability"
   >;
   readonly normalLoginService?: Pick<GoogleLoginService, "initiate">;
+}
+
+interface AccessRequestRuntime {
+  readonly appOrigin: string;
+  readonly sessionPepper: Uint8Array;
+  readonly repository: Pick<
+    GoogleWorkspaceBootstrapRepository,
+    "submitAccessRequest" | "readAccessRequest"
+  >;
 }
 
 export interface BootstrapHttpDependencies {
@@ -84,6 +93,11 @@ export interface BootstrapStatusDependencies {
   readonly loadRuntime: () => BootstrapStatusRuntime;
   readonly requestId: (headers: Headers) => string;
   readonly canonicalClientIp?: (headers: Headers) => string;
+}
+
+export interface AccessRequestDependencies {
+  readonly loadRuntime: () => AccessRequestRuntime;
+  readonly requestId: (headers: Headers) => string;
 }
 
 function responseHeaders(requestId: string): Headers {
@@ -225,9 +239,10 @@ function stateResponse(state: StatusPublicState, requestId: string): Response {
 
 function recoveryCredential(
   request: Request,
-  runtime: BootstrapStatusRuntime,
+  runtime: Pick<BootstrapStatusRuntime, "appOrigin" | "sessionPepper">,
   requestId: string,
   mutating: boolean,
+  allowSetupCookie = false,
 ): { readonly credential: string } | { readonly response: Response } {
   let url: URL;
   try { url = new URL(request.url); } catch { return { response: problem("VALIDATION_FAILED", requestId) }; }
@@ -239,7 +254,7 @@ function recoveryCredential(
   if (credential === null || !isCanonicalProof(credential)) {
     return { response: problem("UNAUTHENTICATED", requestId) };
   }
-  if (!absentCookie(request.headers, GOOGLE_WORKSPACE_SETUP_COOKIE_NAME) ||
+  if ((!allowSetupCookie && !absentCookie(request.headers, GOOGLE_WORKSPACE_SETUP_COOKIE_NAME)) ||
       !absentCookie(request.headers, WEB_SESSION_COOKIE_NAME) ||
       request.headers.has("authorization")) {
     return { response: problem("FORBIDDEN", requestId) };
@@ -249,6 +264,18 @@ function recoveryCredential(
     return { response: problem("FORBIDDEN", requestId) };
   }
   return { credential };
+}
+
+function clearOnboardingCookies(response: Response): Response {
+  response.headers.append("Set-Cookie", onboardingCookie("", 0));
+  response.headers.append("Set-Cookie", setupCookie("", 0));
+  return response;
+}
+
+function accessRequestResponse(requestIdValue: string, status: string, requestId: string): Response {
+  const headers = responseHeaders(requestId);
+  headers.set("Content-Type", "application/json");
+  return new Response(JSON.stringify({ request_id: requestIdValue, status }), { status: 200, headers });
 }
 
 function recoveryFailureRedirect(appOrigin: string, error: string, requestId: string): Response {
@@ -351,6 +378,78 @@ export function createBootstrapFinishPost(dependencies: BootstrapStatusDependenc
       headers.append("Set-Cookie", onboardingCookie("", 0));
       headers.append("Set-Cookie", setupCookie("", 0));
       return new Response(null, { status: 303, headers });
+    } catch {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependencies) {
+  return async function POST(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: BootstrapStatusRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, true, true);
+    if ("response" in authority) return authority.response;
+    try {
+      const result = await runtime.repository.revokeCapability({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (result.outcome === "DENIED") {
+        return clearOnboardingCookies(problem("UNAUTHENTICATED", requestId));
+      }
+      if (result.outcome !== "REVOKED") {
+        return clearOnboardingCookies(problem("PROVIDER_UNAVAILABLE", requestId));
+      }
+      const headers = responseHeaders(requestId);
+      headers.set("Location", new URL("/login", runtime.appOrigin).href);
+      return clearOnboardingCookies(new Response(null, { status: 303, headers }));
+    } catch {
+      return clearOnboardingCookies(problem("PROVIDER_UNAVAILABLE", requestId));
+    }
+  };
+}
+
+export function createAccessRequestPost(dependencies: AccessRequestDependencies) {
+  return async function POST(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: AccessRequestRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, true);
+    if ("response" in authority) return authority.response;
+    try {
+      const result = await runtime.repository.submitAccessRequest({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (result.outcome === "DENIED") return problem("UNAUTHENTICATED", requestId);
+      if (result.outcome !== "PENDING") return problem("PROVIDER_UNAVAILABLE", requestId);
+      return accessRequestResponse(result.requestId, result.status, requestId);
+    } catch {
+      return problem("PROVIDER_UNAVAILABLE", requestId);
+    }
+  };
+}
+
+export function createCurrentAccessRequestGet(dependencies: AccessRequestDependencies) {
+  return async function GET(request: Request): Promise<Response> {
+    const requestId = dependencies.requestId(request.headers);
+    let runtime: AccessRequestRuntime;
+    try { runtime = dependencies.loadRuntime(); }
+    catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
+    const authority = recoveryCredential(request, runtime, requestId, false);
+    if ("response" in authority) return authority.response;
+    try {
+      const result = await runtime.repository.readAccessRequest({
+        statusTokenHash: hashProof(authority.credential),
+        requestId,
+      });
+      if (result.outcome === "DENIED") return problem("UNAUTHENTICATED", requestId);
+      if (result.outcome !== "FOUND") return problem("PROVIDER_UNAVAILABLE", requestId);
+      return accessRequestResponse(result.requestId, result.status, requestId);
     } catch {
       return problem("PROVIDER_UNAVAILABLE", requestId);
     }

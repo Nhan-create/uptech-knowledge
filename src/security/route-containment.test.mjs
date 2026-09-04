@@ -76,6 +76,22 @@ test("allows only the exact Workspace bootstrap methods", () => {
   }
 });
 
+test("allows only the exact onboarding logout and access-request methods", () => {
+  const logout = "/api/v1/onboarding/logout";
+  const submit = "/api/v1/onboarding/access-requests";
+  const current = "/api/v1/onboarding/access-requests/current";
+  assert.equal(classifyUnconfiguredRoute(logout, "POST"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(submit, "POST"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(current, "GET"), "allow-auth-ingress");
+  for (const [pathname, method] of [
+    [logout, "GET"], [logout + "/", "POST"], [logout + "/extra", "POST"],
+    [submit, "GET"], [submit + "/", "POST"], [submit + "/extra", "POST"],
+    [current, "POST"], [current + "/", "GET"], [current + "/extra", "GET"],
+  ]) {
+    assert.equal(classifyUnconfiguredRoute(pathname, method), "deny-unconfigured", `${method} ${pathname}`);
+  }
+});
+
 test("allows only /home through to protected route enforcement", () => {
   assert.equal(classifyUnconfiguredRoute("/home"), "allow-protected");
 

@@ -40,6 +40,9 @@ const WORKSPACE_BOOTSTRAP_METHODS = new Map([
   ["/api/v1/onboarding/google-workspace/status", "GET"],
   ["/api/v1/onboarding/google-workspace/sync-retry", "POST"],
   ["/api/v1/onboarding/google-workspace/finish", "POST"],
+  ["/api/v1/onboarding/logout", "POST"],
+  ["/api/v1/onboarding/access-requests", "POST"],
+  ["/api/v1/onboarding/access-requests/current", "GET"],
 ]);
 
 const PROTECTED_APPLICATION_PATHS = new Set([

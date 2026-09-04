@@ -4,11 +4,15 @@ import test from "node:test";
 import { deriveCsrfCredential, hashProof, issueOpaqueProof } from "../../auth/google/crypto.ts";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "./crypto.ts";
 import {
+  createAccessRequestPost,
+  createCurrentAccessRequestGet,
   createGoogleWorkspaceBootstrapCallbackGet,
   createGoogleWorkspaceBootstrapPost,
   createBootstrapFinishPost,
   createBootstrapStatusGet,
   createBootstrapSyncRetryPost,
+  createOnboardingLogoutPost,
+  type AccessRequestDependencies,
   type BootstrapHttpDependencies,
   type BootstrapStatusDependencies,
 } from "./http.ts";
@@ -275,6 +279,9 @@ function recoveryFixture() {
   let statusOutcome = "DIRECTORY_BOOTSTRAP_SYNC_PENDING";
   let retryOutcome = "REQUEUED";
   let finishOutcome = "FINISHED";
+  let revokeOutcome = "REVOKED";
+  let submitOutcome: unknown = { outcome: "PENDING", requestId: "10000000-0000-4000-8000-000000000006", status: "PENDING" };
+  let readOutcome: unknown = { outcome: "FOUND", requestId: "10000000-0000-4000-8000-000000000006", status: "FULFILLED" };
   let loginOutcome: unknown = {
     outcome: "REDIRECT",
     authorizationUrl: AUTHORIZATION,
@@ -300,6 +307,10 @@ function recoveryFixture() {
           calls.push({ operation: "finish", input });
           return { outcome: finishOutcome } as never;
         },
+        async revokeCapability(input) {
+          calls.push({ operation: "revokeCapability", input });
+          return { outcome: revokeOutcome } as never;
+        },
       },
       normalLoginService: {
         async initiate(input) {
@@ -316,7 +327,27 @@ function recoveryFixture() {
     setStatus(outcome: string) { statusOutcome = outcome; },
     setRetry(outcome: string) { retryOutcome = outcome; },
     setFinish(outcome: string) { finishOutcome = outcome; },
+    setRevoke(outcome: string) { revokeOutcome = outcome; },
+    setSubmit(outcome: unknown) { submitOutcome = outcome; },
+    setRead(outcome: unknown) { readOutcome = outcome; },
     setLogin(outcome: unknown) { loginOutcome = outcome; },
+    accessDependencies: {
+      requestId: () => REQUEST_ID,
+      loadRuntime: () => ({
+        appOrigin: APP_ORIGIN,
+        sessionPepper: PEPPER,
+        repository: {
+          async submitAccessRequest(input: unknown) {
+            calls.push({ operation: "submitAccessRequest", input });
+            return submitOutcome as never;
+          },
+          async readAccessRequest(input: unknown) {
+            calls.push({ operation: "readAccessRequest", input });
+            return readOutcome as never;
+          },
+        },
+      }),
+    } satisfies AccessRequestDependencies,
   };
 }
 
@@ -447,5 +478,157 @@ test("finish never starts login when atomic READY consumption denies or request 
     }));
     assert.equal(response.status, 400);
     assert.equal(f.calls.length, 0);
+  }
+});
+
+function capabilityRequest(path: "logout" | "access-requests" | "access-requests/current", options: {
+  readonly method?: "GET" | "POST";
+  readonly credential?: string;
+  readonly cookie?: string;
+  readonly headers?: Record<string, string>;
+  readonly body?: string;
+  readonly query?: string;
+} = {}) {
+  const method = options.method ?? (path === "access-requests/current" ? "GET" : "POST");
+  const credential = options.credential ?? STATUS;
+  return new Request(`${APP_ORIGIN}/api/v1/onboarding/${path}${options.query ?? ""}`, {
+    method,
+    headers: {
+      cookie: options.cookie ?? `__Host-uptech_onboarding=${credential}`,
+      ...(method === "POST" ? {
+        origin: APP_ORIGIN,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": deriveCsrfCredential(credential, PEPPER),
+      } : {}),
+      ...options.headers,
+    },
+    body: options.body,
+  });
+}
+
+test("onboarding logout revokes only the presented capability hash then clears onboarding and setup authority", async () => {
+  const f = recoveryFixture();
+  const response = await createOnboardingLogoutPost(f.dependencies)(capabilityRequest("logout", {
+    cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`,
+  }));
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/login`);
+  assert.deepEqual(f.calls, [{
+    operation: "revokeCapability",
+    input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID },
+  }]);
+  const cookies = response.headers.getSetCookie();
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;") && cookie.includes("Max-Age=0")));
+  assert.ok(cookies.some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`) && cookie.includes("Max-Age=0")));
+  assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
+  assertSafe(response);
+});
+
+test("onboarding logout fails closed without caller authority and clears cookies after every validated terminal outcome", async () => {
+  for (const outcome of ["DENIED", "THROW"] as const) {
+    const f = recoveryFixture();
+    let dependencies = f.dependencies;
+    if (outcome === "DENIED") f.setRevoke("DENIED");
+    else dependencies = {
+      ...f.dependencies,
+      loadRuntime: () => ({
+        appOrigin: APP_ORIGIN,
+        sessionPepper: PEPPER,
+        repository: {
+          async readStatus() { throw new Error("unused"); },
+          async retrySync() { throw new Error("unused"); },
+          async finish() { throw new Error("unused"); },
+          async revokeCapability() { throw new Error("database uncertainty"); },
+        },
+      }),
+    };
+    const response = await createOnboardingLogoutPost(dependencies)(capabilityRequest("logout"));
+    assert.equal(response.status, outcome === "DENIED" ? 401 : 503);
+    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;")));
+    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
+    assertSafe(response);
+  }
+
+  for (const request of [
+    capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_onboarding=${STATUS}` }),
+    capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` }),
+    capabilityRequest("logout", { headers: { authorization: "Bearer caller-authority" } }),
+    capabilityRequest("logout", { headers: { origin: "https://evil.example" } }),
+    capabilityRequest("logout", { headers: { "x-csrf-token": issueOpaqueProof() } }),
+    capabilityRequest("logout", { query: "?workspace_id=caller-controlled" }),
+    capabilityRequest("logout", { body: JSON.stringify({ reason: "caller-controlled" }) }),
+  ]) {
+    const f = recoveryFixture();
+    const response = await createOnboardingLogoutPost(f.dependencies)(request);
+    assert.ok([400, 401, 403].includes(response.status));
+    assert.equal(f.calls.length, 0);
+    assertSafe(response);
+  }
+});
+
+test("access request submit/read use only the bound capability hash and return only public receipt fields", async () => {
+  const f = recoveryFixture();
+  const submitted = await createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests"));
+  assert.equal(submitted.status, 200);
+  assert.deepEqual(await submitted.json(), {
+    request_id: "10000000-0000-4000-8000-000000000006",
+    status: "PENDING",
+  });
+  assertSafe(submitted);
+
+  const current = await createCurrentAccessRequestGet(f.accessDependencies)(capabilityRequest("access-requests/current"));
+  assert.equal(current.status, 200);
+  assert.deepEqual(await current.json(), {
+    request_id: "10000000-0000-4000-8000-000000000006",
+    status: "FULFILLED",
+  });
+  assertSafe(current);
+  assert.deepEqual(f.calls, [
+    { operation: "submitAccessRequest", input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID } },
+    { operation: "readAccessRequest", input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID } },
+  ]);
+});
+
+test("access request routes reject client selectors, conflicting authorities, and closed capability denials before leaking tenant data", async () => {
+  for (const key of ["workspace_id", "connector_id", "job_id", "role", "department", "reason", "recipient"]) {
+    const f = recoveryFixture();
+    const response = await createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", {
+      body: JSON.stringify({ [key]: "caller-controlled" }),
+    }));
+    assert.equal(response.status, 400);
+    assert.equal(f.calls.length, 0);
+  }
+
+  for (const invoke of [
+    (f: ReturnType<typeof recoveryFixture>) => createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", { query: "?workspace_id=caller-controlled" })),
+    (f: ReturnType<typeof recoveryFixture>) => createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", { cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}` })),
+    (f: ReturnType<typeof recoveryFixture>) => createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` })),
+    (f: ReturnType<typeof recoveryFixture>) => createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", { headers: { authorization: "Bearer caller-authority" } })),
+    (f: ReturnType<typeof recoveryFixture>) => createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests", { headers: { "sec-fetch-site": "same-site" } })),
+    (f: ReturnType<typeof recoveryFixture>) => createCurrentAccessRequestGet(f.accessDependencies)(capabilityRequest("access-requests/current", { query: "?reason=caller-controlled" })),
+    (f: ReturnType<typeof recoveryFixture>) => createCurrentAccessRequestGet(f.accessDependencies)(capabilityRequest("access-requests/current", { method: "POST", body: "{}" })),
+  ]) {
+    const f = recoveryFixture();
+    const response = await invoke(f);
+    assert.ok([400, 403].includes(response.status));
+    assert.equal(f.calls.length, 0);
+    assertSafe(response);
+  }
+
+  for (const scenario of ["wrong-family", "duplicate-operation", "expired", "revoked", "cross-workspace"] as const) {
+    const f = recoveryFixture();
+    f.setSubmit({ outcome: "DENIED", scenario });
+    f.setRead({ outcome: "DENIED", scenario });
+    for (const response of [
+      await createAccessRequestPost(f.accessDependencies)(capabilityRequest("access-requests")),
+      await createCurrentAccessRequestGet(f.accessDependencies)(capabilityRequest("access-requests/current")),
+    ]) {
+      assert.equal(response.status, 401);
+      const serialized = JSON.stringify(await response.json());
+      assert.equal(serialized.includes("workspace"), false);
+      assert.equal(serialized.includes(scenario), false);
+      assertSafe(response);
+    }
   }
 });

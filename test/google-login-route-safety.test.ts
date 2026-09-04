@@ -20,6 +20,9 @@ const bootstrapAdmissionInputs: unknown[] = [];
 let bootstrapStatusResult: unknown = { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" };
 let bootstrapRetryResult: unknown = { outcome: "REQUEUED" };
 let bootstrapFinishResult: unknown = { outcome: "FINISHED" };
+let bootstrapRevokeResult: unknown = { outcome: "REVOKED" };
+let accessSubmitResult: unknown = { outcome: "PENDING", requestId: "00000000-0000-4000-8000-000000000093", status: "PENDING" };
+let accessReadResult: unknown = { outcome: "FOUND", requestId: "00000000-0000-4000-8000-000000000093", status: "PENDING" };
 const bootstrapRecoveryInputs: Array<{ readonly operation: string; readonly input: unknown }> = [];
 const bootstrapPepper = new Uint8Array(32).fill(7);
 
@@ -83,6 +86,18 @@ mock.module("@/server/onboarding/google-workspace/runtime", {
             bootstrapRecoveryInputs.push({ operation: "finish", input });
             return bootstrapFinishResult;
           },
+          async revokeCapability(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "revokeCapability", input });
+            return bootstrapRevokeResult;
+          },
+          async submitAccessRequest(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "submitAccessRequest", input });
+            return accessSubmitResult;
+          },
+          async readAccessRequest(input: unknown) {
+            bootstrapRecoveryInputs.push({ operation: "readAccessRequest", input });
+            return accessReadResult;
+          },
         },
       };
     },
@@ -126,6 +141,9 @@ const bootstrapCallbackRoute = await import("../src/app/api/v1/onboarding/google
 const bootstrapStatusRoute = await import("../src/app/api/v1/onboarding/google-workspace/status/route.ts");
 const bootstrapRetryRoute = await import("../src/app/api/v1/onboarding/google-workspace/sync-retry/route.ts");
 const bootstrapFinishRoute = await import("../src/app/api/v1/onboarding/google-workspace/finish/route.ts");
+const onboardingLogoutRoute = await import("../src/app/api/v1/onboarding/logout/route.ts");
+const accessRequestRoute = await import("../src/app/api/v1/onboarding/access-requests/route.ts");
+const currentAccessRequestRoute = await import("../src/app/api/v1/onboarding/access-requests/current/route.ts");
 const { issueSessionCredential } = await import("../src/server/sessions/session-security.ts");
 const { deriveCsrfCredential, issueOpaqueProof } = await import("../src/server/auth/google/crypto.ts");
 
@@ -403,4 +421,38 @@ test("Workspace bootstrap recovery adapters expose only status, same-bound retry
   assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;") && cookie.includes("Max-Age=0")));
   assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
   assert.deepEqual(bootstrapRecoveryInputs.map((entry) => entry.operation), ["readStatus", "retrySync", "finish"]);
+});
+
+test("onboarding logout and access-request adapters expose only their bound repository operations", async () => {
+  bootstrapRecoveryInputs.length = 0;
+  const credential = issueOpaqueProof();
+  const csrf = deriveCsrfCredential(credential, bootstrapPepper);
+  const postHeaders = {
+    ...trustedHeaders,
+    cookie: `__Host-uptech_onboarding=${credential}`,
+    origin: appOrigin,
+    "sec-fetch-site": "same-origin",
+    "x-csrf-token": csrf,
+  };
+
+  accessSubmitResult = { outcome: "PENDING", requestId: "00000000-0000-4000-8000-000000000093", status: "PENDING" };
+  assert.deepEqual(await (await accessRequestRoute.POST(new Request(
+    `${appOrigin}/api/v1/onboarding/access-requests`, { method: "POST", headers: postHeaders },
+  ))).json(), { request_id: "00000000-0000-4000-8000-000000000093", status: "PENDING" });
+
+  accessReadResult = { outcome: "FOUND", requestId: "00000000-0000-4000-8000-000000000093", status: "FULFILLED" };
+  assert.deepEqual(await (await currentAccessRequestRoute.GET(new Request(
+    `${appOrigin}/api/v1/onboarding/access-requests/current`, { headers: { ...trustedHeaders, cookie: `__Host-uptech_onboarding=${credential}` } },
+  ))).json(), { request_id: "00000000-0000-4000-8000-000000000093", status: "FULFILLED" });
+
+  bootstrapRevokeResult = { outcome: "REVOKED" };
+  const logout = await onboardingLogoutRoute.POST(new Request(
+    `${appOrigin}/api/v1/onboarding/logout`, { method: "POST", headers: postHeaders },
+  ));
+  assert.equal(logout.status, 303);
+  assert.equal(logout.headers.get("location"), `${appOrigin}/login`);
+  assert.equal(logout.headers.getSetCookie().some((cookie) => cookie.includes("uptech_session")), false);
+  assert.deepEqual(bootstrapRecoveryInputs.map((entry) => entry.operation), [
+    "submitAccessRequest", "readAccessRequest", "revokeCapability",
+  ]);
 });
