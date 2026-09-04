@@ -31,6 +31,10 @@ test("login page renders the approved Uptech branding and readable Google action
     /data-testid="google-login-submit"[^>]+style="color:#0f172a"/,
   );
   assert.match(html, />Tiếp tục với Google Workspace</);
+  assert.match(
+    html,
+    /<form(?=[^>]*action="\/api\/v1\/auth\/google\/transactions")(?=[^>]*method="post")[^>]*>\s*<input(?=[^>]*type="hidden")(?=[^>]*name="intent")(?=[^>]*value="LOGIN")[^>]*\/>/,
+  );
 
   const logoResponse = await fetch(new URL("/logo.png", baseUrl));
   assert.equal(logoResponse.status, 200);
@@ -50,13 +54,14 @@ test("personal Google accounts receive Workspace guidance with Uptech branding",
 
   const html = await response.text();
 
-  assert.match(html, />Tài khoản không hợp lệ</);
+  assert.match(html, />Cần tài khoản công ty</);
   assert.match(
     html,
-    /Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp\./,
+    /UPTECH chỉ hỗ trợ tài khoản Google Workspace của doanh nghiệp\./,
   );
   assert.match(html, /data-testid="login-uptech-logo"/);
-  assert.match(html, />Đăng nhập bằng tài khoản khác</);
+  assert.match(html, />Đổi tài khoản Google</);
+  assert.match(html, /href="\/help\/enterprise-login"[^>]*>Xem trợ giúp đăng nhập<\/a>/);
 });
 
 test("login header navigation keeps strong contrast over the video", async (context) => {
@@ -150,7 +155,6 @@ test("login page follows the English preference in normal and error states", asy
   assert.match(normalHtml, />Sign in to your workspace</);
   assert.match(normalHtml, /Use your Workspace account\./);
   assert.match(normalHtml, />Continue with Google Workspace</);
-  assert.match(normalHtml, /Redirecting to Google…/);
   assert.match(normalHtml, />Home</);
   assert.match(normalHtml, /Terms of Use/);
   assert.match(normalHtml, /Privacy Policy/);
@@ -163,12 +167,13 @@ test("login page follows the English preference in normal and error states", asy
   assert.equal(errorResponse.status, 200);
   const errorHtml = await errorResponse.text();
 
-  assert.match(errorHtml, />Invalid account</);
+  assert.match(errorHtml, />A business account is required</);
   assert.match(
     errorHtml,
-    /Please use the Google Workspace account provided by your organization\./,
+    /UPTECH supports only business Google Workspace accounts\./,
   );
-  assert.match(errorHtml, />Sign in with another account</);
+  assert.match(errorHtml, />Switch Google account</);
+  assert.match(errorHtml, /href="\/help\/enterprise-login"[^>]*>Open enterprise login help<\/a>/);
 });
 
 test("login states keep an opaque card above the bright looping video background", async (context) => {

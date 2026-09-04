@@ -2,7 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const baseUrl = process.env.LOGIN_TEST_BASE_URL;
+const appOrigin = expectedAppOrigin();
 const requestId = "00000000-0000-4000-8000-000000000091";
+
+function expectedAppOrigin() {
+  const configured = process.env.LOGIN_TEST_APP_ORIGIN;
+  if (configured === undefined) {
+    return baseUrl === undefined ? undefined : new URL(baseUrl).origin;
+  }
+
+  const parsed = new URL(configured);
+  assert.equal(parsed.protocol, "https:", "LOGIN_TEST_APP_ORIGIN must use HTTPS");
+  assert.equal(parsed.username, "", "LOGIN_TEST_APP_ORIGIN must not contain credentials");
+  assert.equal(parsed.password, "", "LOGIN_TEST_APP_ORIGIN must not contain credentials");
+  assert.equal(parsed.pathname, "/", "LOGIN_TEST_APP_ORIGIN must be an origin");
+  assert.equal(parsed.search, "", "LOGIN_TEST_APP_ORIGIN must be an origin");
+  assert.equal(parsed.hash, "", "LOGIN_TEST_APP_ORIGIN must be an origin");
+  return parsed.origin;
+}
 
 async function loginHtml(path, context) {
   if (baseUrl === undefined) {
@@ -26,7 +43,7 @@ function renderedMain(html) {
 function assertLoginRedirect(response, expectedError) {
   assert.equal(response.status, 303);
   const location = new URL(response.headers.get("location"));
-  assert.equal(location.origin, new URL(baseUrl).origin);
+  assert.equal(location.origin, appOrigin);
   assert.equal(location.pathname, "/login");
   assert.deepEqual([...location.searchParams.keys()].sort(), ["error", "request_id"]);
   assert.equal(location.searchParams.get("error"), expectedError);
@@ -38,21 +55,40 @@ function assertLoginRedirect(response, expectedError) {
   assert.equal(response.headers.get("x-request-id"), redirectedRequestId);
 }
 
-test("unknown organizations receive the exact Vietnamese support guidance without an unavailable onboarding link", async (context) => {
+function assertNativeIntentForm(html, intent) {
+  assert.match(
+    renderedMain(html),
+    new RegExp(`<form(?=[^>]*action="/api/v1/auth/google/transactions")(?=[^>]*method="post")[^>]*>\\s*<input(?=[^>]*type="hidden")(?=[^>]*name="intent")(?=[^>]*value="${intent}")[^>]*/>`),
+  );
+}
+
+function assertVietnameseContactControl(html, label, state) {
+  const match = renderedMain(html).match(new RegExp(`<a[^>]+href="([^"]+)"[^>]*>${label}</a>`));
+  assert.notEqual(match, null, `${label} must be an executable contact link`);
+  const contact = new URL(match[1].replaceAll("&amp;", "&"));
+  assert.equal(contact.protocol, "mailto:");
+  assert.equal(contact.pathname, "contact@uptech.vn");
+  assert.equal(contact.searchParams.get("subject"), "Hỗ trợ đăng nhập UPTECH");
+  assert.equal(
+    contact.searchParams.get("body"),
+    `Tôi cần hỗ trợ về đăng nhập doanh nghiệp.\nTrạng thái: ${state}`,
+  );
+}
+
+test("unknown organizations explain the verified company account and expose only an executable account switch without capability", async (context) => {
   const html = await loginHtml("/login?error=unknown_workspace", context);
   if (html === undefined) return;
 
-  assert.match(html, />Tổ chức của bạn chưa được đăng ký</);
+  const main = renderedMain(html);
+  assert.match(main, />Tổ chức chưa được thiết lập</);
   assert.match(
-    html,
-    /Tài khoản Google đã được xác minh, nhưng tổ chức của bạn chưa được thiết lập trên UPTECH KNOWLEDGE\./,
+    main,
+    /Tài khoản công ty đã được Google xác minh, nhưng tổ chức chưa được thiết lập trên UPTECH\./,
   );
-  assert.match(
-    html,
-    /<a(?=[^>]*href="mailto:contact@uptech\.vn")[^>]*>Liên hệ UPTECH<\/a>/,
-  );
-  assert.match(html, />Đăng nhập bằng tài khoản khác</);
-  assert.doesNotMatch(html, /href="\/onboarding(?:[\/?#]|\")/);
+  assert.match(main, />Đổi tài khoản Google</);
+  assertNativeIntentForm(main, "SWITCH_ACCOUNT");
+  assert.doesNotMatch(main, /\/api\/v1\/onboarding\/google-workspace\/transactions/);
+  assert.doesNotMatch(main, /\/api\/v1\/onboarding\/(?:access-requests|google-workspace\/(?:status|sync-retry))/);
 });
 
 test("personal Google accounts are told to use their organization-provided Workspace account", async (context) => {
@@ -61,9 +97,10 @@ test("personal Google accounts are told to use their organization-provided Works
 
   assert.match(
     html,
-    /Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp\./,
+    /UPTECH chỉ hỗ trợ tài khoản Google Workspace của doanh nghiệp\./,
   );
-  assert.match(html, />Đăng nhập bằng tài khoản khác</);
+  assertNativeIntentForm(html, "SWITCH_ACCOUNT");
+  assert.match(renderedMain(html), /href="\/help\/enterprise-login"[^>]*>Xem trợ giúp đăng nhập<\/a>/);
 });
 
 test("user and workspace suspensions have distinct recovery guidance", async (context) => {
@@ -72,35 +109,44 @@ test("user and workspace suspensions have distinct recovery guidance", async (co
   const workspaceHtml = await loginHtml("/login?error=workspace_suspended", context);
   if (workspaceHtml === undefined) return;
 
-  assert.match(userHtml, />Tài khoản đã bị tạm ngưng</);
-  assert.match(userHtml, /liên hệ quản trị viên của tổ chức/i);
-  assert.match(workspaceHtml, />Workspace đã bị tạm ngưng</);
-  assert.match(workspaceHtml, /href="mailto:contact@uptech\.vn"/);
-  assert.doesNotMatch(userHtml, />Workspace đã bị tạm ngưng</);
-  assert.doesNotMatch(workspaceHtml, />Tài khoản đã bị tạm ngưng</);
+  assert.match(userHtml, />Tài khoản đang bị tạm khóa</);
+  assert.match(userHtml, /Tài khoản Google Workspace của bạn đang bị tạm khóa\./);
+  assertNativeIntentForm(userHtml, "SWITCH_ACCOUNT");
+  assert.match(renderedMain(userHtml), /<button[^>]+type="button"[^>]*>Sao chép hướng dẫn quản trị viên Workspace<\/button>/);
+
+  assert.match(workspaceHtml, />Không gian làm việc tạm ngừng</);
+  assert.match(workspaceHtml, /Không gian làm việc của công ty đang tạm ngừng hoạt động\./);
+  assertVietnameseContactControl(workspaceHtml, "Liên hệ Uptech", "WORKSPACE_SUSPENDED");
+  assertNativeIntentForm(workspaceHtml, "SWITCH_ACCOUNT");
+  assert.doesNotMatch(userHtml, />Không gian làm việc tạm ngừng</);
+  assert.doesNotMatch(workspaceHtml, />Tài khoản đang bị tạm khóa</);
 });
 
 test("login gives actionable, safe feedback for cancelled, expired, unavailable, and generic outcomes", async (context) => {
   const scenarios = [
     {
       error: "provider_rejected",
-      title: "Đăng nhập đã bị hủy",
-      description: "Bạn có thể thử lại bằng tài khoản Google Workspace khác.",
+      title: "Không thể hoàn tất yêu cầu",
+      description: "Không thể hoàn tất yêu cầu; hãy cung cấp mã yêu cầu cho bộ phận hỗ trợ.",
+      intent: "LOGIN",
     },
     {
       error: "session_expired",
-      title: "Phiên đăng nhập đã hết hạn",
-      description: "Vui lòng đăng nhập lại để tiếp tục.",
+      title: "Phiên đăng nhập hết hiệu lực",
+      description: "Phiên đăng nhập đã hết hiệu lực hoặc quyền của bạn vừa thay đổi.",
+      intent: "LOGIN",
     },
     {
       error: "temporarily_unavailable",
-      title: "Tạm thời không thể đăng nhập",
-      description: "Dịch vụ xác minh tài khoản đang tạm thời gián đoạn. Vui lòng thử lại.",
+      title: "Chưa thể xác minh quyền",
+      description: "Hiện chưa thể xác minh quyền với Google; không có quyền truy cập nào được cấp.",
+      intent: "LOGIN",
     },
     {
       error: "login_failed",
-      title: "Không thể đăng nhập",
-      description: "Đã xảy ra lỗi trong quá trình xác minh tài khoản. Vui lòng thử lại.",
+      title: "Không thể hoàn tất yêu cầu",
+      description: "Không thể hoàn tất yêu cầu; hãy cung cấp mã yêu cầu cho bộ phận hỗ trợ.",
+      intent: "LOGIN",
     },
   ];
 
@@ -109,7 +155,12 @@ test("login gives actionable, safe feedback for cancelled, expired, unavailable,
     if (html === undefined) return;
     assert.match(html, new RegExp(`>${scenario.title}<`));
     assert.match(html, new RegExp(scenario.description.replaceAll(".", "\\.")));
+    assertNativeIntentForm(html, scenario.intent);
   }
+
+  const unavailableHtml = await loginHtml("/login?error=temporarily_unavailable", context);
+  if (unavailableHtml === undefined) return;
+  assertVietnameseContactControl(unavailableHtml, "Liên hệ Uptech", "PROVIDER_UNAVAILABLE");
 });
 
 test("only a valid request ID is displayed on the login error state", async (context) => {
@@ -118,7 +169,9 @@ test("only a valid request ID is displayed on the login error state", async (con
     context,
   );
   if (validHtml === undefined) return;
-  assert.match(renderedMain(validHtml), new RegExp(requestId));
+  const validMain = renderedMain(validHtml);
+  assert.match(validMain, new RegExp(requestId));
+  assert.match(validMain, /<button[^>]+type="button"[^>]*>Sao chép mã yêu cầu<\/button>/);
 
   const unsafeRequestId = "untrusted-request-id";
   const unsafeHtml = await loginHtml(
@@ -129,14 +182,17 @@ test("only a valid request ID is displayed on the login error state", async (con
   assert.doesNotMatch(renderedMain(unsafeHtml), new RegExp(unsafeRequestId));
 });
 
-test("login never renders an account supplied by the browser query", async (context) => {
+test("login never reflects or trusts browser-supplied account, domain, action, or return URL", async (context) => {
   const html = await loginHtml(
-    "/login?error=login_failed&account=person@unknown.example",
+    "/login?error=login_failed&account=person@unknown.example&domain=evil.example&action=START_ORGANIZATION_SETUP&returnUrl=https%3A%2F%2Fevil.example%2Ftakeover",
     context,
   );
   if (html === undefined) return;
 
-  assert.doesNotMatch(renderedMain(html), /person@unknown\.example/);
+  const main = renderedMain(html);
+  assert.doesNotMatch(main, /person@unknown\.example/);
+  assert.doesNotMatch(main, /evil\.example|START_ORGANIZATION_SETUP|takeover/);
+  assertNativeIntentForm(main, "LOGIN");
 });
 
 test("production begin-auth returns a real domain-neutral Google authorization request", async (context) => {
@@ -163,7 +219,7 @@ test("production begin-auth returns a real domain-neutral Google authorization r
   assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256");
   assert.equal(
     authorizationUrl.searchParams.get("redirect_uri"),
-    new URL("/api/v1/auth/google/callback", baseUrl).href,
+    new URL("/api/v1/auth/google/callback", appOrigin).href,
   );
   assert.deepEqual(
     new Set(authorizationUrl.searchParams.get("scope")?.split(" ")),
@@ -214,7 +270,8 @@ test("an invalid protected-route session reaches the real session-expired state"
   });
 
   assert.equal(response.status, 307);
-  const location = new URL(response.headers.get("location"), baseUrl);
+  const location = new URL(response.headers.get("location"), appOrigin);
+  assert.equal(location.origin, appOrigin);
   assert.equal(location.pathname, "/login");
   assert.equal(location.searchParams.get("error"), "session_expired");
 });
