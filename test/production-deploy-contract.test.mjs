@@ -10,6 +10,17 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const guardPath = join(repoRoot, "scripts", "production-deploy-contract.mjs");
 const generatorPath = join(repoRoot, "scripts", "generate-mobile-association-artifacts.mjs");
 const browserHarnessPath = join(repoRoot, "scripts", "run-google-workspace-bootstrap-browser.mjs");
+const productionEnvironmentExamplePath = join(repoRoot, ".env.example");
+const workspaceBootstrapRunbookPath = join(
+  repoRoot,
+  "docs",
+  "operations",
+  "google-workspace-tenant-bootstrap-production-runbook.md",
+);
+const postTenantDirectoryCallback =
+  "https://uptech-knowledge-sigma.vercel.app/api/v1/admin/connectors/google-directory/callback";
+const tenantBootstrapCallback =
+  "https://uptech-knowledge-sigma.vercel.app/api/v1/onboarding/google-workspace/callback";
 const publicRoutes = ["san-pham", "nguyen-tac", "nang-luc", "quy-trinh"];
 const androidFingerprint =
   "A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:12:23:34:45:56:67:78:89:9A:AB:BC:CD:DE:EF:F0:01";
@@ -223,6 +234,115 @@ test("requires an exact production Google Directory cron and a strong cron secre
     `${missingRoute.stdout}\n${missingRoute.stderr}`,
     /Directory cron deployment contract is incomplete/,
   );
+});
+
+test("documents both distinct Google OAuth Web redirect URIs", async () => {
+  const [environmentExample, runbook] = await Promise.all([
+    readFile(productionEnvironmentExamplePath, "utf8"),
+    readFile(workspaceBootstrapRunbookPath, "utf8"),
+  ]);
+
+  for (const callback of [postTenantDirectoryCallback, tenantBootstrapCallback]) {
+    assert.ok(environmentExample.includes(callback), `missing callback in .env.example: ${callback}`);
+    assert.ok(runbook.includes(callback), `missing callback in runbook: ${callback}`);
+  }
+  assert.match(runbook, /Google OAuth Web redirect URIs/u);
+  assert.match(runbook, /bootstrap callback.*customer Google Workspace Super Admin.*tenant creation/iu);
+});
+
+test("provides an ordered fail-closed Workspace bootstrap production checklist", async () => {
+  const runbook = await readFile(workspaceBootstrapRunbookPath, "utf8");
+  const orderedMarkers = [
+    "## 1. Freeze exact release inputs",
+    "## 2. Prepare Google Cloud",
+    "## 3. Configure Vercel production metadata",
+    "## 4. Register Google OAuth callbacks",
+    "## 5. Apply immutable migration 0009",
+    "## 6. Deploy the exact Web commit",
+    "## 7. Bootstrap with a customer Super Admin",
+    "## 8. Publish the first Directory generation",
+    "## 9. Run the real enterprise-login smoke",
+    "## 10. Inspect redacted production logs",
+    "## 11. Roll back or stop safely",
+    "## 12. ADMIN ACTION REQUIRED",
+  ];
+
+  let previousIndex = -1;
+  for (const marker of orderedMarkers) {
+    const markerIndex = runbook.indexOf(marker);
+    assert.ok(markerIndex > previousIndex, `missing or out-of-order runbook marker: ${marker}`);
+    previousIndex = markerIndex;
+  }
+
+  for (const requiredMarker of [
+    "Web commit on `main`",
+    "separately recorded Mobile commit",
+    "Admin SDK API",
+    "Secret Manager API",
+    "IAM Service Account Credentials API",
+    "dedicated keyless service account",
+    "Vercel OIDC",
+    "audience",
+    "attribute",
+    "least-privilege",
+    "UPTECH_GCP_SECRET_MANAGER_PROJECT_ID",
+    "UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER",
+    "UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL",
+    "CRON_SECRET",
+    "migration-owner",
+    "NOBYPASSRLS",
+    "no automatic domain promotion",
+    "`customerId`",
+    "`isAdmin=true`",
+    "PUBLISHED",
+    "fresh",
+    "OWNER",
+    "`/admin`",
+    "MEMBER",
+    "`/home`",
+    "department isolation",
+    "old session",
+    "token/code/cookie/secret/database URL/credential reference",
+    "Migration `0009` is immutable",
+    "fail closed",
+    "Do not send passwords, tokens, secrets, database URLs, private keys, or MFA codes in chat.",
+  ]) {
+    assert.match(runbook, new RegExp(requiredMarker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+  }
+
+  assert.doesNotMatch(runbook, /production (?:was|has been) deployed|real (?:consent|login) (?:was|has been) run/iu);
+});
+
+test("keeps production metadata examples non-secret and visibly unusable", async () => {
+  const [environmentExample, runbook] = await Promise.all([
+    readFile(productionEnvironmentExamplePath, "utf8"),
+    readFile(workspaceBootstrapRunbookPath, "utf8"),
+  ]);
+  const environment = new Map(
+    environmentExample
+      .split(/\r?\n/u)
+      .filter((line) => /^[A-Z][A-Z0-9_]*=/u.test(line))
+      .map((line) => {
+        const separator = line.indexOf("=");
+        return [line.slice(0, separator), line.slice(separator + 1)];
+      }),
+  );
+
+  for (const name of [
+    "UPTECH_GCP_SECRET_MANAGER_PROJECT_ID",
+    "UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER",
+    "UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL",
+    "CRON_SECRET",
+  ]) {
+    assert.match(environment.get(name) ?? "", /replace|example|placeholder/iu, `${name} must remain an unusable placeholder`);
+  }
+
+  const documentation = `${environmentExample}\n${runbook}`;
+  assert.doesNotMatch(documentation, /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/u);
+  assert.doesNotMatch(documentation, /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/u);
+  assert.doesNotMatch(documentation, /\b(?:ya29\.|1\/\/)[A-Za-z0-9._~-]{16,}\b/u);
+  assert.doesNotMatch(documentation, /\{\s*"type"\s*:\s*"service_account"/u);
+  assert.doesNotMatch(runbook, /(?:password|token|secret|database URL|private key)\s*[=:]\s*\S+/iu);
 });
 
 test("requires exact Google Cloud Directory workload identity metadata", async () => {
