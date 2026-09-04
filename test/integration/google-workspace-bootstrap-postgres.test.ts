@@ -178,32 +178,37 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     return environmentName;
   });
 
-  const reserve = (id: string, completionByte: number, nonceByte: number) =>
-    asMigrationOwner((client) => client.query(`INSERT INTO uptech.oauth_transactions(
+  const reserve = (id: string, completionByte: number, nonceByte: number,
+    consumedAgoSeconds = 5) => asMigrationOwner((client) => client.query(`WITH timing AS (
+      SELECT statement_timestamp()-make_interval(secs=>$7) AS consumed_at,
+        statement_timestamp()-make_interval(secs=>greatest($7+1,60)) AS created_at
+    ) INSERT INTO uptech.oauth_transactions(
       id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,
       web_nonce_hash,web_browser_binding_hash,web_pkce_envelope_version,
       web_pkce_algorithm,web_pkce_nonce,web_pkce_ciphertext,web_pkce_tag,
       web_pkce_kms_key_version,web_pkce_associated_data,status,
       completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
-    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,
+    ) SELECT $1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,
       'AES-256-GCM',decode(repeat('ab',12),'hex'),decode(repeat('bc',40),'hex'),
       decode(repeat('cd',16),'hex'),'test-key-v1',decode(repeat('de',32),'hex'),
-      'EXCHANGE_RESERVED',$6,$1,statement_timestamp()-interval '1 minute',
-      statement_timestamp()+interval '9 minutes',statement_timestamp()-interval '5 seconds',
-      statement_timestamp()-interval '5 seconds'+interval '2 minutes')`,
+      'EXCHANGE_RESERVED',$6,$1,timing.created_at,timing.created_at+interval '10 minutes',
+      timing.consumed_at,timing.consumed_at+interval '2 minutes' FROM timing
+      RETURNING completion_expires_at`,
     [id, environment, hash32(completionByte + 20), hash32(nonceByte),
-      hash32(completionByte + 40), hash32(completionByte)]));
+      hash32(completionByte + 40), hash32(completionByte), consumedAgoSeconds]));
 
   const complete = (completionByte: number, nonceByte: number, tokenByte: number,
-    subject: string, email: string, domain: string | null, requestId: string) => asApi((client) => client.query(`
+    subject: string, email: string, domain: string | null, requestId: string,
+    claimExpiresAt: Date | null = null) => asApi((client) => client.query(`
       SELECT outcome::text,access_state::text,allowed_operations,expires_at,route
       FROM uptech.complete_web_google_login_directory_v2(
         $1,ROW('accounts.google.com',$2,$3,true,$4,
-          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          statement_timestamp()-interval '5 seconds',
+          coalesce($10::timestamptz,statement_timestamp()+interval '1 hour'),
           'GOOGLE_WEB_LOGIN_V1',NULL,$5)::uptech.google_verified_claims_assertion_v1,
         $6,$7,$8,$9)`, [hash32(completionByte), subject, email, domain,
       hash32(nonceByte), hash32(tokenByte + 1), hash32(tokenByte + 2), hash32(tokenByte),
-      requestId]));
+      requestId, claimExpiresAt]));
 
   await reserve("97300000-0000-4000-8000-000000000001", 0xa1, 0xa2);
   const first = await complete(0xa1, 0xa2, 0xa3,
@@ -279,6 +284,89 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
   assert.equal((await pool.query(`SELECT count(*)::int AS count
     FROM uptech.onboarding_sessions o JOIN uptech.identities i ON i.id=o.identity_id
     WHERE i.provider_subject='web-v2-personal-sub'`)).rows[0].count, 0);
+
+  const oauthBlocker = await pool.connect();
+  await reserve("97300000-0000-4000-8000-000000000005", 0xe1, 0xe2, 119);
+  try {
+    await oauthBlocker.query("BEGIN; SET LOCAL ROLE uptech_migration_owner");
+    await oauthBlocker.query(`SELECT id FROM uptech.oauth_transactions
+      WHERE id='97300000-0000-4000-8000-000000000005' FOR UPDATE`);
+    const blockedCompletion = complete(0xe1, 0xe2, 0xe3,
+      "web-v2-post-lock-time-sub", "owner@post-lock.example", "post-lock.example",
+      "97300000-0000-4000-8000-000000000005", new Date(Date.now() + 400));
+    await delay(1200);
+    await oauthBlocker.query("COMMIT");
+    assert.equal((await blockedCompletion).rows[0].outcome, "DENIED");
+  } finally {
+    await oauthBlocker.query("ROLLBACK").catch(() => undefined);
+    oauthBlocker.release();
+  }
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.identities
+      WHERE provider_subject='web-v2-post-lock-time-sub') AS identities,
+    (SELECT count(*)::int FROM uptech.onboarding_sessions o JOIN uptech.identities i
+      ON i.id=o.identity_id WHERE i.provider_subject='web-v2-post-lock-time-sub') AS capabilities`)).rows[0], {
+    identities: 0, capabilities: 0,
+  });
+
+  await asMigrationOwner((client) => client.query(`
+    INSERT INTO uptech.users(id) VALUES ('97300000-0000-4000-8000-000000000010');
+    INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,
+      email_claim,email_verified,hosted_domain_claim,claims_observed_at)
+    VALUES ('97300000-0000-4000-8000-000000000011',
+      '97300000-0000-4000-8000-000000000010','GOOGLE','https://accounts.google.com',
+      'web-v2-rollback-sub','old@rollback.example',true,'rollback.example',statement_timestamp());
+    INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
+    VALUES ('97300000-0000-4000-8000-000000000012',
+      '97300000-0000-4000-8000-000000000011',decode(repeat('ef',32),'hex'),
+      ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],
+      statement_timestamp()+interval '20 minutes')`));
+  const expiring = await reserve("97300000-0000-4000-8000-000000000006", 0xf1, 0xf2, 118);
+  const reservationExpiry = new Date(expiring.rows[0].completion_expires_at).getTime();
+  const identityBlocker = await pool.connect();
+  try {
+    await identityBlocker.query("BEGIN; SET LOCAL ROLE uptech_migration_owner");
+    await identityBlocker.query(`SELECT id FROM uptech.identities
+      WHERE id='97300000-0000-4000-8000-000000000011' FOR UPDATE`);
+    const rollbackCompletion = complete(0xf1, 0xf2, 0xf3,
+      "web-v2-rollback-sub", "new@rollback.example", "rollback-new.example",
+      "97300000-0000-4000-8000-000000000006");
+
+    let completionOwnsOauthLock = false;
+    for (let attempt = 0; attempt < 50 && !completionOwnsOauthLock; attempt += 1) {
+      const probe = await pool.connect();
+      try {
+        await probe.query("BEGIN; SET LOCAL ROLE uptech_migration_owner");
+        await probe.query(`SELECT id FROM uptech.oauth_transactions
+          WHERE id='97300000-0000-4000-8000-000000000006' FOR UPDATE NOWAIT`);
+        await probe.query("ROLLBACK");
+        await delay(20);
+      } catch (error) {
+        await probe.query("ROLLBACK").catch(() => undefined);
+        if ((error as { code?: string }).code !== "55P03") throw error;
+        completionOwnsOauthLock = true;
+      } finally {
+        probe.release();
+      }
+    }
+    assert.equal(completionOwnsOauthLock, true);
+    await delay(Math.max(0, reservationExpiry - Date.now() + 100));
+    await identityBlocker.query("COMMIT");
+    assert.equal((await rollbackCompletion).rows[0].outcome, "DENIED");
+  } finally {
+    await identityBlocker.query("ROLLBACK").catch(() => undefined);
+    identityBlocker.release();
+  }
+  assert.deepEqual((await pool.query(`SELECT
+    i.email_claim,i.hosted_domain_claim,
+    count(*) FILTER (WHERE o.status='ACTIVE')::int AS active,
+    count(*) FILTER (WHERE o.token_hash=decode(repeat('f3',32),'hex'))::int AS new_capabilities
+    FROM uptech.identities i LEFT JOIN uptech.onboarding_sessions o ON o.identity_id=i.id
+    WHERE i.id='97300000-0000-4000-8000-000000000011'
+    GROUP BY i.id`)).rows[0], {
+    email_claim: "old@rollback.example", hosted_domain_claim: "rollback.example",
+    active: 1, new_capabilities: 0,
+  });
 });
 
 async function seedBootstrapSource(input: {

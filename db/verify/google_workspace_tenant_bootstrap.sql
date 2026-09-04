@@ -144,6 +144,8 @@ BEGIN
   definition := pg_catalog.pg_get_functiondef(validator_oid);
   IF pg_catalog.strpos(definition,'EXCHANGE_RESERVED')=0
     OR pg_catalog.strpos(definition,'FOR UPDATE')=0
+    OR pg_catalog.strpos(definition,'observed_at := pg_catalog.clock_timestamp()')
+      <= pg_catalog.strpos(definition,'FOR UPDATE')
     OR pg_catalog.strpos(definition,'https://accounts.google.com')=0
     OR pg_catalog.strpos(definition,'configuration_row.environment_name = selected_transaction.environment_name')=0
     OR pg_catalog.strpos(definition,'configuration_row.configuration_key = selected_transaction.configuration_key')=0

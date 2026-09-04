@@ -1929,7 +1929,7 @@ SECURITY DEFINER
 SET search_path TO pg_catalog, uptech
 AS $function$
 DECLARE
-  observed_at timestamptz := pg_catalog.clock_timestamp();
+  observed_at timestamptz;
   selected_transaction uptech.oauth_transactions%ROWTYPE;
   bound_configuration uptech.google_auth_configuration_registry%ROWTYPE;
   selected_attempt_id uuid;
@@ -2595,6 +2595,8 @@ BEGIN
     FOR UPDATE;
   END IF;
 
+  -- All expiry/freshness decisions use time sampled after any row-lock wait.
+  observed_at := pg_catalog.clock_timestamp();
   IF selected_transaction.id IS NULL
      OR selected_transaction.completion_expires_at IS NULL
      OR selected_transaction.completion_expires_at <= observed_at THEN
