@@ -23,8 +23,13 @@ export function LoginRecoveryActions({ actions, csrfToken, requestId, state, ret
   const resolvedActions = useMemo(() => actions.slice(0, 2).flatMap((descriptor): ResolvedAction[] => {
     const transport = resolveLoginRecoveryTransport({ descriptor, csrfToken, requestId, retryAfterSeconds });
     const canonical = RECOVERY_ACTION_DESCRIPTORS[descriptor.id];
-    return transport === null || canonical === undefined ? [] : [{ id: canonical.id, label: canonical.label[locale], transport }];
-  }), [actions, csrfToken, locale, requestId, retryAfterSeconds]);
+    if (transport === null || canonical === undefined) return [];
+    const action = canonical;
+    const label = state === null && action.id === "START_NORMAL_LOGIN"
+      ? locale === "vi" ? "Tiếp tục với Google Workspace" : "Continue with Google Workspace"
+      : action.label[locale];
+    return [{ id: action.id, label, transport }];
+  }), [actions, csrfToken, locale, requestId, retryAfterSeconds, state]);
   const cooldown = resolvedActions.find(({ transport }) => transport.kind === "NATIVE_FORM" && transport.cooldownSeconds !== null)?.transport;
   const [cooldownSeconds, setCooldownSeconds] = useState(cooldown?.kind === "NATIVE_FORM" ? cooldown.cooldownSeconds ?? 0 : 0);
   const [pending, setPending] = useState(false);

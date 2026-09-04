@@ -2,293 +2,34 @@ import Link from "next/link";
 import Image from "next/image";
 
 import Logo from "@/components/Logo";
-import { GoogleLoginSubmitButton } from "@/components/auth/GoogleLoginSubmitButton";
+import { LoginRecoveryActions } from "@/components/auth/LoginRecoveryActions";
 import { SecurityPrivacyDisclosure } from "@/components/auth/SecurityPrivacyDisclosure";
+import {
+  LOGIN_RECOVERY_COPY_BY_LOCALE,
+  resolveLoginRecoveryCopy,
+} from "@/components/auth/login-recovery-copy";
 import type { Locale } from "@/lib/preferences";
-
-type LoginState = Readonly<{
-  title: string;
-  description: string;
-  actionLabel: string;
-  isError: boolean;
-  showAlternateAccountAction?: boolean;
-  showContactUptechAction?: boolean;
-}>;
-
-type LoginCopy = Readonly<{
-  normal: LoginState;
-  states: Readonly<Record<string, LoginState>>;
-  home: string;
-  homeLabel: string;
-  alternateAccount: string;
-  contactUptech: string;
-  requestId: string;
-  redirecting: string;
-}>;
-
-const vietnameseStates: Readonly<Record<string, LoginState>> = Object.freeze({
-  personal_gmail: {
-    title: "Tài khoản không hợp lệ",
-    description: "Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  personal_account: {
-    title: "Tài khoản không hợp lệ",
-    description: "Vui lòng sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  unknown_workspace: {
-    title: "Tổ chức của bạn chưa được đăng ký",
-    description:
-      "Tài khoản Google đã được xác minh, nhưng tổ chức của bạn chưa được thiết lập trên UPTECH KNOWLEDGE.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  workspace_not_found: {
-    title: "Tổ chức của bạn chưa được đăng ký",
-    description:
-      "Tài khoản Google đã được xác minh, nhưng tổ chức của bạn chưa được thiết lập trên UPTECH KNOWLEDGE.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  access_required: {
-    title: "Bạn chưa được cấp quyền truy cập",
-    description:
-      "Vui lòng liên hệ quản trị viên workspace để được cấp quyền sử dụng UPTECH KNOWLEDGE.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  not_provisioned: {
-    title: "Bạn chưa được cấp quyền truy cập",
-    description:
-      "Vui lòng liên hệ quản trị viên workspace để được cấp quyền sử dụng UPTECH KNOWLEDGE.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  suspended: {
-    title: "Quyền truy cập đã bị tạm ngưng",
-    description:
-      "Tài khoản này hiện không còn quyền truy cập UPTECH KNOWLEDGE. Vui lòng liên hệ quản trị viên của tổ chức.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  user_suspended: {
-    title: "Tài khoản đã bị tạm ngưng",
-    description:
-      "Tài khoản của bạn đã bị tạm ngưng. Vui lòng liên hệ quản trị viên của tổ chức.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-  },
-  workspace_suspended: {
-    title: "Workspace đã bị tạm ngưng",
-    description:
-      "Workspace của tổ chức bạn đang tạm ngưng. Vui lòng liên hệ UPTECH để được hỗ trợ.",
-    actionLabel: "Đăng nhập bằng tài khoản khác",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  session_expired: {
-    title: "Phiên đăng nhập đã hết hạn",
-    description: "Vui lòng đăng nhập lại để tiếp tục.",
-    actionLabel: "Tiếp tục với Google Workspace",
-    isError: false,
-  },
-  rate_limited: {
-    title: "Vui lòng thử lại sau",
-    description:
-      "Có quá nhiều yêu cầu đăng nhập. Vui lòng đợi ít phút rồi thử lại.",
-    actionLabel: "Thử lại",
-    isError: true,
-  },
-  temporarily_unavailable: {
-    title: "Tạm thời không thể đăng nhập",
-    description:
-      "Dịch vụ xác minh tài khoản đang tạm thời gián đoạn. Vui lòng thử lại.",
-    actionLabel: "Thử lại",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-  provider_rejected: {
-    title: "Đăng nhập đã bị hủy",
-    description:
-      "Bạn có thể thử lại bằng tài khoản Google Workspace khác.",
-    actionLabel: "Thử lại",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-  active_authority: {
-    title: "Đã có phiên đăng nhập khác",
-    description:
-      "Trình duyệt đang có một phiên đăng nhập hoặc yêu cầu cấp quyền khác. Vui lòng đăng xuất trước khi đổi tài khoản.",
-    actionLabel: "Thử lại",
-    isError: true,
-  },
-  login_failed: {
-    title: "Không thể đăng nhập",
-    description:
-      "Đã xảy ra lỗi trong quá trình xác minh tài khoản. Vui lòng thử lại.",
-    actionLabel: "Thử lại",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-});
-
-const englishStates: Readonly<Record<string, LoginState>> = Object.freeze({
-  personal_gmail: {
-    title: "Invalid account",
-    description: "Please use the Google Workspace account provided by your organization.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  personal_account: {
-    title: "Invalid account",
-    description: "Please use the Google Workspace account provided by your organization.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  unknown_workspace: {
-    title: "Your organization is not registered",
-    description:
-      "Your Google account was verified, but your organization has not been set up in UPTECH KNOWLEDGE.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  workspace_not_found: {
-    title: "Your organization is not registered",
-    description:
-      "Your Google account was verified, but your organization has not been set up in UPTECH KNOWLEDGE.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  access_required: {
-    title: "Access has not been granted",
-    description: "Contact your workspace administrator to request access to UPTECH KNOWLEDGE.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  not_provisioned: {
-    title: "Access has not been granted",
-    description: "Contact your workspace administrator to request access to UPTECH KNOWLEDGE.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  suspended: {
-    title: "Access suspended",
-    description:
-      "This account no longer has access to UPTECH KNOWLEDGE. Contact your organization administrator.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  user_suspended: {
-    title: "Account suspended",
-    description: "Your account is suspended. Contact your organization administrator.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-  },
-  workspace_suspended: {
-    title: "Workspace suspended",
-    description: "Your organization's workspace is suspended. Contact UPTECH for support.",
-    actionLabel: "Sign in with another account",
-    isError: true,
-    showContactUptechAction: true,
-  },
-  session_expired: {
-    title: "Session expired",
-    description: "Sign in again to continue.",
-    actionLabel: "Continue with Google Workspace",
-    isError: false,
-  },
-  rate_limited: {
-    title: "Please try again later",
-    description: "Too many sign-in requests were received. Wait a few minutes and try again.",
-    actionLabel: "Try again",
-    isError: true,
-  },
-  temporarily_unavailable: {
-    title: "Sign-in is temporarily unavailable",
-    description: "The account verification service is temporarily unavailable. Please try again.",
-    actionLabel: "Try again",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-  provider_rejected: {
-    title: "Sign-in was not completed",
-    description: "The sign-in request was cancelled or declined. Try again when you are ready.",
-    actionLabel: "Try again",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-  active_authority: {
-    title: "Another sign-in session is active",
-    description:
-      "This browser already has another sign-in or authorization request. Sign out before switching accounts.",
-    actionLabel: "Try again",
-    isError: true,
-  },
-  login_failed: {
-    title: "Unable to sign in",
-    description: "An error occurred while verifying your account. Please try again.",
-    actionLabel: "Try again",
-    isError: true,
-    showAlternateAccountAction: true,
-  },
-});
-
-const loginCopy: Record<Locale, LoginCopy> = {
-  vi: {
-    normal: {
-      title: "Đăng nhập vào workspace",
-      description: "Sử dụng tài khoản Google Workspace do tổ chức của bạn cấp.",
-      actionLabel: "Tiếp tục với Google Workspace",
-      isError: false,
-    },
-    states: vietnameseStates,
-    home: "Trang chủ",
-    homeLabel: "UPTECH KNOWLEDGE - Trang chủ",
-    alternateAccount: "Đăng nhập bằng tài khoản khác",
-    contactUptech: "Liên hệ UPTECH",
-    requestId: "Mã yêu cầu",
-    redirecting: "Đang chuyển đến Google…",
-  },
-  en: {
-    normal: {
-      title: "Sign in to your workspace",
-      description: "Use your Workspace account.",
-      actionLabel: "Continue with Google Workspace",
-      isError: false,
-    },
-    states: englishStates,
-    home: "Home",
-    homeLabel: "UPTECH KNOWLEDGE - Home",
-    alternateAccount: "Sign in with another account",
-    contactUptech: "Contact UPTECH",
-    requestId: "Request ID",
-    redirecting: "Redirecting to Google…",
-  },
-};
-
-function resolveLoginState(copy: LoginCopy, error?: string): LoginState {
-  if (error === undefined) return copy.normal;
-  return copy.states[error] ?? copy.states.login_failed;
-}
+import type { RecoveryActionDescriptor, RecoveryState } from "@/server/auth/recovery-actions";
 
 export function GoogleWorkspaceLogin({
-  error,
+  state,
+  actions,
+  csrfToken,
   requestId,
+  retryAfterSeconds,
   locale,
 }: {
-  readonly error?: string;
-  readonly requestId?: string;
+  readonly state: RecoveryState | null;
+  readonly actions: readonly RecoveryActionDescriptor[];
+  readonly csrfToken: string | null;
+  readonly requestId: string | null;
+  readonly retryAfterSeconds: number | null;
   readonly locale: Locale;
 }) {
-  const copy = loginCopy[locale];
-  const state = resolveLoginState(copy, error);
+  const shellCopy = LOGIN_RECOVERY_COPY_BY_LOCALE[locale].shell;
+  const resolvedCopy = resolveLoginRecoveryCopy(locale, state);
+  const copy = resolvedCopy ?? resolveLoginRecoveryCopy(locale, "INTERNAL_ERROR")!;
+  const executableActions = resolvedCopy === null ? [] : actions;
 
   return (
     <main
@@ -332,7 +73,7 @@ export function GoogleWorkspaceLogin({
           data-testid="login-header-brand"
           translate="no"
           href="/"
-          aria-label={copy.homeLabel}
+          aria-label={shellCopy.homeAriaLabel}
           className="notranslate inline-flex min-h-12 items-center gap-3 text-white transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Logo className="h-7 w-auto" />
@@ -345,7 +86,7 @@ export function GoogleWorkspaceLogin({
           href="/"
           className="inline-flex min-h-12 items-center rounded-2xl border border-white/20 bg-slate-950/65 px-4 text-sm font-semibold text-white shadow-[0_14px_40px_rgba(2,6,23,0.28)] backdrop-blur-xl transition-colors hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
-          {copy.home}
+          {shellCopy.home}
         </Link>
         </div>
       </header>
@@ -384,7 +125,7 @@ export function GoogleWorkspaceLogin({
           </div>
 
           <div
-            role={state.isError ? "alert" : undefined}
+            role={copy.isError ? "alert" : undefined}
             className="mt-5 text-center"
           >
             <p translate="no" className="notranslate text-xs font-semibold uppercase tracking-[0.17em] text-blue-300">
@@ -394,47 +135,30 @@ export function GoogleWorkspaceLogin({
               id="login-title"
               className="mt-3 text-balance text-2xl font-semibold tracking-[-0.03em] text-slate-100 sm:text-[1.75rem]"
             >
-              {state.title}
+              {copy.title}
             </h1>
             <p className="mx-auto mt-3 max-w-sm text-pretty text-sm leading-6 text-slate-400">
-              {state.description}
+              {copy.description}
             </p>
           </div>
 
-          {requestId !== undefined ? (
+          {requestId !== null ? (
             <p className="mt-4 text-center text-xs text-slate-500">
-              {copy.requestId}: <span className="font-mono text-slate-400">{requestId}</span>
+              {shellCopy.requestIdLabel}: <span className="font-mono text-slate-400">{requestId}</span>
             </p>
           ) : null}
 
-          {state.showContactUptechAction ? (
-            <a
-              href="mailto:contact@uptech.vn"
-              className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-xl border border-blue-400/60 bg-blue-500 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-surface)]"
-            >
-              {copy.contactUptech}
-            </a>
-          ) : null}
-
-          <div aria-live="polite">
-            <form action="/api/v1/auth/google/transactions" method="post">
-              <GoogleLoginSubmitButton
-                label={state.actionLabel}
-                loadingLabel={copy.redirecting}
-              />
-            </form>
-          </div>
+          <LoginRecoveryActions
+            state={state}
+            actions={executableActions}
+            csrfToken={csrfToken}
+            requestId={requestId}
+            retryAfterSeconds={retryAfterSeconds}
+            locale={locale}
+          />
 
           <div className="mt-5 flex flex-col items-center gap-3 border-t border-slate-800 pt-5">
             <SecurityPrivacyDisclosure locale={locale} />
-            {state.showAlternateAccountAction ? (
-              <Link
-                href="/login"
-                className="inline-flex min-h-10 items-center rounded-lg px-2 text-xs font-medium text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-              >
-                {copy.alternateAccount}
-              </Link>
-            ) : null}
           </div>
         </div>
       </section>
