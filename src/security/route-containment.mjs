@@ -7,6 +7,9 @@ const PUBLIC_APPLICATION_PATHS = new Set([
   "/quy-trinh",
   "/dieu-khoan-su-dung",
   "/chinh-sach-bao-mat",
+  "/setup/provisioning",
+  "/help/enterprise-login",
+  "/help/google-workspace/domain-verification",
   "/api/demo-leads",
 ]);
 

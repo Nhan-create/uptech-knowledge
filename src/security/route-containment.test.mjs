@@ -31,6 +31,50 @@ test("allows only the explicitly public application paths", () => {
   }
 });
 
+test("allows only the exact setup recovery pages with public trailing-slash normalization", () => {
+  for (const pathname of [
+    "/setup/provisioning",
+    "/setup/provisioning/",
+    "/help/enterprise-login",
+    "/help/enterprise-login/",
+    "/help/google-workspace/domain-verification",
+    "/help/google-workspace/domain-verification/",
+  ]) {
+    assert.equal(
+      classifyUnconfiguredRoute(pathname),
+      "allow-public",
+      pathname,
+    );
+  }
+});
+
+test("denies hostile and near-match setup recovery paths", () => {
+  for (const pathname of [
+    "/setup/provisioning?state=READY",
+    "/help/enterprise-login?state=READY",
+    "/help/google-workspace/domain-verification?state=READY",
+    "/setup/provisioning/extra",
+    "/help/enterprise-login/extra",
+    "/help/google-workspace/domain-verification/extra",
+    "/help/google-workspace",
+    "/setup",
+    "/setup/provision",
+    "/help/enterprise-log-in",
+    "/help/google-workspaces/domain-verification",
+    "/api/setup/provisioning",
+    "/api/v1/setup/provisioning",
+    "/api/v1/auth/help/enterprise-login",
+    "/setup/arbitrary",
+    "/help/arbitrary",
+  ]) {
+    assert.equal(
+      classifyUnconfiguredRoute(pathname),
+      "deny-unconfigured",
+      pathname,
+    );
+  }
+});
+
 test("allows only the exact approved auth ingress paths", () => {
   for (const pathname of [
     "/api/v1/auth/google/transactions",
