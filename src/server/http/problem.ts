@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  resolveRecoveryActions,
+  type RecoveryActionId,
+  type RecoveryAuthority,
+  type RecoveryState,
+} from "../auth/recovery-actions.ts";
+
 export const PROBLEM_CONTENT_TYPE = "application/problem+json";
 
 const SAFE_PROBLEM_DEFINITIONS = Object.freeze({
@@ -103,9 +110,140 @@ const SAFE_PROBLEM_DEFINITIONS = Object.freeze({
     title: "Sync degraded",
     detail: "Required synchronized data is unavailable or stale.",
   },
+  SUPER_ADMIN_REQUIRED: {
+    status: 403,
+    title: "Super administrator required",
+    detail: "A Google Workspace super administrator must complete this step.",
+  },
+  DELEGATED_ADMIN_UNSUPPORTED: {
+    status: 403,
+    title: "Super administrator required",
+    detail: "A Google Workspace super administrator must complete this step.",
+  },
+  GOOGLE_CONSENT_CANCELLED: {
+    status: 400,
+    title: "Google consent cancelled",
+    detail: "Google Workspace consent was not completed.",
+  },
+  DIRECTORY_SCOPE_REQUIRED: {
+    status: 403,
+    title: "Directory permission required",
+    detail: "Additional Google Workspace permission is required.",
+  },
+  CONSENT_ACCOUNT_MISMATCH: {
+    status: 403,
+    title: "Google account mismatch",
+    detail: "Use the Google Workspace account for this organization.",
+  },
+  DOMAIN_NOT_VERIFIED: {
+    status: 403,
+    title: "Domain verification required",
+    detail: "Google Workspace domain verification is required.",
+  },
+  GOOGLE_ORGANIZATION_MISMATCH: {
+    status: 403,
+    title: "Google organization mismatch",
+    detail: "The Google Workspace organization does not match.",
+  },
+  ORGANIZATION_ALREADY_REGISTERED: {
+    status: 409,
+    title: "Organization already registered",
+    detail: "This organization has already been registered.",
+  },
+  ORGANIZATION_ALREADY_REGISTERED_ACCESS_REQUEST_AVAILABLE: {
+    status: 409,
+    title: "Organization already registered",
+    detail: "This organization has already been registered.",
+  },
+  DIRECTORY_BOOTSTRAP_SYNC_PENDING: {
+    status: 409,
+    title: "Directory setup in progress",
+    detail: "Google Workspace directory setup is still in progress.",
+  },
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE: {
+    status: 503,
+    title: "Directory setup retry required",
+    detail: "Google Workspace directory setup can be retried.",
+  },
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED: {
+    status: 503,
+    title: "Directory setup needs support",
+    detail: "Google Workspace directory setup needs support.",
+  },
+  ACCESS_MAPPING_CONFLICT: {
+    status: 409,
+    title: "Access mapping conflict",
+    detail: "Access cannot be determined for this account.",
+  },
+  USER_REMOVED: {
+    status: 403,
+    title: "Account removed",
+    detail: "This account no longer has access.",
+  },
+  DIRECTORY_SYNC_PENDING: {
+    status: 503,
+    title: "Directory synchronization pending",
+    detail: "Google Workspace directory synchronization is pending.",
+  },
+  DIRECTORY_STALE: {
+    status: 503,
+    title: "Directory data stale",
+    detail: "Google Workspace directory data is unavailable or stale.",
+  },
+  DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE: {
+    status: 503,
+    title: "Directory data stale",
+    detail: "Google Workspace directory data is unavailable or stale.",
+  },
+  ONBOARDING_EXPIRED: {
+    status: 401,
+    title: "Onboarding expired",
+    detail: "The organization setup session has expired.",
+  },
 } as const);
 
 export type ProblemCode = keyof typeof SAFE_PROBLEM_DEFINITIONS;
+
+const RECOVERY_STATE_BY_PROBLEM_CODE = Object.freeze({
+  VALIDATION_FAILED: "INTERNAL_ERROR",
+  UNAUTHENTICATED: "SESSION_EXPIRED",
+  ACCESS_TOKEN_EXPIRED: "SESSION_EXPIRED",
+  SESSION_REVOKED: "SESSION_REVOKED",
+  SESSION_EXPIRED: "SESSION_EXPIRED",
+  FORBIDDEN: "FORBIDDEN",
+  PERSONAL_GOOGLE_ACCOUNT: "PERSONAL_GOOGLE_ACCOUNT",
+  UNKNOWN_WORKSPACE: "UNKNOWN_WORKSPACE",
+  USER_NOT_PROVISIONED: "USER_NOT_PROVISIONED",
+  USER_SUSPENDED: "USER_SUSPENDED",
+  WORKSPACE_SUSPENDED: "WORKSPACE_SUSPENDED",
+  POLICY_OR_DEVICE_BLOCKED: "FORBIDDEN",
+  GOOGLE_CANCELLED: "PROVIDER_UNAVAILABLE",
+  AUTH_ERROR: "INTERNAL_ERROR",
+  NOT_FOUND: "INTERNAL_ERROR",
+  CONFLICT: "INTERNAL_ERROR",
+  RATE_LIMITED: "RATE_LIMITED",
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+  PROVIDER_UNAVAILABLE: "PROVIDER_UNAVAILABLE",
+  SYNC_DEGRADED: "DIRECTORY_STALE",
+  SUPER_ADMIN_REQUIRED: "SUPER_ADMIN_REQUIRED",
+  DELEGATED_ADMIN_UNSUPPORTED: "DELEGATED_ADMIN_UNSUPPORTED",
+  GOOGLE_CONSENT_CANCELLED: "GOOGLE_CONSENT_CANCELLED",
+  DIRECTORY_SCOPE_REQUIRED: "DIRECTORY_SCOPE_REQUIRED",
+  CONSENT_ACCOUNT_MISMATCH: "CONSENT_ACCOUNT_MISMATCH",
+  DOMAIN_NOT_VERIFIED: "DOMAIN_NOT_VERIFIED",
+  GOOGLE_ORGANIZATION_MISMATCH: "GOOGLE_ORGANIZATION_MISMATCH",
+  ORGANIZATION_ALREADY_REGISTERED: "ORGANIZATION_ALREADY_REGISTERED",
+  ORGANIZATION_ALREADY_REGISTERED_ACCESS_REQUEST_AVAILABLE: "ORGANIZATION_ALREADY_REGISTERED_ACCESS_REQUEST_AVAILABLE",
+  DIRECTORY_BOOTSTRAP_SYNC_PENDING: "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE",
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+  ACCESS_MAPPING_CONFLICT: "ACCESS_MAPPING_CONFLICT",
+  USER_REMOVED: "USER_REMOVED",
+  DIRECTORY_SYNC_PENDING: "DIRECTORY_SYNC_PENDING",
+  DIRECTORY_STALE: "DIRECTORY_STALE",
+  DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE: "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE",
+  ONBOARDING_EXPIRED: "ONBOARDING_EXPIRED",
+} as const satisfies Readonly<Record<ProblemCode, RecoveryState>>);
 
 export interface ProblemDocument {
   readonly type: string;
@@ -114,6 +252,7 @@ export interface ProblemDocument {
   readonly code: ProblemCode;
   readonly detail: string;
   readonly request_id: string;
+  readonly recovery_actions: readonly RecoveryActionId[];
 }
 
 export function createRequestId(): string {
@@ -136,11 +275,18 @@ export function requestIdFromHeaders(headers: Headers): string {
 export function createSafeProblem(
   code: ProblemCode,
   requestId: string = createRequestId(),
+  authority: RecoveryAuthority | null = null,
 ): ProblemDocument {
   if (!isRequestId(requestId)) {
     throw new TypeError("Request identifier is invalid");
   }
   const definition = SAFE_PROBLEM_DEFINITIONS[code];
+  const recoveryActions = Object.freeze(
+    resolveRecoveryActions({
+      state: RECOVERY_STATE_BY_PROBLEM_CODE[code],
+      authority,
+    }).map((action) => action.id),
+  );
   return Object.freeze({
     type: `urn:uptech:problem:${code.toLowerCase()}`,
     title: definition.title,
@@ -148,6 +294,7 @@ export function createSafeProblem(
     code,
     detail: definition.detail,
     request_id: requestId,
+    recovery_actions: recoveryActions,
   });
 }
 
