@@ -51,11 +51,33 @@ export type GoogleLoginInitiationResult =
   | { readonly outcome: "RATE_LIMITED" | "DENIED" };
 
 export type GoogleLoginCallbackResult =
-  | { readonly outcome: "NORMAL"; readonly sessionCredential: string }
+  | {
+      readonly outcome: "NORMAL";
+      readonly sessionCredential: string;
+      readonly route: "/admin" | "/home";
+    }
   | {
       readonly outcome: "ONBOARDING";
+      readonly accessState: "UNKNOWN_WORKSPACE";
       readonly onboardingCredential: string;
-      readonly allowedOperations: readonly string[];
+      readonly allowedOperations: readonly [
+        "FIRST_DOMAIN_CLAIM_READ",
+        "FIRST_DOMAIN_CLAIM_RESERVE",
+        "FIRST_DOMAIN_CLAIM_COMPLETE",
+      ];
+      readonly expiresAt: Date;
+    }
+  | {
+      readonly outcome: "ONBOARDING";
+      readonly accessState:
+        | "USER_NOT_PROVISIONED"
+        | "ACCESS_MAPPING_CONFLICT"
+        | "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE";
+      readonly onboardingCredential: string;
+      readonly allowedOperations: readonly [
+        "ACCESS_REQUEST_READ",
+        "ACCESS_REQUEST_SUBMIT",
+      ];
       readonly expiresAt: Date;
     }
   | {
@@ -397,29 +419,31 @@ export function createGoogleLoginService(input: {
         return {
           outcome: "NORMAL",
           sessionCredential: session.raw_token,
+          route: completed.route,
         };
       }
       if (completed.outcome === "ONBOARDING") {
-        if (completed.accessState === undefined) {
+        if (completed.accessState === "UNKNOWN_WORKSPACE") {
           return {
             outcome: "ONBOARDING",
+            accessState: completed.accessState,
             onboardingCredential,
             allowedOperations: completed.allowedOperations,
             expiresAt: completed.expiresAt,
           };
         }
         return {
-          outcome: "ACCESS_DENIED",
+          outcome: "ONBOARDING",
           accessState: completed.accessState,
+          onboardingCredential,
+          allowedOperations: completed.allowedOperations,
+          expiresAt: completed.expiresAt,
         };
       }
-      if (completed.accessState !== undefined) {
-        return {
-          outcome: "ACCESS_DENIED",
-          accessState: completed.accessState,
-        };
-      }
-      return { outcome: "DENIED" };
+      return {
+        outcome: "ACCESS_DENIED",
+        accessState: completed.accessState,
+      };
     },
   };
   return Object.freeze(implementation);

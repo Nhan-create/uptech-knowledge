@@ -134,12 +134,48 @@ for (const completion of [
     allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
     expiresAt: new Date("2026-09-01T04:15:00.000Z"),
   },
+  {
+    outcome: "ONBOARDING",
+    accessState: "ACCESS_MAPPING_CONFLICT",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    expiresAt: new Date("2026-09-01T04:15:00.000Z"),
+  },
+  {
+    outcome: "ONBOARDING",
+    accessState: "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    expiresAt: new Date("2026-09-01T04:15:00.000Z"),
+  },
   { outcome: "DENIED", accessState: "USER_SUSPENDED" },
+  { outcome: "DENIED", accessState: "USER_REMOVED" },
+  { outcome: "DENIED", accessState: "DIRECTORY_SYNC_PENDING" },
+  { outcome: "DENIED", accessState: "DIRECTORY_STALE" },
   { outcome: "DENIED", accessState: "WORKSPACE_SUSPENDED" },
 ] as const) {
-  test(`callback returns only fixed ${completion.accessState} access denial`, async () => {
+  test(`callback returns only the committed ${completion.accessState} authority`, async () => {
     const result = await callbackFor(completion);
     const expectedAccessState: GoogleLoginAccessState = completion.accessState;
+
+    if (completion.outcome === "ONBOARDING") {
+      assert.equal(result.outcome, "ONBOARDING");
+      if (result.outcome !== "ONBOARDING") {
+        assert.fail("expected restricted onboarding authority");
+      }
+      assert.equal(result.accessState, expectedAccessState);
+      assert.deepEqual(result.allowedOperations, completion.allowedOperations);
+      assert.deepEqual(result.expiresAt, completion.expiresAt);
+      assert.deepEqual(Object.keys(result).sort(), [
+        "accessState",
+        "allowedOperations",
+        "expiresAt",
+        "onboardingCredential",
+        "outcome",
+      ]);
+      assert.equal("sessionCredential" in result, false);
+      assert.equal("route" in result, false);
+      assert.equal("csrfCredential" in result, false);
+      return;
+    }
 
     assert.deepEqual(result, {
       outcome: "ACCESS_DENIED",

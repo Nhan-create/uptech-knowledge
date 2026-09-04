@@ -99,7 +99,10 @@ class FakeRepository implements GoogleLoginRepository {
     expiresAt: new Date("2026-08-25T04:10:00.000Z"),
   };
   consumeOverride: NonReservedConsumeResult | undefined;
-  completeResult: GoogleLoginCompletionResult = { outcome: "NORMAL" };
+  completeResult: GoogleLoginCompletionResult = {
+    outcome: "NORMAL",
+    route: "/home",
+  };
   rejectUnboundResult: "RECORDED" | "RATE_LIMITED" = "RECORDED";
   rejectBoundResult: "RECORDED" | "RATE_LIMITED" = "RECORDED";
   expectedNonceHash: Uint8Array | undefined;
@@ -174,7 +177,7 @@ class FakeRepository implements GoogleLoginRepository {
       this.completionHandleHash === undefined ||
       !sameBytes(input.completionHandleHash, this.completionHandleHash)
     ) {
-      return { outcome: "DENIED" };
+      return { outcome: "DENIED", accessState: "USER_REMOVED" };
     }
     return this.completeResult;
   }
@@ -533,6 +536,12 @@ test("normal callback consumes once and gives the database only verified claims 
     assert.fail("expected a normal session");
   }
   assert.equal(isCanonicalProof(result.sessionCredential), true);
+  assert.equal(result.route, "/home");
+  assert.deepEqual(Object.keys(result).sort(), [
+    "outcome",
+    "route",
+    "sessionCredential",
+  ]);
   assertRepositoryCalls(harness.repository, {
     begin: 1,
     consume: 1,
@@ -610,12 +619,32 @@ test("normal callback consumes once and gives the database only verified claims 
   }
 });
 
+for (const route of ["/admin", "/home"] as const) {
+  test(`a normal completion returns the database-selected ${route} route only`, async () => {
+    const harness = createHarness();
+    harness.repository.completeResult = { outcome: "NORMAL", route };
+
+    const result = await callbackWithStartedTransaction(harness);
+
+    assert.equal(result.outcome, "NORMAL");
+    if (result.outcome !== "NORMAL") {
+      assert.fail("expected a normal session");
+    }
+    assert.equal(result.route, route);
+    assert.equal("onboardingCredential" in result, false);
+    assert.equal("allowedOperations" in result, false);
+    assert.equal("expiresAt" in result, false);
+    assert.equal("accessState" in result, false);
+  });
+}
+
 test("onboarding returns only its opaque credential and bounded operations", async () => {
   const harness = createHarness();
   const expiresAt = new Date("2026-08-25T04:15:00.000Z");
   harness.repository.completeResult = {
     outcome: "ONBOARDING",
-    allowedOperations: ["submit_or_read_access_request"],
+    accessState: "USER_NOT_PROVISIONED",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
     expiresAt,
   };
 
@@ -626,8 +655,10 @@ test("onboarding returns only its opaque credential and bounded operations", asy
     assert.fail("expected onboarding authority");
   }
   assert.equal(isCanonicalProof(result.onboardingCredential), true);
+  assert.equal(result.accessState, "USER_NOT_PROVISIONED");
   assert.deepEqual(result.allowedOperations, [
-    "submit_or_read_access_request",
+    "ACCESS_REQUEST_READ",
+    "ACCESS_REQUEST_SUBMIT",
   ]);
   assert.deepEqual(result.expiresAt, expiresAt);
   assert.deepEqual(
@@ -635,6 +666,8 @@ test("onboarding returns only its opaque credential and bounded operations", asy
     Buffer.from(hashProof(result.onboardingCredential)),
   );
   assert.equal("sessionCredential" in result, false);
+  assert.equal("route" in result, false);
+  assert.equal("csrfCredential" in result, false);
   assertRepositoryCalls(harness.repository, {
     begin: 1,
     consume: 1,
@@ -646,11 +679,17 @@ test("onboarding returns only its opaque credential and bounded operations", asy
 
 test("a completion denial returns no candidate credential", async () => {
   const harness = createHarness();
-  harness.repository.completeResult = { outcome: "DENIED" };
+  harness.repository.completeResult = {
+    outcome: "DENIED",
+    accessState: "WORKSPACE_SUSPENDED",
+  };
 
   const result = await callbackWithStartedTransaction(harness);
 
-  assert.deepEqual(result, { outcome: "DENIED" });
+  assert.deepEqual(result, {
+    outcome: "ACCESS_DENIED",
+    accessState: "WORKSPACE_SUSPENDED",
+  });
   assertRepositoryCalls(harness.repository, {
     begin: 1,
     consume: 1,
