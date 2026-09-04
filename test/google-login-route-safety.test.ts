@@ -396,6 +396,93 @@ test("transaction routes current Web roles and preserves unavailable Web authori
   }
 });
 
+test("transaction denies every stale Web replay lookalike for LOGIN and SWITCH_ACCOUNT", async () => {
+  const session = issueSessionCredential().raw_token;
+  const exactTransactionUrl = `${appOrigin}/api/v1/auth/google/transactions`;
+  const hostileEnvelopes = [
+    {
+      label: "wrong request host",
+      url: "https://attacker.example/api/v1/auth/google/transactions",
+      origin: appOrigin,
+      fetchSite: "same-origin",
+    },
+    {
+      label: "wrong request path",
+      url: `${appOrigin}/api/v1/auth/google/transactions-lookalike`,
+      origin: appOrigin,
+      fetchSite: "same-origin",
+    },
+    {
+      label: "missing Origin",
+      url: exactTransactionUrl,
+      origin: null,
+      fetchSite: "same-origin",
+    },
+    {
+      label: "missing Sec-Fetch-Site",
+      url: exactTransactionUrl,
+      origin: appOrigin,
+      fetchSite: null,
+    },
+    {
+      label: "same-site Sec-Fetch-Site",
+      url: exactTransactionUrl,
+      origin: appOrigin,
+      fetchSite: "same-site",
+    },
+    {
+      label: "cross-site Sec-Fetch-Site",
+      url: exactTransactionUrl,
+      origin: appOrigin,
+      fetchSite: "cross-site",
+    },
+    {
+      label: "none Sec-Fetch-Site",
+      url: exactTransactionUrl,
+      origin: appOrigin,
+      fetchSite: "none",
+    },
+  ] as const;
+
+  webSessionResult = {};
+  detailedWebRouteResult = { kind: "NOT_CURRENT" };
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+  try {
+    for (const intent of ["LOGIN", "SWITCH_ACCOUNT"] as const) {
+      for (const envelope of hostileEnvelopes) {
+        initiateCalls = 0;
+        const headers = new Headers({
+          ...trustedHeaders,
+          cookie: `__Host-uptech_session=${session}`,
+          "content-type": "application/x-www-form-urlencoded",
+        });
+        if (envelope.origin !== null) headers.set("origin", envelope.origin);
+        if (envelope.fetchSite !== null) headers.set("sec-fetch-site", envelope.fetchSite);
+
+        const response = await transactionRoute.POST(new Request(envelope.url, {
+          method: "POST",
+          headers,
+          body: `intent=${intent}`,
+        }));
+
+        loginLocation(response, "login_failed");
+        assert.equal(response.headers.getSetCookie().length, 0, `${intent}: ${envelope.label}`);
+        assert.deepEqual(nonEmptyAuthorityCookieNames(response), [], `${intent}: ${envelope.label}`);
+        assert.equal(hasSessionCookie(response), false, `${intent}: ${envelope.label}`);
+        assert.equal(hasOnboardingCookie(response), false, `${intent}: ${envelope.label}`);
+        assert.equal(initiateCalls, 0, `${intent}: ${envelope.label}`);
+      }
+    }
+  } finally {
+    detailedWebRouteResult = { kind: "NOT_CURRENT" };
+    webSessionResult = new WebSessionAuthenticationError("stale");
+  }
+});
+
 test("transaction clears only a non-current Web cookie with a same-origin 307 then initiates once on replay", async () => {
   initiateCalls = 0;
   webSessionResult = {};
