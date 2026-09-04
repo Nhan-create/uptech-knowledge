@@ -2116,6 +2116,7 @@ test("access-request routines expose only closed results to API runtime", async 
 });
 
 test("Directory mapping evaluator is generation-bound, converges member signals, and fails closed", async () => {
+  await resetPostMigrationBase();
   const rows = await asMigrationOwner(async (client) => {
     await client.query(`
       INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,google_customer_id) VALUES
@@ -2126,12 +2127,12 @@ test("Directory mapping evaluator is generation-bound, converges member signals,
         ('97400000-0000-4000-8000-000000000005');
       INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
         VALUES
-        ('97400000-0000-4000-8000-000000000004','97400000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com','mapping-authorizer','admin@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
-        ('97400000-0000-4000-8000-000000000006','97400000-0000-4000-8000-000000000005','GOOGLE','https://accounts.google.com','mapping-authorizer-b','admin@mapping-b.example',true,'mapping-b.example',statement_timestamp());
+        ('97400000-0000-4000-8000-000000000004','97400000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com','mapping-authorizer','admin@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+        ('97400000-0000-4000-8000-000000000006','97400000-0000-4000-8000-000000000005','GOOGLE','https://accounts.google.com','mapping-authorizer-b','admin@${TENANT_B_DOMAIN}',true,'${TENANT_B_DOMAIN}',statement_timestamp());
       INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at,google_customer_id,domain_kind)
         VALUES
-        ('mapping-a.example','97400000-0000-4000-8000-000000000001','VERIFIED',statement_timestamp(),'mapping-customer-a','PRIMARY'),
-        ('mapping-b.example','97400000-0000-4000-8000-000000000002','VERIFIED',statement_timestamp(),'mapping-customer-b','PRIMARY');
+        ('${TENANT_A_DOMAIN}','97400000-0000-4000-8000-000000000001','VERIFIED',statement_timestamp(),'mapping-customer-a','PRIMARY'),
+        ('${TENANT_B_DOMAIN}','97400000-0000-4000-8000-000000000002','VERIFIED',statement_timestamp(),'mapping-customer-b','PRIMARY');
       INSERT INTO uptech.connectors(workspace_id,id,purpose,status,provider_customer_id,credential_reference,directory_authorized_by_identity_id,directory_authorized_scopes) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000010','DIRECTORY','ACTIVE','mapping-customer-a','secret://mapping-a','97400000-0000-4000-8000-000000000004',ARRAY[
           'https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly',
@@ -2148,21 +2149,21 @@ test("Directory mapping evaluator is generation-bound, converges member signals,
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000011','97400000-0000-4000-8000-000000000010','DIRECTORY_SYNC','SUCCEEDED','mapping-evaluator-a',statement_timestamp()),
         ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000042','97400000-0000-4000-8000-000000000041','97400000-0000-4000-8000-000000000040','DIRECTORY_SYNC','SUCCEEDED','mapping-evaluator-b',statement_timestamp());
       INSERT INTO uptech.people_sync_generations(workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,started_at,completed_at,fresh_until,google_customer_id,primary_domain) VALUES
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000013','SUPERSEDED',true,statement_timestamp()-interval '3 minutes',statement_timestamp()-interval '2 minutes',statement_timestamp()+interval '4 minutes','mapping-customer-a','mapping-a.example'),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000014','PUBLISHED',true,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '30 seconds',statement_timestamp()+interval '4 minutes','mapping-customer-a','mapping-a.example'),
-        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','97400000-0000-4000-8000-000000000040','97400000-0000-4000-8000-000000000042','97400000-0000-4000-8000-000000000044','PUBLISHED',true,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '30 seconds',statement_timestamp()+interval '4 minutes','mapping-customer-b','mapping-b.example');
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000013','SUPERSEDED',true,statement_timestamp()-interval '3 minutes',statement_timestamp()-interval '2 minutes',statement_timestamp()+interval '4 minutes','mapping-customer-a','${TENANT_A_DOMAIN}'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000014','PUBLISHED',true,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '30 seconds',statement_timestamp()+interval '4 minutes','mapping-customer-a','${TENANT_A_DOMAIN}'),
+        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','97400000-0000-4000-8000-000000000040','97400000-0000-4000-8000-000000000042','97400000-0000-4000-8000-000000000044','PUBLISHED',true,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '30 seconds',statement_timestamp()+interval '4 minutes','mapping-customer-b','${TENANT_B_DOMAIN}');
       INSERT INTO uptech.people_org_units(workspace_id,generation_id,google_org_unit_id,org_unit_path) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','ou-sales','/Sales');
       INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,primary_email,department,lifecycle_state,org_unit_path) VALUES
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','prior-absent','Prior','prior@mapping-a.example',NULL,'ACTIVE',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','admin-sub','Old Admin','old-admin@mapping-a.example',NULL,'ACTIVE',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','admin-sub','Admin','admin2@mapping-a.example','other','ACTIVE','/Sales'),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','member-sub','Member','member@mapping-a.example',' Engineering ','ACTIVE','/Sales'),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','conflict-sub','Conflict','conflict@mapping-a.example','engineering','ACTIVE',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','none-sub','None','none@mapping-a.example',NULL,'ACTIVE',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','suspended-sub','Suspended','suspended@mapping-a.example','engineering','SUSPENDED',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','deleted-sub','Deleted','deleted@mapping-a.example','engineering','DELETED',NULL),
-        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','admin-sub','Tenant B Admin','admin@mapping-b.example',NULL,'ACTIVE',NULL);
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','prior-absent','Prior','prior@${TENANT_A_DOMAIN}',NULL,'ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','admin-sub','Old Admin','old-admin@${TENANT_A_DOMAIN}',NULL,'ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','admin-sub','Admin','admin2@${TENANT_A_DOMAIN}','other','ACTIVE','/Sales'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','member-sub','Member','member@${TENANT_A_DOMAIN}',' Engineering ','ACTIVE','/Sales'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','conflict-sub','Conflict','conflict@${TENANT_A_DOMAIN}','engineering','ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','none-sub','None','none@${TENANT_A_DOMAIN}',NULL,'ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','suspended-sub','Suspended','suspended@${TENANT_A_DOMAIN}','engineering','SUSPENDED',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','deleted-sub','Deleted','deleted@${TENANT_A_DOMAIN}','engineering','DELETED',NULL),
+        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','admin-sub','Tenant B Admin','admin@${TENANT_B_DOMAIN}',NULL,'ACTIVE',NULL);
       INSERT INTO uptech.people_groups(workspace_id,generation_id,google_group_id,group_name) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','g-admin','Old Admins'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-admin','Admins'),
@@ -2250,7 +2251,7 @@ test("V2 web completion atomically admits a mapped known-tenant administrator", 
       audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
       web_pkce_kms_key_version,is_enabled
     ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','known.apps.googleusercontent.com',
-      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://known.example/callback',
+      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://${TENANT_A_DOMAIN}/callback',
       ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
       'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environment]);
     await client.query(`INSERT INTO uptech.oauth_transactions(
@@ -2267,8 +2268,8 @@ test("V2 web completion atomically admits a mapped known-tenant administrator", 
   });
   const row = (await asApi((client) => client.query(`SELECT outcome::text,route::text
     FROM uptech.complete_web_google_login_directory_v2(
-      decode(repeat('98',32),'hex'),ROW('accounts.google.com','admin-sub','admin@mapping-a.example',true,
-      'mapping-a.example',statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+      decode(repeat('98',32),'hex'),ROW('accounts.google.com','admin-sub','admin@${TENANT_A_DOMAIN}',true,
+      '${TENANT_A_DOMAIN}',statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
       'GOOGLE_WEB_LOGIN_V1',NULL,decode(repeat('92',32),'hex'))::uptech.google_verified_claims_assertion_v1,
       decode(repeat('99',32),'hex'),decode(repeat('9a',32),'hex'),decode(repeat('9b',32),'hex'),
       '97400000-0000-4000-8000-000000000090')`))).rows[0];
@@ -2308,7 +2309,7 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     })));
   const complete = (fixture: Awaited<ReturnType<typeof reserve>>, label: string,
     session = token(`${label}-session`), csrf = token(`${label}-csrf`),
-    onboarding = token(`${label}-onboarding`), hostedDomain = "mapping-a.example") =>
+    onboarding = token(`${label}-onboarding`), hostedDomain = TENANT_A_DOMAIN) =>
     asApi((client) => client.query(`SELECT outcome::text,access_state::text,route::text
       FROM uptech.complete_web_google_login_directory_v2(
         $1,ROW('accounts.google.com',$2,$3,true,$9,
@@ -2341,11 +2342,11 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,email_claim,
       email_verified,hosted_domain_claim,claims_observed_at) VALUES
       ('97500000-0000-4000-8000-000000000111','97500000-0000-4000-8000-000000000101',
-       'GOOGLE','https://accounts.google.com','member-sub','ACTIVE','member@mapping-a.example',true,
-       'mapping-a.example',statement_timestamp()),
+       'GOOGLE','https://accounts.google.com','member-sub','ACTIVE','member@${TENANT_A_DOMAIN}',true,
+       '${TENANT_A_DOMAIN}',statement_timestamp()),
       ('97500000-0000-4000-8000-000000000112','97500000-0000-4000-8000-000000000102',
-       'GOOGLE','https://accounts.google.com','none-sub','ACTIVE','owner@mapping-a.example',true,
-       'mapping-a.example',statement_timestamp())`);
+       'GOOGLE','https://accounts.google.com','none-sub','ACTIVE','owner@${TENANT_A_DOMAIN}',true,
+       '${TENANT_A_DOMAIN}',statement_timestamp())`);
     await client.query(`INSERT INTO uptech.workspace_memberships(
       workspace_id,id,user_id,role,status,authz_version) VALUES
       ($1,'97500000-0000-4000-8000-000000000121','97500000-0000-4000-8000-000000000101',
@@ -2354,8 +2355,8 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
        'OWNER','ACTIVE',3)`, [workspaceId]);
     await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,
       primary_email,department,lifecycle_state,org_unit_path) VALUES
-      ($1,$2,'rollback-sub','Rollback','rollback@mapping-a.example','engineering','ACTIVE','/Sales'),
-      ($1,$2,'org-only-sub','Org Only','org-only@mapping-a.example',NULL,'ACTIVE','/Sales')`,
+      ($1,$2,'rollback-sub','Rollback','rollback@${TENANT_A_DOMAIN}','engineering','ACTIVE','/Sales'),
+      ($1,$2,'org-only-sub','Org Only','org-only@${TENANT_A_DOMAIN}',NULL,'ACTIVE','/Sales')`,
     [workspaceId, generationId]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject)
@@ -2400,7 +2401,7 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
   await asMigrationOwner((client) => client.query(`UPDATE uptech.connectors SET status='ACTIVE'
     WHERE workspace_id=$1 AND id='97400000-0000-4000-8000-000000000010'`, [workspaceId]));
   await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
-    SET hosted_domain_claim='mapping-b.example'
+    SET hosted_domain_claim='${TENANT_B_DOMAIN}'
     WHERE id='97400000-0000-4000-8000-000000000004'`));
   const mismatchedOwner = await reserve("9b", "mismatched-owner", "none-sub");
   assert.deepEqual((await complete(mismatchedOwner, "mismatched-owner")).rows[0], {
@@ -2409,7 +2410,7 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
   assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.onboarding_sessions
     WHERE token_hash=$1`, [token("mismatched-owner-onboarding")])).rows[0].count, 0);
   await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
-    SET hosted_domain_claim='mapping-a.example'
+    SET hosted_domain_claim='${TENANT_A_DOMAIN}'
     WHERE id='97400000-0000-4000-8000-000000000004'`));
   assert.deepEqual((await pool.query(`SELECT request_id,metadata
     FROM uptech.platform_audit_events WHERE action='GOOGLE_AUTH_LOGIN_DENIED'
@@ -2469,7 +2470,7 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
   });
   const unknownCrossColumnCollision = await reserve("9d", "unknown-cross-column", "unknown-collision-sub");
   assert.deepEqual((await complete(unknownCrossColumnCollision, "unknown-cross-column",
-    undefined, undefined, token("mapped-member-csrf"), "unknown-collision.example")).rows[0], {
+    undefined, undefined, token("mapped-member-csrf"), UNKNOWN_DOMAIN)).rows[0], {
     outcome: "DENIED", access_state: null, route: null,
   });
   assert.deepEqual((await pool.query(`SELECT
@@ -2556,7 +2557,7 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
     return value;
   };
   const complete = async (subject: string, label: string,
-    onboarding = token(`${label}-onb`), hostedDomain = "mapping-a.example") => {
+    onboarding = token(`${label}-onb`), hostedDomain = TENANT_A_DOMAIN) => {
     const suffix = String(sequence++).padStart(12, "0");
     const id = `97600000-0000-4000-8000-${suffix}`;
     const handle = token(`${label}-handle`);
@@ -2578,7 +2579,7 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
         $1,ROW('accounts.google.com',$2,$3,true,$9,
           statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
-        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@${TENANT_A_DOMAIN}`, nonce,
       token(`${label}-session`), token(`${label}-csrf`), onboarding, id, hostedDomain]))).rows[0];
     return { id, onboarding, row };
   };
@@ -2589,7 +2590,7 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
       audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
       web_pkce_kms_key_version,is_enabled
     ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','known.apps.googleusercontent.com',
-      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://known.example/callback',
+      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://${TENANT_A_DOMAIN}/callback',
       ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
       'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environment]);
     await client.query(`UPDATE uptech.workspaces SET provisioning_policy='GOOGLE_GROUP_CONTROLLED'
@@ -2697,8 +2698,8 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,
       email_claim,email_verified,hosted_domain_claim,claims_observed_at) VALUES
       ('97600000-0000-4000-8000-000000000102','97600000-0000-4000-8000-000000000101',
-       'GOOGLE','https://accounts.google.com','ineligible-sub','ACTIVE','ineligible@mapping-a.example',
-       true,'mapping-a.example',statement_timestamp())`);
+       'GOOGLE','https://accounts.google.com','ineligible-sub','ACTIVE','ineligible@${TENANT_A_DOMAIN}',
+       true,'${TENANT_A_DOMAIN}',statement_timestamp())`);
   });
   const ineligible = await complete("ineligible-sub", "ineligible");
   assert.deepEqual(ineligible.row, { outcome: "DENIED", access_state: "USER_REMOVED",
@@ -2710,8 +2711,8 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,
       email_claim,email_verified,hosted_domain_claim,claims_observed_at) VALUES
       ('97600000-0000-4000-8000-000000000112','97600000-0000-4000-8000-000000000111',
-       'GOOGLE','https://accounts.google.com','absent-owner-sub','ACTIVE','owner@mapping-a.example',
-       true,'mapping-a.example',statement_timestamp())`);
+       'GOOGLE','https://accounts.google.com','absent-owner-sub','ACTIVE','owner@${TENANT_A_DOMAIN}',
+       true,'${TENANT_A_DOMAIN}',statement_timestamp())`);
     await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status)
       VALUES ($1,'97600000-0000-4000-8000-000000000113',
         '97600000-0000-4000-8000-000000000111','OWNER','ACTIVE')`, [workspaceId]);
@@ -2752,7 +2753,7 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
   [suspendedMembership.id])).rows[0].count, 1);
 
   const tenantB = await complete("admin-sub", "tenant-b", token("tenant-b-onb"),
-    "mapping-b.example");
+    TENANT_B_DOMAIN);
   assert.equal(tenantB.row.outcome, "ONBOARDING");
   assert.equal(tenantB.row.access_state, "USER_NOT_PROVISIONED");
   assert.equal((await pool.query(`SELECT resource_workspace_id FROM uptech.onboarding_sessions
@@ -2821,7 +2822,7 @@ test("V2 controlled completion revalidates Directory authority after credential-
     await client.query(`INSERT INTO uptech.people_profiles(
       workspace_id,generation_id,google_subject,full_name,primary_email,department,
       lifecycle_state,org_unit_path,effective_role,effective_department_key
-    ) VALUES ($1,$2,$3,'Directory Race','directory-race@mapping-a.example','sales',
+    ) VALUES ($1,$2,$3,'Directory Race','directory-race@${TENANT_A_DOMAIN}','sales',
       'ACTIVE','/Sales','MEMBER','SALES')`, [workspaceId, generationId, subject]);
     await client.query(`INSERT INTO uptech.oauth_transactions(
       id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
@@ -2848,10 +2849,10 @@ test("V2 controlled completion revalidates Directory authority after credential-
     completionPid = (await completion.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     const pending = completion.query(`SELECT outcome::text,access_state::text,route::text
       FROM uptech.complete_web_google_login_directory_v2(
-        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        $1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
           statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
-        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@${TENANT_A_DOMAIN}`, nonce,
       sessionToken, csrfToken, onboardingToken, requestId]);
 
     let blocked = false;
@@ -2937,7 +2938,7 @@ test("V2 controlled completion denies when the locked Directory generation expir
     await client.query(`INSERT INTO uptech.people_profiles(
       workspace_id,generation_id,google_subject,full_name,primary_email,department,
       lifecycle_state,org_unit_path,effective_role,effective_department_key
-    ) VALUES ($1,$2,$3,'Directory TTL Race','directory-ttl-race@mapping-a.example','sales',
+    ) VALUES ($1,$2,$3,'Directory TTL Race','directory-ttl-race@${TENANT_A_DOMAIN}','sales',
       'ACTIVE','/Sales','MEMBER','SALES')`, [workspaceId, generationId, subject]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject
@@ -2974,10 +2975,10 @@ test("V2 controlled completion denies when the locked Directory generation expir
     await completion.query("SET LOCAL ROLE uptech_api_runtime");
     const row = (await completion.query(`SELECT outcome::text,access_state::text,route::text
       FROM uptech.complete_web_google_login_directory_v2(
-        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        $1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
           statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
-        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@${TENANT_A_DOMAIN}`, nonce,
       sessionToken, csrfToken, onboardingToken, transactionId])).rows[0];
     await completion.query("COMMIT");
     assert.deepEqual(row, { outcome: "DENIED", access_state: null, route: null });
@@ -3049,7 +3050,7 @@ test("Directory publish and controlled login serialize without a workspace-gener
     await client.query(`INSERT INTO uptech.people_profiles(
       workspace_id,generation_id,google_subject,full_name,primary_email,department,
       lifecycle_state,org_unit_path,effective_role,effective_department_key
-    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@mapping-a.example','sales',
+    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@${TENANT_A_DOMAIN}','sales',
       'ACTIVE','/Sales','MEMBER','SALES')`, [workspaceId, currentGenerationId, subject]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject
@@ -3064,14 +3065,14 @@ test("Directory publish and controlled login serialize without a workspace-gener
       workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,
       started_at,google_customer_id,primary_domain
     ) VALUES ($1,$2,$3,$4,$5,'RUNNING',false,statement_timestamp(),
-      'mapping-customer-a','mapping-a.example')`, [workspaceId, generationId, connectorId, jobId, fence]);
+      'mapping-customer-a','${TENANT_A_DOMAIN}')`, [workspaceId, generationId, connectorId, jobId, fence]);
     await client.query(`INSERT INTO uptech.people_groups(
       workspace_id,generation_id,google_group_id,group_name
     ) VALUES ($1,$2,'g-sales','Sales')`, [workspaceId, generationId]);
     await client.query(`INSERT INTO uptech.people_profiles(
       workspace_id,generation_id,google_subject,full_name,primary_email,department,
       lifecycle_state,org_unit_path
-    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@mapping-a.example','sales',
+    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@${TENANT_A_DOMAIN}','sales',
       'ACTIVE','/Sales')`, [workspaceId, generationId, subject]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject
@@ -3107,10 +3108,10 @@ test("Directory publish and controlled login serialize without a workspace-gener
     loginPid = (await login.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     const loginPending = login.query(`SELECT outcome::text,access_state::text,route::text
       FROM uptech.complete_web_google_login_directory_v2(
-        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        $1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
           statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
-        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@${TENANT_A_DOMAIN}`, nonce,
       sessionToken, csrfToken, onboardingToken, transactionId]);
 
     for (let attempt = 0; attempt < 100; attempt += 1) {
