@@ -3,6 +3,10 @@ import type { QueryResultRow } from "pg";
 import type { DatabasePool } from "../../db/core.ts";
 import type {
   BootstrapCompleteInput,
+  BootstrapFinishOutcome,
+  BootstrapReissueStatusInput,
+  BootstrapReissueStatusResult,
+  BootstrapRevokeOutcome,
   BootstrapRetryOutcome,
   BootstrapStatusOutcome,
   GoogleWorkspaceBootstrapRepository,
@@ -12,8 +16,12 @@ import type {
 export type {
   BootstrapAbortInput,
   BootstrapCompleteInput,
+  BootstrapFinishOutcome,
   BootstrapPrepareInput,
   BootstrapReconcileInput,
+  BootstrapReissueStatusInput,
+  BootstrapReissueStatusResult,
+  BootstrapRevokeOutcome,
   BootstrapRetryOutcome,
   BootstrapStatusInput,
   BootstrapStatusOutcome,
@@ -76,6 +84,30 @@ FROM uptech.retry_google_workspace_bootstrap_sync_v1(
   $1::uptech.google_auth_hash32_v1,$2::uuid
 ) AS result`;
 
+const FINISH_SQL = `SELECT result.outcome::text AS outcome
+FROM uptech.finish_google_workspace_bootstrap_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
+const REISSUE_STATUS_SQL = `SELECT result.outcome::text AS outcome,result.status_expires_at
+FROM uptech.reissue_google_workspace_bootstrap_status_v1(
+  $1::uptech.google_auth_hash32_v1,
+  ROW(
+    $2::uptech.google_auth_issuer_v1,$3::uptech.google_provider_subject_v1,
+    $4::uptech.google_normalized_email_v1,$5::boolean,
+    $6::uptech.google_normalized_domain_v1,$7::timestamptz,$8::timestamptz,
+    $9::uptech.google_auth_configuration_key_v1,
+    $10::uptech.google_auth_configuration_key_v1,
+    $11::uptech.google_auth_hash32_v1
+  )::uptech.google_verified_claims_assertion_v1,
+  $12::uptech.google_auth_hash32_v1,$13::uuid
+) AS result`;
+
+const REVOKE_CAPABILITY_SQL = `SELECT result.outcome::text AS outcome
+FROM uptech.revoke_onboarding_capability_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
 function bytes(value: Uint8Array): Buffer { return Buffer.from(value); }
 
 function compositeField(value: string | null): string {
@@ -132,7 +164,7 @@ export function createGoogleWorkspaceBootstrapStartAdmission(
 export function createGoogleWorkspaceBootstrapRepository(
   pool: Pick<DatabasePool, "query">,
 ): GoogleWorkspaceBootstrapRepository {
-  const statusOperation = <T extends BootstrapStatusOutcome | BootstrapRetryOutcome>(
+  const statusOperation = <T extends string>(
     sql: string,
     allowed: readonly T[],
     input: import("./types.ts").BootstrapStatusInput,
@@ -192,6 +224,32 @@ export function createGoogleWorkspaceBootstrapRepository(
       "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
       "ONBOARDING_EXPIRED", "DENIED",
     ] as const, input),
+    finish: (input) => statusOperation(FINISH_SQL, ["FINISHED", "DENIED"] as const, input),
+    reissueStatus: (input: BootstrapReissueStatusInput) => unknownBoundary(async (): Promise<BootstrapReissueStatusResult> => {
+      if (!(input.reservedCompletionHash instanceof Uint8Array) || input.reservedCompletionHash.byteLength !== 32 ||
+          !(input.newStatusTokenHash instanceof Uint8Array) || input.newStatusTokenHash.byteLength !== 32 ||
+          !(input.claims.nonceHash instanceof Uint8Array) || input.claims.nonceHash.byteLength !== 32 ||
+          !CANONICAL_UUID.test(input.requestId)) {
+        throw new BootstrapCommitUnknownError();
+      }
+      const claims = input.claims;
+      const row = one((await pool.query(REISSUE_STATUS_SQL, [
+        bytes(input.reservedCompletionHash), claims.issuer, claims.providerSubject,
+        claims.normalizedEmail, claims.emailVerified, claims.hostedDomain,
+        new Date(claims.issuedAtEpochSeconds * 1000), new Date(claims.expiresAtEpochSeconds * 1000),
+        claims.audienceConfigurationKey, claims.authorizedPartyConfigurationKey,
+        bytes(claims.nonceHash), bytes(input.newStatusTokenHash), input.requestId,
+      ])).rows as QueryResultRow[]);
+      if (row.outcome === "DENIED" && row.status_expires_at === null && Object.keys(row).length === 2) {
+        return { outcome: "DENIED" };
+      }
+      if (row.outcome !== "REISSUED" || Object.keys(row).length !== 2 ||
+          !(row.status_expires_at instanceof Date) || !Number.isFinite(row.status_expires_at.getTime())) {
+        throw new BootstrapCommitUnknownError();
+      }
+      return { outcome: "REISSUED", statusExpiresAt: new Date(row.status_expires_at.getTime()) };
+    }),
+    revokeCapability: (input) => statusOperation(REVOKE_CAPABILITY_SQL, ["REVOKED", "DENIED"] as const, input),
   };
   return Object.freeze(implementation);
 }

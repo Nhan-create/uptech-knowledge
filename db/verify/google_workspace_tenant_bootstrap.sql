@@ -25,6 +25,9 @@ BEGIN
       'REQUEUED','DIRECTORY_BOOTSTRAP_SYNC_PENDING','READY',
       'DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED',
       'ONBOARDING_EXPIRED','DENIED']::text[]),
+    ('google_workspace_bootstrap_finish_outcome_v1', ARRAY['FINISHED','DENIED']::text[]),
+    ('google_workspace_bootstrap_reissue_outcome_v1', ARRAY['REISSUED','DENIED']::text[]),
+    ('onboarding_capability_revoke_outcome_v1', ARRAY['REVOKED','DENIED']::text[]),
     ('google_workspace_bootstrap_start_admission_outcome_v1', ARRAY['ADMITTED','RATE_LIMITED','DENIED']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
@@ -69,6 +72,12 @@ BEGIN
       ARRAY['uptech.google_workspace_bootstrap_status_outcome_v1']::text[]),
     ('google_workspace_bootstrap_retry_result_v1', ARRAY['outcome']::text[],
       ARRAY['uptech.google_workspace_bootstrap_retry_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_finish_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_finish_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_reissue_result_v1', ARRAY['outcome','status_expires_at']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_reissue_outcome_v1','timestamp with time zone']::text[]),
+    ('onboarding_capability_revoke_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.onboarding_capability_revoke_outcome_v1']::text[]),
     ('google_workspace_bootstrap_start_admission_result_v1', ARRAY['outcome']::text[],
       ARRAY['uptech.google_workspace_bootstrap_start_admission_outcome_v1']::text[])
   ) AS required(type_name, attribute_names, attribute_types)
@@ -407,7 +416,10 @@ BEGIN
 
   FOREACH object_oid IN ARRAY ARRAY[
     'uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
-    'uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
+    'uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.finish_google_workspace_bootstrap_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.reissue_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.revoke_onboarding_capability_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
   ] LOOP
     IF NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
@@ -446,13 +458,27 @@ DO $verify$
 DECLARE
   status_result uptech.google_workspace_bootstrap_status_result_v1;
   retry_result uptech.google_workspace_bootstrap_retry_result_v1;
+  finish_result uptech.google_workspace_bootstrap_finish_result_v1;
+  reissue_result uptech.google_workspace_bootstrap_reissue_result_v1;
+  revoke_result uptech.onboarding_capability_revoke_result_v1;
 BEGIN
   status_result := uptech.read_google_workspace_bootstrap_status_v1(
     decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fe');
   retry_result := uptech.retry_google_workspace_bootstrap_sync_v1(
     decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000ff');
+  finish_result := uptech.finish_google_workspace_bootstrap_v1(
+    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fd');
+  reissue_result := uptech.reissue_google_workspace_bootstrap_status_v1(
+    decode(repeat('fe',32),'hex'), NULL::uptech.google_verified_claims_assertion_v1,
+    decode(repeat('fd',32),'hex'), '92000000-0000-4000-8000-0000000000fc');
+  revoke_result := uptech.revoke_onboarding_capability_v1(
+    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fb');
   IF pg_catalog.to_jsonb(status_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
      OR pg_catalog.to_jsonb(retry_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
+     OR pg_catalog.to_jsonb(finish_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
+     OR pg_catalog.to_jsonb(reissue_result) IS DISTINCT FROM
+       '{"outcome":"DENIED","status_expires_at":null}'::jsonb
+     OR pg_catalog.to_jsonb(revoke_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
   THEN
     RAISE EXCEPTION 'bootstrap status routines do not fail closed without tenant fields';
   END IF;

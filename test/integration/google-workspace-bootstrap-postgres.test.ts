@@ -895,6 +895,9 @@ test("status and retry expose only exact API routines and closed v1 result types
   for (const signature of [
     "uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)",
     "uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)",
+    "uptech.finish_google_workspace_bootstrap_v1(uptech.google_auth_hash32_v1,uuid)",
+    "uptech.reissue_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)",
+    "uptech.revoke_onboarding_capability_v1(uptech.google_auth_hash32_v1,uuid)",
   ]) {
     const result = await pool.query(`SELECT p.prosecdef,p.provolatile,p.proconfig,
       has_function_privilege('uptech_api_runtime',p.oid,'EXECUTE') AS api_execute,
@@ -907,8 +910,12 @@ test("status and retry expose only exact API routines and closed v1 result types
   }
   assert.deepEqual((await pool.query(`SELECT
     to_regtype('uptech.google_workspace_bootstrap_status_result_v1') IS NOT NULL AS status_result,
-    to_regtype('uptech.google_workspace_bootstrap_retry_result_v1') IS NOT NULL AS retry_result`)).rows[0],
-  { status_result: true, retry_result: true });
+    to_regtype('uptech.google_workspace_bootstrap_retry_result_v1') IS NOT NULL AS retry_result,
+    to_regtype('uptech.google_workspace_bootstrap_finish_result_v1') IS NOT NULL AS finish_result,
+    to_regtype('uptech.google_workspace_bootstrap_reissue_result_v1') IS NOT NULL AS reissue_result,
+    to_regtype('uptech.onboarding_capability_revoke_result_v1') IS NOT NULL AS revoke_result`)).rows[0],
+  { status_result: true, retry_result: true, finish_result: true,
+    reissue_result: true, revoke_result: true });
 });
 
 test("status and retry are capability-bound across job, generation, and tenant states", async () => {
@@ -1049,7 +1056,21 @@ test("status and retry are capability-bound across job, generation, and tenant s
   assert.deepEqual(await read(), { outcome: "READY" });
   assert.deepEqual(await retry(), { outcome: "READY" });
 
+  const sessionsBeforeFinish = Number((await pool.query(
+    "SELECT count(*) FROM uptech.sessions WHERE workspace_id=$1", [workspaceId],
+  )).rows[0].count);
+  assert.deepEqual(await repositoryCall((repository) => repository.finish({
+    statusTokenHash, requestId,
+  })), { outcome: "FINISHED" });
+  assert.deepEqual(await repositoryCall((repository) => repository.finish({
+    statusTokenHash, requestId,
+  })), { outcome: "DENIED" });
+  assert.equal(Number((await pool.query(
+    "SELECT count(*) FROM uptech.sessions WHERE workspace_id=$1", [workspaceId],
+  )).rows[0].count), sessionsBeforeFinish);
+
   await asMigrationOwner((client) => client.query(`UPDATE uptech.onboarding_sessions SET
+    status='ACTIVE',consumed_at=NULL,
     resource_workspace_id='90000000-0000-0000-0000-000000000001' WHERE token_hash=$1`, [statusTokenHash]));
   assert.deepEqual(await read(), { outcome: "DENIED" });
   await asMigrationOwner((client) => client.query(`UPDATE uptech.onboarding_sessions SET
@@ -1062,4 +1083,179 @@ test("status and retry are capability-bound across job, generation, and tenant s
     expires_at=statement_timestamp()+interval '1 hour' WHERE token_hash=$1`, [statusTokenHash]));
   assert.deepEqual(await read(), { outcome: "DENIED" });
   assert.deepEqual(await retry(), { outcome: "DENIED" });
+});
+
+test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed and replay-safe", async () => {
+  const fixture = {
+    userId: "97200000-0000-0000-0000-000000000001",
+    identityId: "97200000-0000-0000-0000-000000000002",
+    sourceId: "97200000-0000-0000-0000-000000000003",
+    sourceByte: 0xf1,
+    subject: "bootstrap-reissue-sub",
+    domain: "reissue.example",
+  } as const;
+  const attemptId = "97200000-0000-0000-0000-000000000004";
+  const workspaceId = "97200000-0000-0000-0000-000000000005";
+  const initialStatusHash = hash32(0xf2);
+  const repositoryCall = <T>(operation: (repository: ReturnType<typeof createGoogleWorkspaceBootstrapRepository>) => Promise<T>) =>
+    asApi((client) => operation(createGoogleWorkspaceBootstrapRepository(client as never)));
+
+  await seedBootstrapSource(fixture);
+  assert.deepEqual(await repositoryCall((repository) => repository.prepare({
+    attemptId, sourceTokenHash: hash32(fixture.sourceByte),
+    candidateWorkspaceId: workspaceId, statusTokenHash: initialStatusHash,
+    requestId: "97200000-0000-4000-8000-000000000006",
+  })), { outcome: "PREPARED" });
+  assert.equal((await repositoryCall((repository) => repository.complete({
+    attemptId, sourceTokenHash: hash32(fixture.sourceByte),
+    statusTokenHash: initialStatusHash, customerId: "customer-reissue",
+    customerDomain: fixture.domain, providerSubject: fixture.subject,
+    hostedDomain: fixture.domain,
+    verifiedDomains: [{ normalizedDomain: fixture.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+    credentialReference: "secretref://google-workspace/reissue" as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "97200000-0000-4000-8000-000000000007",
+  }))).outcome, "PROVISIONING");
+
+  let environmentName = "";
+  await asMigrationOwner(async (client) => {
+    const active = await client.query<{ environment_name: string }>(
+      "SELECT environment_name::text FROM uptech.google_auth_environment_registry WHERE is_active",
+    );
+    environmentName = active.rows[0]?.environment_name ?? "bootstrap-reissue-test";
+    if (active.rowCount === 0) {
+      await client.query(`INSERT INTO uptech.google_auth_environment_registry(
+        environment_name,rate_limit_audit_hmac_key,is_active
+      ) VALUES ($1,$2,true)`, [environmentName, hash32(0x60)]);
+    }
+    await client.query(`INSERT INTO uptech.google_auth_configuration_registry(
+      configuration_key,environment_name,purpose,google_client_id,google_audience,
+      audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
+      web_pkce_kms_key_version,is_enabled
+    ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','reissue.apps.googleusercontent.com',
+      'reissue.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1',
+      'https://reissue.example/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
+      ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
+      'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environmentName]);
+  });
+
+  const reserve = async (index: number, completionByte: number, nonceByte: number, expired = false) => {
+    const completionHash = hash32(completionByte);
+    await asMigrationOwner((client) => client.query(`WITH timing AS (
+      SELECT statement_timestamp() - interval '4 minutes' AS created_at,
+        statement_timestamp() - CASE WHEN $7::boolean THEN interval '3 minutes' ELSE interval '30 seconds' END AS consumed_at
+    ) INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,
+      web_nonce_hash,web_browser_binding_hash,web_pkce_envelope_version,
+      web_pkce_algorithm,web_pkce_nonce,web_pkce_ciphertext,web_pkce_tag,
+      web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) SELECT $1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,
+      'AES-256-GCM',decode(repeat('ab',12),'hex'),decode(repeat('bc',40),'hex'),
+      decode(repeat('cd',16),'hex'),'test-key-v1',decode(repeat('de',32),'hex'),
+      'EXCHANGE_RESERVED',$6,$1,timing.created_at,timing.created_at+interval '10 minutes',
+      timing.consumed_at,timing.consumed_at+interval '2 minutes' FROM timing`, [
+      `97200000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`,
+      environmentName!, hash32(0x20 + index), hash32(nonceByte),
+      hash32(0x30 + index), completionHash, expired,
+    ]));
+    return completionHash;
+  };
+  const claims = (nonceByte: number, providerSubject: string = fixture.subject) => {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      issuer: "https://accounts.google.com" as const,
+      providerSubject, normalizedEmail: `owner@${fixture.domain}`,
+      emailVerified: true as const, hostedDomain: fixture.domain,
+      issuedAtEpochSeconds: now - 5, expiresAtEpochSeconds: now + 3600,
+      audienceConfigurationKey: "GOOGLE_WEB_LOGIN_V1" as const,
+      authorizedPartyConfigurationKey: null, nonceHash: hash32(nonceByte),
+      displayName: null, pictureUrl: null,
+    };
+  };
+
+  assert.deepEqual(await repositoryCall((repository) => repository.finish({
+    statusTokenHash: hash32(fixture.sourceByte),
+    requestId: "97200000-0000-4000-8000-000000000008",
+  })), { outcome: "DENIED" });
+  assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: initialStatusHash, claims: claims(0x70),
+    newStatusTokenHash: hash32(0xf3),
+    requestId: "97200000-0000-4000-8000-000000000009",
+  })), { outcome: "DENIED" });
+
+  const completion = await reserve(1, 0x71, 0x72);
+  const replacementHash = hash32(0xf3);
+  const reissued = await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: completion, claims: claims(0x72),
+    newStatusTokenHash: replacementHash,
+    requestId: "97200000-0000-4000-8000-000000000010",
+  }));
+  assert.equal(reissued.outcome, "REISSUED");
+  assert.ok(reissued.outcome === "REISSUED" &&
+    reissued.statusExpiresAt.getTime() <= Date.now() + 24 * 60 * 60 * 1000);
+  assert.deepEqual((await pool.query(`SELECT status,
+    (SELECT count(*)::int FROM uptech.onboarding_sessions
+      WHERE identity_id=$2 AND resource_workspace_id=$3 AND status='ACTIVE'
+        AND cardinality(allowed_operations)=2
+        AND allowed_operations @> ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY']) AS active_statuses,
+    (SELECT count(*)::int FROM uptech.sessions WHERE workspace_id=$3) AS sessions
+    FROM uptech.onboarding_sessions WHERE token_hash=$1`,
+  [initialStatusHash, fixture.identityId, workspaceId])).rows[0], {
+    status: "REVOKED", active_statuses: 1, sessions: 0,
+  });
+  assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: completion, claims: claims(0x72),
+    newStatusTokenHash: hash32(0xf4),
+    requestId: "97200000-0000-4000-8000-000000000011",
+  })), { outcome: "DENIED" });
+
+  const expiredCompletion = await reserve(2, 0x73, 0x74, true);
+  assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: expiredCompletion, claims: claims(0x74),
+    newStatusTokenHash: hash32(0xf5),
+    requestId: "97200000-0000-4000-8000-000000000012",
+  })), { outcome: "DENIED" });
+
+  const crossIdentityCompletion = await reserve(3, 0x75, 0x76);
+  assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: crossIdentityCompletion,
+    claims: claims(0x76, "bootstrap-status-other-sub"),
+    newStatusTokenHash: hash32(0xf6),
+    requestId: "97200000-0000-4000-8000-000000000013",
+  })), { outcome: "DENIED" });
+
+  assert.deepEqual(await repositoryCall((repository) => repository.revokeCapability({
+    statusTokenHash: replacementHash,
+    requestId: "97200000-0000-4000-8000-000000000014",
+  })), { outcome: "REVOKED" });
+  assert.deepEqual(await repositoryCall((repository) => repository.revokeCapability({
+    statusTokenHash: replacementHash,
+    requestId: "97200000-0000-4000-8000-000000000015",
+  })), { outcome: "REVOKED" });
+  assert.deepEqual(await repositoryCall((repository) => repository.revokeCapability({
+    statusTokenHash: hash32(0xfe),
+    requestId: "97200000-0000-4000-8000-000000000016",
+  })), { outcome: "DENIED" });
+
+  const bound = await pool.query(`SELECT receipt.connector_id::text AS connector_id,job.id::text AS job_id
+    FROM uptech.google_workspace_bootstrap_receipts receipt
+    JOIN uptech.sync_jobs job ON job.workspace_id=receipt.workspace_id
+      AND job.connector_id=receipt.connector_id
+      AND job.payload->>'bootstrap_attempt_id'=receipt.attempt_id::text
+    WHERE receipt.workspace_id=$1`, [workspaceId]);
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.people_sync_generations(
+    workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,
+    started_at,completed_at,fresh_until,google_customer_id,primary_domain
+  ) VALUES ($1,'97200000-0000-4000-8000-000000000020',$2,$3,
+    '97200000-0000-4000-8000-000000000021','PUBLISHED',true,
+    statement_timestamp()-interval '3 minutes',statement_timestamp()-interval '2 minutes',
+    statement_timestamp()+interval '1 hour','customer-reissue','reissue.example')`,
+  [workspaceId, bound.rows[0].connector_id, bound.rows[0].job_id]));
+  const readyCompletion = await reserve(4, 0x77, 0x78);
+  assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
+    reservedCompletionHash: readyCompletion, claims: claims(0x78),
+    newStatusTokenHash: hash32(0xf7),
+    requestId: "97200000-0000-4000-8000-000000000017",
+  })), { outcome: "DENIED" });
 });

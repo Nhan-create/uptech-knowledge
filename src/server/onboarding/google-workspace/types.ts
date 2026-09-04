@@ -1,4 +1,5 @@
 import type { SecretReference } from "../../secrets/core.ts";
+import type { VerifiedGoogleClaims } from "../../auth/google/claims.ts";
 
 export type GoogleWorkspaceDomainKind = "PRIMARY" | "SECONDARY" | "ALIAS";
 
@@ -49,6 +50,19 @@ export interface BootstrapStatusInput {
   readonly requestId: string;
 }
 
+export interface BootstrapReissueStatusInput {
+  readonly reservedCompletionHash: Uint8Array;
+  readonly claims: VerifiedGoogleClaims;
+  readonly newStatusTokenHash: Uint8Array;
+  readonly requestId: string;
+}
+
+export type BootstrapFinishOutcome = "FINISHED" | "DENIED";
+export type BootstrapReissueStatusResult =
+  | { readonly outcome: "REISSUED"; readonly statusExpiresAt: Date }
+  | { readonly outcome: "DENIED" };
+export type BootstrapRevokeOutcome = "REVOKED" | "DENIED";
+
 export type BootstrapStatusOutcome =
   | "DIRECTORY_BOOTSTRAP_SYNC_PENDING"
   | "READY"
@@ -77,4 +91,7 @@ export interface GoogleWorkspaceBootstrapRepository {
   abort(input: BootstrapAbortInput): Promise<{ readonly outcome: "ABORTED" | "UNKNOWN" }>;
   readStatus(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapStatusOutcome }>;
   retrySync(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapRetryOutcome }>;
+  finish(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapFinishOutcome }>;
+  reissueStatus(input: BootstrapReissueStatusInput): Promise<BootstrapReissueStatusResult>;
+  revokeCapability(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapRevokeOutcome }>;
 }

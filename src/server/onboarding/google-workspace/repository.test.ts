@@ -12,6 +12,21 @@ import {
 const hash = (value: number) => new Uint8Array(32).fill(value);
 const secret = "gcp-sm:v1:top-secret-reference" as SecretReference;
 
+const claims = {
+  issuer: "https://accounts.google.com" as const,
+  providerSubject: "bootstrap-commit-sub",
+  normalizedEmail: "owner@commit.example",
+  emailVerified: true as const,
+  hostedDomain: "commit.example",
+  issuedAtEpochSeconds: 1_893_456_000,
+  expiresAtEpochSeconds: 1_893_459_600,
+  audienceConfigurationKey: "GOOGLE_WEB_LOGIN_V1" as const,
+  authorizedPartyConfigurationKey: null,
+  nonceHash: hash(8),
+  displayName: null,
+  pictureUrl: null,
+};
+
 test("bootstrap start admission calls only the closed v1 network gate", async () => {
   for (const outcome of ["ADMITTED", "RATE_LIMITED", "DENIED"] as const) {
     const fake = fakePool([{ outcome }]);
@@ -133,7 +148,7 @@ test("status and retry reject malformed inputs and non-closed database rows", as
     ["retrySync", [{ outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE" }]],
     ["retrySync", []],
   ] as const) {
-    const repository = createGoogleWorkspaceBootstrapRepository(fakePool(rows).pool as never);
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool([...rows] as QueryResultRow[]).pool as never);
     await assert.rejects(repository[method]({ statusTokenHash: hash(9), requestId }), BootstrapCommitUnknownError);
   }
   for (const method of ["readStatus", "retrySync"] as const) {
@@ -141,6 +156,53 @@ test("status and retry reject malformed inputs and non-closed database rows", as
     await assert.rejects(repository[method]({ statusTokenHash: new Uint8Array(31), requestId }), BootstrapCommitUnknownError);
     await assert.rejects(repository[method]({ statusTokenHash: hash(9), requestId: "browser-value" }), BootstrapCommitUnknownError);
   }
+});
+
+test("finish, fresh-login reissue, and revoke use only their closed v1 routines", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+
+  const finishFake = fakePool([{ outcome: "FINISHED" }]);
+  assert.deepEqual(await createGoogleWorkspaceBootstrapRepository(finishFake.pool as never).finish({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "FINISHED" });
+  assert.match(finishFake.calls[0]!.text, /finish_google_workspace_bootstrap_v1/u);
+  assert.deepEqual(finishFake.calls[0]!.values, [Buffer.from(hash(9)), requestId]);
+
+  const expiry = new Date("2030-01-01T00:00:00.000Z");
+  const reissueFake = fakePool([{ outcome: "REISSUED", status_expires_at: expiry }]);
+  assert.deepEqual(await createGoogleWorkspaceBootstrapRepository(reissueFake.pool as never).reissueStatus({
+    reservedCompletionHash: hash(7), claims, newStatusTokenHash: hash(9), requestId,
+  }), { outcome: "REISSUED", statusExpiresAt: expiry });
+  assert.match(reissueFake.calls[0]!.text, /reissue_google_workspace_bootstrap_status_v1/u);
+  assert.deepEqual(reissueFake.calls[0]!.values, [
+    Buffer.from(hash(7)), claims.issuer, claims.providerSubject, claims.normalizedEmail,
+    true, claims.hostedDomain, new Date(claims.issuedAtEpochSeconds * 1000),
+    new Date(claims.expiresAtEpochSeconds * 1000), claims.audienceConfigurationKey,
+    null, Buffer.from(claims.nonceHash), Buffer.from(hash(9)), requestId,
+  ]);
+
+  const revokeFake = fakePool([{ outcome: "REVOKED" }]);
+  assert.deepEqual(await createGoogleWorkspaceBootstrapRepository(revokeFake.pool as never).revokeCapability({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "REVOKED" });
+  assert.match(revokeFake.calls[0]!.text, /revoke_onboarding_capability_v1/u);
+});
+
+test("finish, reissue, and revoke fail closed on malformed inputs and result shapes", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+  for (const [method, input, rows] of [
+    ["finish", { statusTokenHash: hash(9), requestId }, [{ outcome: "READY" }]],
+    ["revokeCapability", { statusTokenHash: hash(9), requestId }, [{ outcome: "REVOKED", workspace_id: "leak" }]],
+    ["reissueStatus", { reservedCompletionHash: hash(7), claims, newStatusTokenHash: hash(9), requestId }, [{ outcome: "REISSUED", status_expires_at: null }]],
+  ] as const) {
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool([...rows] as QueryResultRow[]).pool as never);
+    await assert.rejects((repository[method] as (value: never) => Promise<unknown>)(input as never), BootstrapCommitUnknownError);
+  }
+  const repository = createGoogleWorkspaceBootstrapRepository(fakePool([{ outcome: "DENIED" }]).pool as never);
+  await assert.rejects(repository.reissueStatus({
+    reservedCompletionHash: new Uint8Array(31), claims,
+    newStatusTokenHash: hash(9), requestId,
+  }), BootstrapCommitUnknownError);
 });
 
 test("query and result-shape failures are secret-safe unknown errors", async () => {
