@@ -22,9 +22,13 @@ function GoogleMark() {
 export function GoogleLoginSubmitButton({
   label = "Tiếp tục với Google Workspace",
   loadingLabel = "Đang chuyển đến Google…",
+  disabled = false,
+  busy = false,
 }: {
   readonly label?: string;
   readonly loadingLabel?: string;
+  readonly disabled?: boolean;
+  readonly busy?: boolean;
 }) {
   const submitStartedRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -42,8 +46,8 @@ export function GoogleLoginSubmitButton({
     <button
       data-testid="google-login-submit"
       type="submit"
-      disabled={submitting}
-      aria-busy={submitting}
+      disabled={disabled || submitting}
+      aria-busy={busy || submitting}
       onClick={(event) => {
         if (submitStartedRef.current) {
           event.preventDefault();
