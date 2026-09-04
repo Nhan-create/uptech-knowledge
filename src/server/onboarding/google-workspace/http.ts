@@ -162,7 +162,7 @@ function setupCookie(value: string, maxAge: number): string {
   return `${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
-function onboardingCookie(value: string, maxAge: number): string {
+export function serializeOnboardingCookie(value: string, maxAge: number): string {
   return `${ONBOARDING_COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
@@ -299,7 +299,7 @@ function clearSetupCookie(response: Response): Response {
 }
 
 function clearOnboardingCookies(response: Response): Response {
-  response.headers.append("Set-Cookie", onboardingCookie("", 0));
+  response.headers.append("Set-Cookie", serializeOnboardingCookie("", 0));
   return clearSetupCookie(response);
 }
 
@@ -314,7 +314,7 @@ function recoveryFailureRedirect(appOrigin: string, error: string, requestId: st
   location.search = new URLSearchParams({ error, request_id: requestId }).toString();
   const headers = responseHeaders(requestId);
   headers.set("Location", location.href);
-  headers.append("Set-Cookie", onboardingCookie("", 0));
+  headers.append("Set-Cookie", serializeOnboardingCookie("", 0));
   headers.append("Set-Cookie", setupCookie("", 0));
   return new Response(null, { status: 303, headers });
 }
@@ -412,7 +412,7 @@ export function createBootstrapFinishPost(dependencies: BootstrapStatusDependenc
       const headers = responseHeaders(requestId);
       headers.set("Location", login.authorizationUrl.href);
       headers.append("Set-Cookie", loginTransactionCookie(login.loginCookie));
-      headers.append("Set-Cookie", onboardingCookie("", 0));
+      headers.append("Set-Cookie", serializeOnboardingCookie("", 0));
       headers.append("Set-Cookie", setupCookie("", 0));
       return new Response(null, { status: 303, headers });
     } catch {
@@ -575,7 +575,7 @@ export function createGoogleWorkspaceBootstrapCallbackGet(dependencies: Bootstra
         return callbackFailure(appOrigin, "PROVIDER_UNAVAILABLE", requestId);
       }
       const response = callbackRedirect(appOrigin, "/setup/provisioning", requestId);
-      response.headers.append("Set-Cookie", onboardingCookie(result.statusCredential, maxAge));
+      response.headers.append("Set-Cookie", serializeOnboardingCookie(result.statusCredential, maxAge));
       return response;
     } catch (error) {
       if (appOrigin === null) return problem("PROVIDER_UNAVAILABLE", requestId, true);

@@ -429,6 +429,60 @@ test("callback fails closed when a runtime result supplies an attacker route or 
   assert.equal(nonEmptyAuthorityCookieNames(stateResponse).length, 0);
 });
 
+test("callback service failures after runtime load retain the configured login origin", async () => {
+  callbackResult = new Error("provider callback failed");
+
+  const response = await callbackRoute.GET(new Request(
+    "https://attacker.example/api/v1/auth/google/callback?code=provider-code&state=opaque-state",
+    { headers: trustedHeaders },
+  ));
+
+  loginLocation(response, "temporarily_unavailable");
+});
+
+test("ONBOARDING callback derives bounded authority expiry from the committed expiry", async (t) => {
+  const now = new Date("2032-01-01T00:00:00.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const onboardingCredential = issueSessionCredential().raw_token;
+
+  for (const [label, expiresAt, expectedMaxAge] of [
+    ["exact age", new Date("2032-01-01T00:02:00.000Z"), "120"],
+    ["24-hour cap", new Date("2032-01-02T01:00:00.000Z"), "86400"],
+    ["nonpositive expiry", now, null],
+    ["invalid expiry", new Date("invalid"), null],
+  ] as const) {
+    callbackResult = {
+      outcome: "ONBOARDING",
+      accessState: "UNKNOWN_WORKSPACE",
+      onboardingCredential,
+      allowedOperations: [
+        "FIRST_DOMAIN_CLAIM_READ",
+        "FIRST_DOMAIN_CLAIM_RESERVE",
+        "FIRST_DOMAIN_CLAIM_COMPLETE",
+      ],
+      expiresAt,
+    };
+    const response = await callbackRoute.GET(new Request(
+      `${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`,
+      { headers: trustedHeaders },
+    ));
+
+    const cookie = response.headers.getSetCookie().find((value) =>
+      value.startsWith("__Host-uptech_onboarding=") && !value.startsWith("__Host-uptech_onboarding=;"),
+    );
+    if (expectedMaxAge === null) {
+      assert.equal(cookie, undefined, label);
+      loginLocation(response, "login_failed");
+    } else {
+      assert.equal(
+        cookie,
+        `__Host-uptech_onboarding=${onboardingCredential}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${expectedMaxAge}`,
+        label,
+      );
+    }
+  }
+});
+
 test("session bootstrap treats an integrity failure as stale authority instead of a provider outage", async () => {
   webSessionResult = new WebSessionIntegrityError("binding mismatch");
   const credential = issueSessionCredential().raw_token;

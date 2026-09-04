@@ -1,13 +1,13 @@
 import {
   LOGIN_TRANSACTION_COOKIE_NAME,
   isCanonicalProof,
-  ONBOARDING_COOKIE_NAME,
   trustedVercelClientIp,
 } from "@/server/auth/google/crypto";
 import { createGoogleLoginRuntime } from "@/server/auth/google/runtime";
 import { inspectBrowserAuthority } from "@/server/auth/browser-authority";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "@/server/onboarding/google-workspace/crypto";
+import { serializeOnboardingCookie } from "@/server/onboarding/google-workspace/http";
 import {
   requestIdFromHeaders,
 } from "@/server/http/problem";
@@ -58,7 +58,7 @@ function hasCookie(headers: Headers, name: string): boolean {
   });
 }
 
-function serializeOnboardingCookie(
+function onboardingCookieFromCommittedExpiry(
   credential: string,
   expiresAt: Date,
   now: Date,
@@ -74,7 +74,10 @@ function serializeOnboardingCookie(
   if (!Number.isSafeInteger(maxAge) || maxAge < 1) {
     return null;
   }
-  return `${ONBOARDING_COOKIE_NAME}=${credential}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.min(maxAge, MAX_ONBOARDING_COOKIE_AGE_SECONDS)}`;
+  return serializeOnboardingCookie(
+    credential,
+    Math.min(maxAge, MAX_ONBOARDING_COOKIE_AGE_SECONDS),
+  );
 }
 
 function redirectToLogin(
@@ -135,8 +138,10 @@ export async function GET(request: Request): Promise<Response> {
   let staleCookieHeaders: readonly string[] = setupCookieClear;
   let preexistingBrowserAuthority = false;
   let preexistingBrowserAuthorityKind: "WEB_SESSION" | "ONBOARDING" | null = null;
+  let appOrigin: string | null = null;
   try {
     const runtimeContext = createGoogleLoginRuntime();
+    appOrigin = runtimeContext.config.appOrigin;
     const incoming = new URL(request.url);
     const result = await runtimeContext.service.callback({
       canonicalClientIp: trustedVercelClientIp(request.headers),
@@ -216,7 +221,7 @@ export async function GET(request: Request): Promise<Response> {
       );
     }
     if (result.outcome === "ONBOARDING") {
-      const onboardingCookie = serializeOnboardingCookie(
+      const onboardingCookie = onboardingCookieFromCommittedExpiry(
         result.onboardingCredential,
         result.expiresAt,
         new Date(),
@@ -273,7 +278,7 @@ export async function GET(request: Request): Promise<Response> {
   } catch {
     logCallback(operationRequestId, "PROVIDER_UNAVAILABLE");
     const response = redirectToLogin(
-      null,
+      appOrigin,
       "temporarily_unavailable",
       operationRequestId,
     );
