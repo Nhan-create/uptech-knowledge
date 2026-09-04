@@ -33,6 +33,14 @@ const MAX_COOKIE_VALUE_BYTES = 4_500;
 const MAX_COOKIE_HEADER_BYTES = 16_384;
 const MAX_CALLBACK_SEARCH_BYTES = 4_096;
 const MAX_STATUS_AGE_SECONDS = 24 * 60 * 60;
+const EMPTY_BODY_BYTES = "0";
+const BODY_METADATA_HEADERS = Object.freeze([
+  "content-encoding",
+  "content-range",
+  "content-type",
+  "expect",
+  "trailer",
+]);
 const PUBLIC_ERROR_CODES = new Set<BootstrapServiceErrorCode>([
   "ONBOARDING_EXPIRED",
   "CONSENT_ACCOUNT_MISMATCH",
@@ -237,6 +245,27 @@ function stateResponse(state: StatusPublicState, requestId: string): Response {
   return new Response(JSON.stringify({ state }), { status: 200, headers });
 }
 
+function bodylessEnvelope(
+  request: Request,
+  expectedMethod: "GET" | "POST",
+  requestId: string,
+): Response | null {
+  if (request.method !== expectedMethod) return problem("VALIDATION_FAILED", requestId);
+  let url: URL;
+  try { url = new URL(request.url); } catch { return problem("VALIDATION_FAILED", requestId); }
+  if (url.search !== "" || url.hash !== "") return problem("VALIDATION_FAILED", requestId);
+
+  const contentLength = request.headers.get("content-length");
+  if (request.headers.has("transfer-encoding") ||
+      BODY_METADATA_HEADERS.some((name) => request.headers.has(name)) ||
+      (expectedMethod === "POST"
+        ? contentLength !== EMPTY_BODY_BYTES
+        : contentLength !== null && contentLength !== EMPTY_BODY_BYTES)) {
+    return problem("VALIDATION_FAILED", requestId);
+  }
+  return null;
+}
+
 function recoveryCredential(
   request: Request,
   runtime: Pick<BootstrapStatusRuntime, "appOrigin" | "sessionPepper">,
@@ -246,9 +275,7 @@ function recoveryCredential(
 ): { readonly credential: string } | { readonly response: Response } {
   let url: URL;
   try { url = new URL(request.url); } catch { return { response: problem("VALIDATION_FAILED", requestId) }; }
-  if (url.search !== "" || url.hash !== "") return { response: problem("VALIDATION_FAILED", requestId) };
   if (url.origin !== runtime.appOrigin) return { response: problem("FORBIDDEN", requestId) };
-  if (request.body !== null) return { response: problem("VALIDATION_FAILED", requestId) };
 
   const credential = exactlyOneCookie(request.headers, ONBOARDING_COOKIE_NAME);
   if (credential === null || !isCanonicalProof(credential)) {
@@ -266,10 +293,14 @@ function recoveryCredential(
   return { credential };
 }
 
-function clearOnboardingCookies(response: Response): Response {
-  response.headers.append("Set-Cookie", onboardingCookie("", 0));
+function clearSetupCookie(response: Response): Response {
   response.headers.append("Set-Cookie", setupCookie("", 0));
   return response;
+}
+
+function clearOnboardingCookies(response: Response): Response {
+  response.headers.append("Set-Cookie", onboardingCookie("", 0));
+  return clearSetupCookie(response);
 }
 
 function accessRequestResponse(requestIdValue: string, status: string, requestId: string): Response {
@@ -291,6 +322,8 @@ function recoveryFailureRedirect(appOrigin: string, error: string, requestId: st
 export function createBootstrapStatusGet(dependencies: BootstrapStatusDependencies) {
   return async function GET(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "GET", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -313,6 +346,8 @@ export function createBootstrapStatusGet(dependencies: BootstrapStatusDependenci
 export function createBootstrapSyncRetryPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -338,6 +373,8 @@ export function createBootstrapSyncRetryPost(dependencies: BootstrapStatusDepend
 export function createBootstrapFinishPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -387,6 +424,8 @@ export function createBootstrapFinishPost(dependencies: BootstrapStatusDependenc
 export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -398,16 +437,16 @@ export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependen
         requestId,
       });
       if (result.outcome === "DENIED") {
-        return clearOnboardingCookies(problem("UNAUTHENTICATED", requestId));
+        return clearSetupCookie(problem("UNAUTHENTICATED", requestId));
       }
       if (result.outcome !== "REVOKED") {
-        return clearOnboardingCookies(problem("PROVIDER_UNAVAILABLE", requestId));
+        return clearSetupCookie(problem("PROVIDER_UNAVAILABLE", requestId));
       }
       const headers = responseHeaders(requestId);
       headers.set("Location", new URL("/login", runtime.appOrigin).href);
       return clearOnboardingCookies(new Response(null, { status: 303, headers }));
     } catch {
-      return clearOnboardingCookies(problem("PROVIDER_UNAVAILABLE", requestId));
+      return clearSetupCookie(problem("PROVIDER_UNAVAILABLE", requestId));
     }
   };
 }
@@ -415,6 +454,8 @@ export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependen
 export function createAccessRequestPost(dependencies: AccessRequestDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: AccessRequestRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -437,6 +478,8 @@ export function createAccessRequestPost(dependencies: AccessRequestDependencies)
 export function createCurrentAccessRequestGet(dependencies: AccessRequestDependencies) {
   return async function GET(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "GET", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: AccessRequestRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
@@ -459,13 +502,14 @@ export function createCurrentAccessRequestGet(dependencies: AccessRequestDepende
 export function createGoogleWorkspaceBootstrapPost(dependencies: BootstrapHttpDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
+    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapHttpRuntime;
     try {
       runtime = dependencies.loadRuntime();
     } catch {
       return problem("PROVIDER_UNAVAILABLE", requestId);
     }
-    if (request.body !== null) return problem("VALIDATION_FAILED", requestId);
     const onboardingCredential = exactlyOneCookie(request.headers, ONBOARDING_COOKIE_NAME);
     if (onboardingCredential === null || !isCanonicalProof(onboardingCredential)) return problem("UNAUTHENTICATED", requestId);
     if (!absentCookie(request.headers, GOOGLE_WORKSPACE_SETUP_COOKIE_NAME) ||

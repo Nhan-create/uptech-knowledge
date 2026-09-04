@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { deriveCsrfCredential, hashProof, issueOpaqueProof } from "../../auth/google/crypto.ts";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "./crypto.ts";
+import { BootstrapCommitUnknownError } from "./repository.ts";
 import {
   createAccessRequestPost,
   createCurrentAccessRequestGet,
@@ -64,6 +65,7 @@ function startRequest(cookie = `__Host-uptech_onboarding=${ONBOARDING}`, headers
       origin: APP_ORIGIN,
       "sec-fetch-site": "same-origin",
       "x-csrf-token": deriveCsrfCredential(ONBOARDING, PEPPER),
+      "content-length": "0",
       ...headers,
     },
   });
@@ -367,6 +369,7 @@ function recoveryRequest(path: "status" | "sync-retry" | "finish", options: {
         origin: APP_ORIGIN,
         "sec-fetch-site": "same-origin",
         "x-csrf-token": deriveCsrfCredential(STATUS, PEPPER),
+        "content-length": options.body === undefined ? "0" : String(Buffer.byteLength(options.body)),
       } : {}),
       ...options.headers,
     },
@@ -499,6 +502,7 @@ function capabilityRequest(path: "logout" | "access-requests" | "access-requests
         origin: APP_ORIGIN,
         "sec-fetch-site": "same-origin",
         "x-csrf-token": deriveCsrfCredential(credential, PEPPER),
+        "content-length": options.body === undefined ? "0" : String(Buffer.byteLength(options.body)),
       } : {}),
       ...options.headers,
     },
@@ -525,12 +529,29 @@ test("onboarding logout revokes only the presented capability hash then clears o
   assertSafe(response);
 });
 
-test("onboarding logout fails closed without caller authority and clears cookies after every validated terminal outcome", async () => {
-  for (const outcome of ["DENIED", "THROW"] as const) {
+test("onboarding logout does not claim an unrecognized copied capability was revoked", async () => {
+  const f = recoveryFixture();
+  f.setRevoke("DENIED");
+  const response = await createOnboardingLogoutPost(f.dependencies)(capabilityRequest("logout", {
+    cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`,
+  }));
+
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.has("location"), false);
+  assert.equal(response.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=")), false);
+  assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
+  assert.equal((await response.text()).includes("revoked"), false);
+  assertSafe(response);
+});
+
+test("onboarding logout preserves retry authority across pre-commit and ambiguous revoke failures", async () => {
+  for (const failure of [
+    new Error("database unavailable before query secret-precommit"),
+    new BootstrapCommitUnknownError(),
+  ]) {
+    let attempts = 0;
     const f = recoveryFixture();
-    let dependencies = f.dependencies;
-    if (outcome === "DENIED") f.setRevoke("DENIED");
-    else dependencies = {
+    const dependencies = {
       ...f.dependencies,
       loadRuntime: () => ({
         appOrigin: APP_ORIGIN,
@@ -539,17 +560,35 @@ test("onboarding logout fails closed without caller authority and clears cookies
           async readStatus() { throw new Error("unused"); },
           async retrySync() { throw new Error("unused"); },
           async finish() { throw new Error("unused"); },
-          async revokeCapability() { throw new Error("database uncertainty"); },
+          async revokeCapability() {
+            attempts += 1;
+            if (attempts === 1) throw failure;
+            return { outcome: "REVOKED" as const };
+          },
         },
       }),
-    };
-    const response = await createOnboardingLogoutPost(dependencies)(capabilityRequest("logout"));
-    assert.equal(response.status, outcome === "DENIED" ? 401 : 503);
-    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;")));
-    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
-    assertSafe(response);
-  }
+    } satisfies BootstrapStatusDependencies;
 
+    const first = await createOnboardingLogoutPost(dependencies)(capabilityRequest("logout", {
+      cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`,
+    }));
+    assert.equal(first.status, 503);
+    assert.equal(first.headers.has("location"), false);
+    assert.equal(first.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=")), false);
+    assert.ok(first.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
+    assert.equal((await first.text()).includes("secret-precommit"), false);
+    assertSafe(first);
+
+    const retry = await createOnboardingLogoutPost(dependencies)(capabilityRequest("logout"));
+    assert.equal(retry.status, 303);
+    assert.equal(retry.headers.get("location"), `${APP_ORIGIN}/login`);
+    assert.ok(retry.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;")));
+    assert.equal(attempts, 2);
+    assertSafe(retry);
+  }
+});
+
+test("onboarding logout rejects invalid caller authority before repository work", async () => {
   for (const request of [
     capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_onboarding=${STATUS}` }),
     capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` }),
@@ -563,6 +602,7 @@ test("onboarding logout fails closed without caller authority and clears cookies
     const response = await createOnboardingLogoutPost(f.dependencies)(request);
     assert.ok([400, 401, 403].includes(response.status));
     assert.equal(f.calls.length, 0);
+    assert.deepEqual(response.headers.getSetCookie(), []);
     assertSafe(response);
   }
 });

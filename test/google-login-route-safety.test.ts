@@ -353,6 +353,7 @@ test("Workspace bootstrap adapters expose only the guarded POST and callback GET
         origin: appOrigin,
         "sec-fetch-site": "same-origin",
         "x-csrf-token": deriveCsrfCredential(onboarding, bootstrapPepper),
+        "content-length": "0",
       },
     },
   ));
@@ -399,7 +400,7 @@ test("Workspace bootstrap recovery adapters expose only status, same-bound retry
   const csrf = deriveCsrfCredential(statusCredential, bootstrapPepper);
   const retryResponse = await bootstrapRetryRoute.POST(new Request(
     `${appOrigin}/api/v1/onboarding/google-workspace/sync-retry`,
-    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf } },
+    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf, "content-length": "0" } },
   ));
   assert.deepEqual(await retryResponse.json(), { state: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
 
@@ -412,7 +413,7 @@ test("Workspace bootstrap recovery adapters expose only status, same-bound retry
   bootstrapFinishResult = { outcome: "FINISHED" };
   const finishResponse = await bootstrapFinishRoute.POST(new Request(
     `${appOrigin}/api/v1/onboarding/google-workspace/finish`,
-    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf } },
+    { method: "POST", headers: { ...baseHeaders, origin: appOrigin, "sec-fetch-site": "same-origin", "x-csrf-token": csrf, "content-length": "0" } },
   ));
   assert.equal(finishResponse.status, 303);
   assert.equal(finishResponse.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
@@ -433,6 +434,7 @@ test("onboarding logout and access-request adapters expose only their bound repo
     origin: appOrigin,
     "sec-fetch-site": "same-origin",
     "x-csrf-token": csrf,
+    "content-length": "0",
   };
 
   accessSubmitResult = { outcome: "PENDING", requestId: "00000000-0000-4000-8000-000000000093", status: "PENDING" };
