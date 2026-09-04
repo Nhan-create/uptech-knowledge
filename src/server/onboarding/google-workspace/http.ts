@@ -199,11 +199,6 @@ export function exactCsrfCredential(
   }
 }
 
-function exactCsrf(headers: Headers, onboardingCredential: string, pepper: Uint8Array): boolean {
-  return headers.get("sec-fetch-site") === "same-origin" &&
-    exactCsrfCredential(headers.get("x-csrf-token"), onboardingCredential, pepper);
-}
-
 function validCallbackSearch(search: string): boolean {
   if (search.length < 1 || Buffer.byteLength(search, "utf8") > MAX_CALLBACK_SEARCH_BYTES || !search.startsWith("?")) return false;
   const parameters = new URLSearchParams(search.slice(1));
@@ -260,11 +255,11 @@ function stateResponse(state: StatusPublicState, requestId: string): Response {
   return new Response(JSON.stringify({ state }), { status: 200, headers });
 }
 
-function bodylessEnvelope(
+async function bodylessEnvelope(
   request: Request,
   expectedMethod: "GET" | "POST",
   requestId: string,
-): Response | null {
+): Promise<Response | null> {
   if (request.method !== expectedMethod) return problem("VALIDATION_FAILED", requestId);
   let url: URL;
   try { url = new URL(request.url); } catch { return problem("VALIDATION_FAILED", requestId); }
@@ -273,9 +268,13 @@ function bodylessEnvelope(
   const contentLength = request.headers.get("content-length");
   if (request.headers.has("transfer-encoding") ||
       BODY_METADATA_HEADERS.some((name) => request.headers.has(name)) ||
-      (contentLength !== null && contentLength !== EMPTY_BODY_BYTES) ||
-      (expectedMethod === "POST" && request.body !== null)) {
+      (contentLength !== null && contentLength !== EMPTY_BODY_BYTES)) {
     return problem("VALIDATION_FAILED", requestId);
+  }
+  if (expectedMethod === "POST" && request.body !== null) {
+    if (contentLength !== EMPTY_BODY_BYTES || await readBoundedFormBody(request, 0) !== "") {
+      return problem("VALIDATION_FAILED", requestId);
+    }
   }
   return null;
 }
@@ -333,8 +332,11 @@ async function mutatingPostEnvelope(request: Request, requestId: string): Promis
   const headerToken = request.headers.get("x-csrf-token");
   const contentLength = request.headers.get("content-length");
   if (contentType === null) {
-    if (request.body !== null || contentLength !== EMPTY_BODY_BYTES ||
+    if (contentLength !== EMPTY_BODY_BYTES ||
         headerToken === null || !isCanonicalProof(headerToken)) {
+      return { response: problem("VALIDATION_FAILED", requestId) };
+    }
+    if (request.body !== null && await readBoundedFormBody(request, 0) !== "") {
       return { response: problem("VALIDATION_FAILED", requestId) };
     }
     return { csrfToken: headerToken };
@@ -423,7 +425,7 @@ function recoveryFailureRedirect(appOrigin: string, error: string, requestId: st
 export function createBootstrapStatusGet(dependencies: BootstrapStatusDependencies) {
   return async function GET(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "GET", requestId);
+    const invalidEnvelope = await bodylessEnvelope(request, "GET", requestId);
     if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
@@ -447,7 +449,7 @@ export function createBootstrapStatusGet(dependencies: BootstrapStatusDependenci
 export function createBootstrapSyncRetryPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    const invalidEnvelope = await bodylessEnvelope(request, "POST", requestId);
     if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
@@ -555,7 +557,7 @@ export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependen
 export function createAccessRequestPost(dependencies: AccessRequestDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
+    const invalidEnvelope = await bodylessEnvelope(request, "POST", requestId);
     if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: AccessRequestRuntime;
     try { runtime = dependencies.loadRuntime(); }
@@ -579,7 +581,7 @@ export function createAccessRequestPost(dependencies: AccessRequestDependencies)
 export function createCurrentAccessRequestGet(dependencies: AccessRequestDependencies) {
   return async function GET(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "GET", requestId);
+    const invalidEnvelope = await bodylessEnvelope(request, "GET", requestId);
     if (invalidEnvelope !== null) return invalidEnvelope;
     let runtime: AccessRequestRuntime;
     try { runtime = dependencies.loadRuntime(); }

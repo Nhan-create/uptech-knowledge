@@ -27,6 +27,7 @@ const CONTRACT = Object.freeze({
   ],
   migrations: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"],
   provisioning: "hydrated-pending-retry-support-ready-double-submit",
+  runtimeArtifact: "next-start-only",
   runtime: "session_user=ephemeral,current_user=uptech_api_runtime,NOBYPASSRLS",
   timeouts: "bounded-cdp-server-cleanup",
 });
@@ -65,8 +66,14 @@ const runtimeUrl = new URL(childOwnerUrl);
 runtimeUrl.username = runtimeRole;
 runtimeUrl.password = runtimePassword;
 runtimeUrl.searchParams.set("options", "-c role=uptech_api_runtime");
-const admin = new pg.Client({ connectionString: adminUrl.toString(), connectionTimeoutMillis: 10_000 });
+const admin = new pg.Client({
+  connectionString: adminUrl.toString(),
+  connectionTimeoutMillis: 10_000,
+  query_timeout: 5_000,
+  statement_timeout: 5_000,
+});
 let childOwner;
+let adminConnected = false;
 let roleCreated = false;
 let databaseCreated = false;
 let temporaryRoot;
@@ -97,6 +104,12 @@ async function bounded(work, milliseconds, message) {
   } finally { clearTimeout(timer); }
 }
 
+function fixedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function safeFailureCode(error) {
   return typeof error?.code === "string" && /^[A-Za-z0-9_]{1,32}$/u.test(error.code)
     ? error.code
@@ -104,6 +117,38 @@ function safeFailureCode(error) {
 }
 
 function delay(milliseconds) { return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)); }
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    return true;
+  }
+}
+async function waitForExit(child, milliseconds) {
+  if (!child || child.exitCode !== null || child.signalCode !== null || !processExists(child.pid)) return true;
+  return await new Promise((resolveExit) => {
+    const timer = setTimeout(() => { cleanup(); resolveExit(false); }, milliseconds);
+    const exited = () => { cleanup(); resolveExit(true); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("exit", exited);
+    };
+    child.once("exit", exited);
+  });
+}
+async function taskkillTree(pid) {
+  const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    cwd: repoRoot,
+    stdio: "ignore",
+    env: childEnvironment(),
+  });
+  if (await waitForExit(killer, 5_000)) return;
+  killer.kill("SIGKILL");
+  if (!(await waitForExit(killer, 2_000))) throw fixedError("TASKKILL_TIMEOUT", "taskkill did not terminate");
+}
 async function port() {
   const server = net.createServer();
   server.listen(0, "127.0.0.1");
@@ -114,25 +159,37 @@ async function port() {
   return address.port;
 }
 async function stop(child) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || !processExists(child.pid)) return;
   if (platform() === "win32") {
-    await run("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { label: "process-tree cleanup failed" });
+    await taskkillTree(child.pid);
   } else child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), delay(5_000)]);
-  if (child.exitCode === null) {
+  await waitForExit(child, 5_000);
+  if (processExists(child.pid)) {
     child.kill("SIGKILL");
-    await Promise.race([once(child, "exit"), delay(5_000)]);
+    await waitForExit(child, 5_000);
   }
-  assert.notEqual(child.exitCode, null, "child process cleanup failed");
+  if (processExists(child.pid)) throw fixedError("PROCESS_STILL_ALIVE", "child process cleanup failed");
 }
 async function closeServer(server) {
   if (!server) return;
+  server.closeAllConnections?.();
   await bounded(new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())), 5_000, "server close timeout");
 }
 async function run(command, args, options = {}) {
   const child = spawn(command, args, { cwd: repoRoot, stdio: options.stdio ?? "ignore", env: options.env ?? childEnvironment() });
-  const [code] = await bounded(once(child, "exit"), options.timeout ?? 120_000, "child command timeout");
+  let result;
+  try {
+    result = await bounded(once(child, "exit"), options.timeout ?? 120_000, "child command timeout");
+  } catch (error) {
+    await stop(child).catch(() => {});
+    if (processExists(child.pid)) throw fixedError("CHILD_TIMEOUT_CLEANUP_FAILED", "timed-out child process remained alive");
+    throw fixedError("CHILD_TIMEOUT", error?.message ?? "child command timeout");
+  }
+  const [code] = result;
   if (code !== 0) throw new Error(options.label ?? "child command failed");
+}
+async function cleanupQuery(text, values = []) {
+  return await bounded(admin.query({ text, values, query_timeout: 5_000 }), 6_000, "database cleanup query timeout");
 }
 function forwardToNext(nextPort, canonicalHost) {
   return (request, response) => {
@@ -181,6 +238,7 @@ try {
   assert.ok(await readFile(join(repoRoot, ".next", "BUILD_ID"), "utf8"), "run npm run build before browser acceptance");
   failurePhase = "database-bootstrap";
   await admin.connect();
+  adminConnected = true;
   const absent = await admin.query("SELECT 1 FROM pg_database WHERE datname=$1", [childDatabase]);
   assert.equal(absent.rowCount, 0, "generated child database already exists");
   await admin.query(`CREATE DATABASE ${childDatabase}`);
@@ -290,8 +348,7 @@ try {
     UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/browser-test-pool/providers/browser-test-provider",
     UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "browser-test-service@browser-test-project.iam.gserviceaccount.com",
   };
-  const nextMode = process.env.UPTECH_BROWSER_DEV === "1" ? "dev" : "start";
-  nextProcess = spawn(process.execPath, ["node_modules/next/dist/bin/next", nextMode, "--hostname", "browser-login.test", "--port", String(nextPort)], { cwd: repoRoot, env: runtimeEnvironment, stdio: process.env.UPTECH_BROWSER_DEBUG === "1" ? "inherit" : "ignore" });
+  nextProcess = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "--hostname", "browser-login.test", "--port", String(nextPort)], { cwd: repoRoot, env: runtimeEnvironment, stdio: process.env.UPTECH_BROWSER_DEBUG === "1" ? "inherit" : "ignore" });
   httpProxy = http.createServer(forwardToNext(nextPort, canonicalHost));
   httpsProxy = https.createServer({ key, cert }, forwardToNext(nextPort, canonicalHost));
   await Promise.all([
@@ -340,24 +397,71 @@ try {
   process.stderr.write(`BROWSER_SAFE_DIAGNOSTIC phase=${failurePhase} code=${safeFailureCode(error)}\n`);
 } finally {
   const cleanupErrors = [];
-  for (const work of [
-    () => stop(browserProcess), () => closeServer(httpsProxy), () => closeServer(httpProxy), () => stop(nextProcess),
-    async () => { if (childOwner) await childOwner.end(); },
-    async () => { if (roleCreated) { await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename=$1 AND pid<>pg_backend_pid()", [runtimeRole]); await admin.query(`DROP ROLE ${runtimeRole}`); } },
-    async () => { if (databaseCreated) { await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", [childDatabase]); await admin.query(`DROP DATABASE ${childDatabase}`); } },
-    async () => { if (roleCreated) assert.equal((await admin.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [runtimeRole])).rowCount, 0); },
-    async () => { if (databaseCreated) assert.equal((await admin.query("SELECT 1 FROM pg_database WHERE datname=$1", [childDatabase])).rowCount, 0); },
-    async () => { if (temporaryRoot) { assert.equal(resolve(temporaryRoot).startsWith(`${resolve(repoRoot, ".tmp")}\\`), true); await rm(temporaryRoot, { recursive: true, force: true }); await assert.rejects(access(temporaryRoot), { code: "ENOENT" }); } },
-  ]) {
-    try { await work(); } catch (error) { cleanupErrors.push(error); }
-  }
-  await admin.end().catch((error) => cleanupErrors.push(error));
-  process.stdout.write(`BROWSER_CLEANUP_ABSENCE db=${databaseCreated ? 0 : 0} role=${roleCreated ? 0 : 0} tmp=${temporaryRoot ? 0 : 0} process=${browserProcess?.exitCode === null || nextProcess?.exitCode === null ? 1 : 0}\n`);
-  if (cleanupErrors.length > 0) {
-    if (!failure) {
-      failure = cleanupErrors[0];
-      process.stderr.write(`BROWSER_SAFE_DIAGNOSTIC phase=cleanup code=${safeFailureCode(cleanupErrors[0])}\n`);
+  const absence = { db: null, role: null, tmp: null, process: null };
+  const cleanupSteps = [
+    ["browser-stop", () => stop(browserProcess)],
+    ["https-proxy-close", () => closeServer(httpsProxy)],
+    ["http-proxy-close", () => closeServer(httpProxy)],
+    ["next-stop", () => stop(nextProcess)],
+    ["child-owner-close", async () => { if (childOwner) await bounded(childOwner.end(), 5_000, "child owner close timeout"); }],
+    ["runtime-role-drop", async () => {
+      if (!roleCreated || !adminConnected) return;
+      await cleanupQuery("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename=$1 AND pid<>pg_backend_pid()", [runtimeRole]);
+      await cleanupQuery(`DROP ROLE ${runtimeRole}`);
+    }],
+    ["child-database-drop", async () => {
+      if (!databaseCreated || !adminConnected) return;
+      await cleanupQuery("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", [childDatabase]);
+      await cleanupQuery(`DROP DATABASE ${childDatabase}`);
+    }],
+    ["runtime-role-observe", async () => {
+      if (!adminConnected) throw fixedError("ADMIN_UNAVAILABLE", "cannot observe runtime role cleanup");
+      absence.role = (await cleanupQuery("SELECT 1 FROM pg_roles WHERE rolname=$1", [runtimeRole])).rowCount;
+      if (absence.role !== 0) throw fixedError("ROLE_REMAINS", "runtime role remained after cleanup");
+    }],
+    ["child-database-observe", async () => {
+      if (!adminConnected) throw fixedError("ADMIN_UNAVAILABLE", "cannot observe database cleanup");
+      absence.db = (await cleanupQuery("SELECT 1 FROM pg_database WHERE datname=$1", [childDatabase])).rowCount;
+      if (absence.db !== 0) throw fixedError("DATABASE_REMAINS", "child database remained after cleanup");
+    }],
+    ["temp-remove", async () => {
+      if (!temporaryRoot) return;
+      assert.equal(resolve(temporaryRoot).startsWith(`${resolve(repoRoot, ".tmp")}\\`), true);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }],
+    ["temp-observe", async () => {
+      if (!temporaryRoot) { absence.tmp = 0; return; }
+      try { await access(temporaryRoot); absence.tmp = 1; } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        absence.tmp = 0;
+      }
+      if (absence.tmp !== 0) throw fixedError("TEMP_REMAINS", "temporary browser root remained after cleanup");
+    }],
+    ["process-observe", async () => {
+      absence.process = [browserProcess?.pid, nextProcess?.pid].filter((pid) => processExists(pid)).length;
+      if (absence.process !== 0) throw fixedError("PROCESS_REMAINS", "browser or Next process remained after cleanup");
+    }],
+  ];
+  for (const [label, work] of cleanupSteps) {
+    try { await work(); } catch (error) {
+      cleanupErrors.push({ label, error });
+      process.stderr.write(`BROWSER_CLEANUP_FAILURE label=${label} code=${safeFailureCode(error)}\n`);
     }
+  }
+  if (adminConnected) {
+    try { await bounded(admin.end(), 5_000, "admin close timeout"); } catch (error) {
+      cleanupErrors.push({ label: "admin-close", error });
+      process.stderr.write(`BROWSER_CLEANUP_FAILURE label=admin-close code=${safeFailureCode(error)}\n`);
+    }
+  }
+  if (Object.values(absence).every(Number.isInteger)) {
+    process.stdout.write(`BROWSER_CLEANUP_ABSENCE db=${absence.db} role=${absence.role} tmp=${absence.tmp} process=${absence.process}\n`);
+  } else {
+    process.stdout.write("BROWSER_CLEANUP_ABSENCE_INCOMPLETE\n");
+  }
+  if (cleanupErrors.length > 0) {
+    if (!failure) failure = cleanupErrors[0].error;
+    process.stderr.write(`BROWSER_SAFE_DIAGNOSTIC phase=cleanup code=${safeFailureCode(cleanupErrors[0].error)}\n`);
   }
 }
 if (failure) process.exitCode = 1;

@@ -437,9 +437,12 @@ test("browser harness owns a disposable Chromium and NOBYPASSRLS acceptance boun
     ],
     migrations: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"],
     provisioning: "hydrated-pending-retry-support-ready-double-submit",
+    runtimeArtifact: "next-start-only",
     runtime: "session_user=ephemeral,current_user=uptech_api_runtime,NOBYPASSRLS",
     timeouts: "bounded-cdp-server-cleanup",
   });
+  const harnessSource = await readFile(browserHarnessPath, "utf8");
+  assert.doesNotMatch(harnessSource, /UPTECH_BROWSER_DEV|\bnextMode\b|["']dev["']/u);
 });
 
 test("browser harness rejects a remote database before any acceptance work", () => {

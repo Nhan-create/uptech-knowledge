@@ -108,7 +108,7 @@ async function click(selector, existingPoint = null) {
 async function waitForBrowser(expression, timeout = 10_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (await evaluate(expression)) return;
+    try { if (await evaluate(expression)) return; } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Browser condition timed out");
@@ -129,12 +129,13 @@ before(async () => {
 
 after(async () => { cdp?.close(); await control?.end(); });
 
-async function pauseOneRequest(pathFragment, activate) {
+async function pauseOneRequest(pathFragment, method, activate) {
   let count = 0;
   let resolvePaused;
   const paused = new Promise((resolve) => { resolvePaused = resolve; });
   cdp.on("Fetch.requestPaused", (event) => {
-    if (!new URL(event.request.url).pathname.includes(pathFragment)) return;
+    const destination = new URL(event.request.url);
+    if (destination.origin !== appOrigin || destination.pathname !== pathFragment) return;
     count += 1;
     browserPhase("request-paused");
     if (count === 1) resolvePaused(event);
@@ -154,6 +155,9 @@ async function pauseOneRequest(pathFragment, activate) {
   await activate();
   browserPhase("activation-complete");
   const event = await Promise.race([paused, new Promise((_, reject) => setTimeout(() => reject(new Error("expected request was not paused")), 10_000))]);
+  assert.deepEqual({ method: event.request.method, origin: new URL(event.request.url).origin, path: new URL(event.request.url).pathname }, {
+    method, origin: appOrigin, path: pathFragment,
+  });
   browserPhase("pending-probe-start");
   assert.equal(await pendingObserved, true);
   browserPhase("pending-observed");
@@ -163,6 +167,7 @@ async function pauseOneRequest(pathFragment, activate) {
   await cdp.send("Fetch.continueRequest", { requestId: event.requestId });
   await cdp.send("Fetch.disable");
   browserPhase("fetch-disabled");
+  return event;
 }
 
 test("real Chromium hydrates recovery actions, fixed help, and stale-session replay", async () => {
@@ -173,7 +178,7 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
   assert.equal(onboardingCookie.success, true);
   await navigate("/setup/provisioning", "provisioning-pending");
   assert.equal(await evaluate("document.querySelector('[role=status]')?.innerText.length > 20"), true);
-  await pauseOneRequest("/api/v1/onboarding/google-workspace/status", async () => {
+  await pauseOneRequest("/api/v1/onboarding/google-workspace/status", "GET", async () => {
     await click("button[type=button]");
     await click("button[type=button]");
   });
@@ -184,16 +189,49 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
     lease_owner='browser-test',lease_fence=gen_random_uuid(),updated_at=statement_timestamp()
     WHERE workspace_id=$1 AND job_kind='DIRECTORY_SYNC'`, [bootstrapWorkspaceId]);
   await navigate("/setup/provisioning", "provisioning-retry");
+  const retryBefore = await evaluate("({timeOrigin:performance.timeOrigin,title:document.querySelector('h1')?.innerText})");
+  await evaluate("document.documentElement.dataset.harnessDocument='retry-before'");
   assert.equal(await evaluate("document.querySelector('button[type=button]')?.innerText.length > 5"), true);
-  await click("button[type=button]");
-  await waitForBrowser("location.pathname === '/setup/provisioning'");
+  let resolveRetryResponse;
+  const retryResponse = new Promise((resolve) => { resolveRetryResponse = resolve; });
+  cdp.on("Network.responseReceived", (event) => {
+    const destination = new URL(event.response.url);
+    if (destination.origin === appOrigin && destination.pathname === "/api/v1/onboarding/google-workspace/sync-retry") {
+      resolveRetryResponse({ status: event.response.status, mimeType: event.response.mimeType });
+    }
+  });
+  await pauseOneRequest("/api/v1/onboarding/google-workspace/sync-retry", "POST", async () => {
+    await click("button[type=button]");
+  });
+  assert.deepEqual(await Promise.race([retryResponse, new Promise((_, reject) => setTimeout(() => reject(new Error("retry response timed out")), 10_000))]), {
+    status: 200, mimeType: "application/json",
+  });
+  await waitForBrowser("document.documentElement.dataset.harnessDocument!=='retry-before'");
+  assert.deepEqual(await evaluate(`({path:location.pathname,reRendered:document.querySelector('h1')?.innerText!==${JSON.stringify(retryBefore.title)},pendingState:Boolean(document.querySelector('[role=status]'))})`), {
+    path: "/setup/provisioning", reRendered: true, pendingState: true,
+  });
+  assert.equal((await control.query("SELECT status FROM uptech.sync_jobs WHERE workspace_id=$1 AND job_kind='DIRECTORY_SYNC'", [bootstrapWorkspaceId])).rows[0]?.status, "QUEUED");
 
   await control.query(`UPDATE uptech.sync_jobs SET status='LEASED',attempt_count=max_attempts,
     leased_at=statement_timestamp()-interval '3 minutes',lease_expires_at=statement_timestamp()-interval '1 minute',
     lease_owner='browser-test',lease_fence=gen_random_uuid(),updated_at=statement_timestamp()
     WHERE workspace_id=$1 AND job_kind='DIRECTORY_SYNC'`, [bootstrapWorkspaceId]);
   await navigate("/setup/provisioning", "provisioning-support");
-  assert.equal(await evaluate("Boolean(document.querySelector('a[href^=\"mailto:contact@uptech.vn\"]'))"), true);
+  assert.deepEqual(await evaluate(`(() => {
+    const link=document.querySelector('a[href^="mailto:contact@uptech.vn"]');
+    if(!link) return null;
+    window.__uptechSupportActivation=0;
+    document.addEventListener('click',(event)=>{if(event.target.closest('a')===link){event.preventDefault();window.__uptechSupportActivation+=1;}},{capture:true});
+    return {fixedRecipient:link.getAttribute('href').startsWith('mailto:contact@uptech.vn?'),noReflection:!link.getAttribute('href').includes('evil.example')};
+  })()`), { fixedRecipient: true, noReflection: true });
+  await click('a[href^="mailto:contact@uptech.vn"]');
+  await waitForBrowser("Boolean(document.querySelector('textarea[readonly]'))");
+  assert.deepEqual(await evaluate(`({
+    activation:window.__uptechSupportActivation,
+    stayed:location.pathname==='/setup/provisioning',
+    fixedFallback:document.querySelector('textarea[readonly]')?.value.split('\\n')[0]==='contact@uptech.vn',
+    noReflection:!document.querySelector('textarea[readonly]')?.value.includes('evil.example')
+  })`), { activation: 1, stayed: true, fixedFallback: true, noReflection: true });
 
   await control.query(`INSERT INTO uptech.people_sync_generations(
     workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,started_at,completed_at,fresh_until,google_customer_id,primary_domain)
@@ -215,7 +253,7 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
       redirectPath: event.redirectResponse === undefined ? null : new URL(event.redirectResponse.url).pathname,
     });
   });
-  await pauseOneRequest("/api/v1/onboarding/google-workspace/finish", async () => {
+  await pauseOneRequest("/api/v1/onboarding/google-workspace/finish", "POST", async () => {
     const finishPoint = await click('form[action="/api/v1/onboarding/google-workspace/finish"] button');
     await click('form[action="/api/v1/onboarding/google-workspace/finish"] button', finishPoint);
   });
