@@ -187,8 +187,9 @@ BEGIN
     OR pg_catalog.strpos(definition,$needle$WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED'$needle$)=0
     OR pg_catalog.strpos(definition,'transitioned_rows <> 1')=0
     OR pg_catalog.strpos(definition,$needle$EXCEPTION WHEN SQLSTATE 'PGA01'$needle$)=0
-    OR pg_catalog.strpos(definition,'INSERT INTO uptech.sessions')<>0
-    OR pg_catalog.strpos(definition,'INSERT INTO uptech.workspace_memberships')<>0
+    OR pg_catalog.strpos(definition,'evaluate_google_directory_mapping_v1')=0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.sessions')=0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.workspace_memberships')=0
   THEN
     RAISE EXCEPTION 'V2 unknown-domain completion bypasses its private seam or widens authority';
   END IF;

@@ -50,6 +50,20 @@ const bootstrapFixtures = {
 
 function hash32(byte: number): Buffer { return Buffer.alloc(32, byte); }
 
+async function ensureActiveGoogleEnvironment(): Promise<string> {
+  return asMigrationOwner(async (client) => {
+    const active = await client.query<{ environment_name: string }>(
+      "SELECT environment_name::text FROM uptech.google_auth_environment_registry WHERE is_active",
+    );
+    if (active.rows[0]) return active.rows[0].environment_name;
+    const environmentName = "postgres-integration";
+    await client.query(`INSERT INTO uptech.google_auth_environment_registry(
+      environment_name,rate_limit_audit_hmac_key,is_active
+    ) VALUES ($1,$2,true)`, [environmentName, hash32(0xa0)]);
+    return environmentName;
+  });
+}
+
 async function asApi<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -435,11 +449,6 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
 
 test("bootstrap start admission atomically shares the GOOGLE_AUTH ten-per-minute bucket", async () => {
   const networkHmac = new Uint8Array(32).fill(0x99);
-  await asMigrationOwner((client) => client.query(`
-    INSERT INTO uptech.google_auth_environment_registry(
-      environment_name, rate_limit_audit_hmac_key, is_active
-    ) VALUES ('bootstrap-admission-test', $1::uptech.google_auth_hash32_v1, true)
-  `, [hash32(0x98)]));
   const outcomes = await Promise.all(Array.from({ length: 11 }, (_, index) =>
     asApi(async (client) => createGoogleWorkspaceBootstrapStartAdmission(client)({
       networkHmac,
@@ -686,7 +695,8 @@ test("idempotent prepare retries revalidate every current source authority and c
     const sourceId = id(3);
     const attemptId = id(4);
     const candidateWorkspaceId = id(5);
-    const sourceByte = 0xa0 + index * 2;
+    // Keep source/status credentials disjoint from the unknown-login fixtures.
+    const sourceByte = 0x43 + index * 2;
     const statusTokenHash = hash32(sourceByte + 1);
     await seedBootstrapSource({
       userId, identityId, sourceId, sourceByte,
@@ -1833,4 +1843,178 @@ test("Directory mapping evaluator is generation-bound, converges member signals,
     has_function_privilege('uptech_api_runtime','uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)','EXECUTE') AS api_execute,
     has_function_privilege('uptech_worker_runtime','uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)','EXECUTE') AS worker_execute`)).rows[0];
   assert.deepEqual(grants, { public_execute: false, api_execute: false, worker_execute: false });
+});
+
+test("V2 web completion atomically admits a mapped known-tenant administrator", async () => {
+  const environment = await ensureActiveGoogleEnvironment();
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE id='97400000-0000-4000-8000-000000000021'`);
+    await client.query(`INSERT INTO uptech.google_auth_configuration_registry(
+      configuration_key,environment_name,purpose,google_client_id,google_audience,
+      audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
+      web_pkce_kms_key_version,is_enabled
+    ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','known.apps.googleusercontent.com',
+      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://known.example/callback',
+      ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
+      'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environment]);
+    await client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
+      web_browser_binding_hash,web_pkce_envelope_version,web_pkce_algorithm,web_pkce_nonce,
+      web_pkce_ciphertext,web_pkce_tag,web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ('97400000-0000-4000-8000-000000000090',$1,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',
+      decode(repeat('90',32),'hex'),decode(repeat('90',32),'hex'),decode(repeat('92',32),'hex'),
+      decode(repeat('93',32),'hex'),1,'AES-256-GCM',decode(repeat('94',12),'hex'),decode(repeat('95',40),'hex'),
+      decode(repeat('96',16),'hex'),'test-key-v1',decode(repeat('97',32),'hex'),'EXCHANGE_RESERVED',
+      decode(repeat('98',32),'hex'),'97400000-0000-4000-8000-000000000090',statement_timestamp()-interval '1 minute',
+      statement_timestamp()+interval '9 minutes',statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`, [environment]);
+  });
+  const row = (await asApi((client) => client.query(`SELECT outcome::text,route::text
+    FROM uptech.complete_web_google_login_directory_v2(
+      decode(repeat('98',32),'hex'),ROW('accounts.google.com','admin-sub','admin@mapping-a.example',true,
+      'mapping-a.example',statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+      'GOOGLE_WEB_LOGIN_V1',NULL,decode(repeat('92',32),'hex'))::uptech.google_verified_claims_assertion_v1,
+      decode(repeat('99',32),'hex'),decode(repeat('9a',32),'hex'),decode(repeat('9b',32),'hex'),
+      '97400000-0000-4000-8000-000000000090')`))).rows[0];
+  assert.deepEqual(row, { outcome: "NORMAL", route: "/admin" });
+  assert.deepEqual((await pool.query(`SELECT m.role,m.status,count(s.id)::int AS sessions
+    FROM uptech.identities i JOIN uptech.workspace_memberships m ON m.user_id=i.user_id
+    LEFT JOIN uptech.sessions s ON s.workspace_id=m.workspace_id AND s.membership_id=m.id
+    WHERE i.provider_subject='admin-sub' AND m.workspace_id='97400000-0000-4000-8000-000000000001'
+    GROUP BY m.role,m.status`)).rows[0], { role: "ADMIN", status: "ACTIVE", sessions: 1 });
+});
+
+test("V2 completion preserves controlled and invite-only authority with atomic credentials", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97400000-0000-4000-8000-000000000021";
+  const environment = await ensureActiveGoogleEnvironment();
+  const token = (label: string) => {
+    const value = Buffer.alloc(32);
+    value.write(label);
+    return value;
+  };
+  const reserve = (suffix: string, label: string, subject: string) =>
+    asMigrationOwner((client) => client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
+      web_browser_binding_hash,web_pkce_envelope_version,web_pkce_algorithm,web_pkce_nonce,
+      web_pkce_ciphertext,web_pkce_tag,web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,'AES-256-GCM',
+      decode(repeat('41',12),'hex'),decode(repeat('42',40),'hex'),decode(repeat('43',16),'hex'),
+      'test-key-v1',decode(repeat('44',32),'hex'),'EXCHANGE_RESERVED',$6,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '9 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`, [
+      `97500000-0000-4000-8000-0000000000${suffix}`, environment, token(`${label}-locator`),
+      token(`${label}-nonce`), token(`${label}-browser`), token(`${label}-handle`),
+    ]).then(() => ({
+      id: `97500000-0000-4000-8000-0000000000${suffix}`,
+      handle: token(`${label}-handle`), nonce: token(`${label}-nonce`), subject,
+    })));
+  const complete = (fixture: Awaited<ReturnType<typeof reserve>>, label: string,
+    session = token(`${label}-session`), csrf = token(`${label}-csrf`)) =>
+    asApi((client) => client.query(`SELECT outcome::text,access_state::text,route::text
+      FROM uptech.complete_web_google_login_directory_v2(
+        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
+        $5,$6,$7,$8)`, [fixture.handle, fixture.subject, `${fixture.subject}@mapping-a.example`,
+      fixture.nonce, session, csrf, token(`${label}-onboarding`), fixture.id]));
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.users(id) VALUES
+      ('97500000-0000-4000-8000-000000000101'),('97500000-0000-4000-8000-000000000102')`);
+    await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,email_claim,
+      email_verified,hosted_domain_claim,claims_observed_at) VALUES
+      ('97500000-0000-4000-8000-000000000111','97500000-0000-4000-8000-000000000101',
+       'GOOGLE','https://accounts.google.com','member-sub','ACTIVE','member@mapping-a.example',true,
+       'mapping-a.example',statement_timestamp()),
+      ('97500000-0000-4000-8000-000000000112','97500000-0000-4000-8000-000000000102',
+       'GOOGLE','https://accounts.google.com','none-sub','ACTIVE','owner@mapping-a.example',true,
+       'mapping-a.example',statement_timestamp())`);
+    await client.query(`INSERT INTO uptech.workspace_memberships(
+      workspace_id,id,user_id,role,status,authz_version) VALUES
+      ($1,'97500000-0000-4000-8000-000000000121','97500000-0000-4000-8000-000000000101',
+       'MEMBER','DEPROVISIONED',7),
+      ($1,'97500000-0000-4000-8000-000000000122','97500000-0000-4000-8000-000000000102',
+       'OWNER','ACTIVE',3)`, [workspaceId]);
+    await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,
+      primary_email,department,lifecycle_state,org_unit_path) VALUES
+      ($1,$2,'rollback-sub','Rollback','rollback@mapping-a.example','engineering','ACTIVE','/Sales')`,
+    [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject)
+      VALUES ($1,$2,'g-sales','rollback-sub')`, [workspaceId, generationId]);
+  });
+
+  const member = await reserve("91", "mapped-member", "member-sub");
+  assert.deepEqual((await complete(member, "mapped-member")).rows[0], {
+    outcome: "NORMAL", access_state: null, route: "/home",
+  });
+  const owner = await reserve("92", "existing-owner", "none-sub");
+  assert.deepEqual((await complete(owner, "existing-owner")).rows[0], {
+    outcome: "NORMAL", access_state: null, route: "/admin",
+  });
+  assert.deepEqual((await pool.query(`SELECT role,status,authz_version::int
+    FROM uptech.workspace_memberships WHERE workspace_id=$1 AND id IN(
+      '97500000-0000-4000-8000-000000000121','97500000-0000-4000-8000-000000000122')
+    ORDER BY id`, [workspaceId])).rows, [
+    { role: "MEMBER", status: "ACTIVE", authz_version: 8 },
+    { role: "OWNER", status: "ACTIVE", authz_version: 3 },
+  ]);
+  assert.deepEqual((await pool.query(`SELECT action,count(*)::int AS count
+    FROM uptech.audit_events WHERE request_id IN ($1,$2) GROUP BY action ORDER BY action`,
+  [member.id, owner.id])).rows, [
+    { action: "GOOGLE_AUTH_LOGIN_SUCCEEDED", count: 2 },
+    { action: "MEMBERSHIP_AUTO_PROVISIONED", count: 1 },
+  ]);
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.platform_audit_events
+    WHERE request_id IN ($1,$2) AND action='GOOGLE_AUTH_LOGIN_SUCCEEDED'`,
+  [member.id, owner.id])).rows[0].count, 2);
+
+  const rollback = await reserve("93", "collision-rollback", "rollback-sub");
+  assert.deepEqual((await complete(rollback, "collision-rollback",
+    token("mapped-member-session"))).rows[0], {
+    outcome: "DENIED", access_state: null, route: null,
+  });
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT status FROM uptech.oauth_transactions WHERE id=$1) AS transaction_status,
+    (SELECT count(*)::int FROM uptech.identities WHERE provider_subject='rollback-sub') AS identities,
+    (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$1) AS platform_audits,
+    (SELECT count(*)::int FROM uptech.audit_events WHERE request_id=$1) AS workspace_audits`,
+  [rollback.id])).rows[0], {
+    transaction_status: "EXCHANGE_RESERVED", identities: 0, platform_audits: 0, workspace_audits: 0,
+  });
+  assert.deepEqual((await complete(member, "mapped-member-replay")).rows[0], {
+    outcome: "DENIED", access_state: null, route: null,
+  });
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces
+    SET provisioning_policy='INVITE_ONLY' WHERE workspace_id=$1`, [workspaceId]));
+  const inviteCases = [
+    { suffix: "94", label: "invite-admin", subject: "admin-sub", route: "/admin" },
+    { suffix: "95", label: "invite-member", subject: "member-sub", route: "/home" },
+    { suffix: "96", label: "invite-owner", subject: "none-sub", route: "/admin" },
+  ] as const;
+  for (const inviteCase of inviteCases) {
+    const fixture = await reserve(inviteCase.suffix, inviteCase.label, inviteCase.subject);
+    assert.deepEqual((await complete(fixture, inviteCase.label)).rows[0], {
+      outcome: "NORMAL", access_state: null, route: inviteCase.route,
+    });
+  }
+  assert.deepEqual((await pool.query(`SELECT i.provider_subject,m.role,
+      count(DISTINCT s.id)::int AS sessions,count(t.id)::int AS tokens
+    FROM uptech.identities i JOIN uptech.workspace_memberships m ON m.user_id=i.user_id
+    JOIN uptech.sessions s ON s.workspace_id=m.workspace_id AND s.membership_id=m.id
+    JOIN uptech.session_tokens t ON t.workspace_id=s.workspace_id AND t.session_id=s.id
+    WHERE m.workspace_id=$1 AND i.provider_subject IN ('admin-sub','member-sub','none-sub')
+    GROUP BY i.provider_subject,m.role ORDER BY i.provider_subject`, [workspaceId])).rows, [
+    { provider_subject: "admin-sub", role: "ADMIN", sessions: 2, tokens: 2 },
+    { provider_subject: "member-sub", role: "MEMBER", sessions: 2, tokens: 2 },
+    { provider_subject: "none-sub", role: "OWNER", sessions: 2, tokens: 2 },
+  ]);
 });
