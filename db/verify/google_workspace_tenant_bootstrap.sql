@@ -190,6 +190,14 @@ BEGIN
     OR pg_catalog.strpos(definition,'evaluate_google_directory_mapping_v1')=0
     OR pg_catalog.strpos(definition,'INSERT INTO uptech.sessions')=0
     OR pg_catalog.strpos(definition,'INSERT INTO uptech.workspace_memberships')=0
+    OR pg_catalog.strpos(definition,'ACCESS_REQUEST_READ')=0
+    OR pg_catalog.strpos(definition,'ACCESS_REQUEST_SUBMIT')=0
+    OR pg_catalog.strpos(definition,'access_request_reason_class')=0
+    OR pg_catalog.strpos(definition,'resource_workspace_id')=0
+    OR pg_catalog.strpos(definition,'DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE')=0
+    OR pg_catalog.strpos(definition,'selected_membership_role')=0
+    OR pg_catalog.strpos(definition,'p_onboarding_token_hash IS DISTINCT FROM p_session_token_hash')=0
+    OR pg_catalog.strpos(definition,'capability_committed')=0
   THEN
     RAISE EXCEPTION 'V2 unknown-domain completion bypasses its private seam or widens authority';
   END IF;

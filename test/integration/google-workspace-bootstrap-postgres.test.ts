@@ -2107,3 +2107,167 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     direct_group_ids: [],
   }]);
 });
+
+test("V2 controlled denials commit only workspace-bound access-request capability", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97400000-0000-4000-8000-000000000021";
+  const environment = await ensureActiveGoogleEnvironment();
+  let sequence = 1;
+  const token = (label: string) => {
+    const value = Buffer.alloc(32);
+    value.write(`7b2b-${label}`);
+    return value;
+  };
+  const complete = async (subject: string, label: string,
+    onboarding = token(`${label}-onb`), hostedDomain = "mapping-a.example") => {
+    const suffix = String(sequence++).padStart(12, "0");
+    const id = `97600000-0000-4000-8000-${suffix}`;
+    const handle = token(`${label}-handle`);
+    const nonce = token(`${label}-nonce`);
+    await asMigrationOwner((client) => client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
+      web_browser_binding_hash,web_pkce_envelope_version,web_pkce_algorithm,web_pkce_nonce,
+      web_pkce_ciphertext,web_pkce_tag,web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,'AES-256-GCM',
+      decode(repeat('51',12),'hex'),decode(repeat('52',40),'hex'),decode(repeat('53',16),'hex'),
+      'test-key-v1',decode(repeat('54',32),'hex'),'EXCHANGE_RESERVED',$6,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '9 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [id, environment, token(`${label}-locator`), nonce, token(`${label}-browser`), handle]));
+    const row = (await asApi((client) => client.query(`SELECT outcome::text,access_state::text,
+        allowed_operations,expires_at,route::text
+      FROM uptech.complete_web_google_login_directory_v2(
+        $1,ROW('accounts.google.com',$2,$3,true,$9,
+          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+      token(`${label}-session`), token(`${label}-csrf`), onboarding, id, hostedDomain]))).rows[0];
+    return { id, onboarding, row };
+  };
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`INSERT INTO uptech.google_auth_configuration_registry(
+      configuration_key,environment_name,purpose,google_client_id,google_audience,
+      audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
+      web_pkce_kms_key_version,is_enabled
+    ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','known.apps.googleusercontent.com',
+      'known.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1','https://known.example/callback',
+      ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
+      'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environment]);
+    await client.query(`UPDATE uptech.workspaces SET provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+      WHERE workspace_id=$1`, [workspaceId]);
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
+  });
+
+  for (const [subject, state] of [
+    ["conflict-sub", "ACCESS_MAPPING_CONFLICT"],
+    ["never-denial-sub", "USER_NOT_PROVISIONED"],
+  ] as const) {
+    const result = await complete(subject, subject);
+    assert.equal(result.row.outcome, "ONBOARDING");
+    assert.equal(result.row.access_state, state);
+    assert.deepEqual(result.row.allowed_operations, ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"]);
+    assert.equal(result.row.route, null);
+    assert.ok(new Date(result.row.expires_at).getTime() > Date.now());
+    const capability = (await pool.query(`SELECT resource_workspace_id,access_request_reason_class,
+        status,extract(epoch FROM expires_at-created_at)::int AS lifetime_seconds
+      FROM uptech.onboarding_sessions WHERE token_hash=$1`, [result.onboarding])).rows[0];
+    assert.equal(capability.resource_workspace_id, workspaceId);
+    assert.equal(capability.access_request_reason_class, state);
+    assert.equal(capability.status, "ACTIVE");
+    assert.equal(capability.lifetime_seconds, 30 * 60);
+    assert.deepEqual((await asApi((client) => client.query(`SELECT outcome::text,status::text
+      FROM uptech.submit_workspace_access_request_v1($1,$2)`, [result.onboarding, crypto.randomUUID()])))
+      .rows[0], { outcome: "PENDING", status: "PENDING" });
+    assert.deepEqual((await asApi((client) => client.query(`SELECT outcome::text,status::text
+      FROM uptech.read_workspace_access_request_v1($1,$2)`, [result.onboarding, crypto.randomUUID()])))
+      .rows[0], { outcome: "FOUND", status: "PENDING" });
+  }
+
+  for (const [subject, state] of [
+    ["suspended-sub", "USER_SUSPENDED"],
+    ["deleted-sub", "USER_REMOVED"],
+    ["prior-absent", "USER_REMOVED"],
+  ] as const) {
+    const result = await complete(subject, `base-${subject}`);
+    assert.deepEqual(result.row, { outcome: "DENIED", access_state: state,
+      allowed_operations: null, expires_at: null, route: null });
+  }
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations
+    SET fresh_until=statement_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`,
+  [workspaceId, generationId]));
+  const staleOwner = await complete("none-sub", "stale-owner");
+  assert.equal(staleOwner.row.outcome, "DENIED");
+  assert.equal(staleOwner.row.access_state, "DIRECTORY_STALE");
+  const staleAdmin = await complete("admin-sub", "stale-admin");
+  assert.equal(staleAdmin.row.outcome, "DENIED");
+  assert.equal(staleAdmin.row.access_state, "DIRECTORY_STALE");
+  const staleEmployee = await complete("stale-new-sub", "stale-employee");
+  assert.equal(staleEmployee.row.outcome, "ONBOARDING");
+  assert.equal(staleEmployee.row.access_state, "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE");
+  assert.equal((await pool.query(`SELECT access_request_reason_class FROM uptech.onboarding_sessions
+    WHERE token_hash=$1`, [staleEmployee.onboarding])).rows[0].access_request_reason_class,
+  "DIRECTORY_STALE");
+
+  const staleCollision = await complete("stale-collision-sub", "stale-collision",
+    token("stale-collision-session"));
+  assert.deepEqual(staleCollision.row, { outcome: "DENIED", access_state: "DIRECTORY_STALE",
+    allowed_operations: null, expires_at: null, route: null });
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.onboarding_sessions
+    WHERE token_hash=$1`, [staleCollision.onboarding])).rows[0].count, 0);
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations
+    SET status='SUPERSEDED',fresh_until=statement_timestamp()+interval '5 minutes'
+    WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]));
+  const pending = await complete("pending-sub", "pending");
+  assert.deepEqual(pending.row, { outcome: "DENIED", access_state: "DIRECTORY_SYNC_PENDING",
+    allowed_operations: null, expires_at: null, route: null });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations
+    SET status='PUBLISHED',fresh_until=statement_timestamp()+interval '5 minutes'
+    WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]));
+
+  const replacement = await complete("never-denial-sub", "never-replacement");
+  assert.equal(replacement.row.outcome, "ONBOARDING");
+  assert.deepEqual((await pool.query(`SELECT capability.status,count(*)::int AS count
+    FROM uptech.onboarding_sessions capability JOIN uptech.identities identity_row
+      ON identity_row.id=capability.identity_id
+    WHERE identity_row.provider_subject='never-denial-sub'
+      AND capability.allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    GROUP BY capability.status ORDER BY capability.status`)).rows, [
+    { status: "ACTIVE", count: 1 }, { status: "REVOKED", count: 1 },
+  ]);
+
+  const conflictCollision = await complete("conflict-sub", "conflict-collision",
+    token("conflict-collision-session"));
+  assert.deepEqual(conflictCollision.row, { outcome: "DENIED", access_state: null,
+    allowed_operations: null, expires_at: null, route: null });
+
+  const tenantB = await complete("admin-sub", "tenant-b", token("tenant-b-onb"),
+    "mapping-b.example");
+  assert.equal(tenantB.row.outcome, "ONBOARDING");
+  assert.equal(tenantB.row.access_state, "USER_NOT_PROVISIONED");
+  assert.equal((await pool.query(`SELECT resource_workspace_id FROM uptech.onboarding_sessions
+    WHERE token_hash=$1`, [tenantB.onboarding])).rows[0].resource_workspace_id,
+  "97400000-0000-4000-8000-000000000002");
+  assert.equal((await pool.query(`SELECT count(*)::int AS count
+    FROM uptech.identities i JOIN uptech.workspace_memberships m ON m.user_id=i.user_id
+    WHERE i.provider_subject='admin-sub'
+      AND m.workspace_id='97400000-0000-4000-8000-000000000002'`)).rows[0].count, 0);
+
+  const replay = (await asApi((client) => client.query(`SELECT outcome::text,access_state::text
+    FROM uptech.complete_web_google_login_directory_v2(
+      $1,NULL,NULL,NULL,NULL,$2)`, [staleEmployee.onboarding, staleEmployee.id]))).rows[0];
+  assert.deepEqual(replay, { outcome: "DENIED", access_state: null });
+  assert.deepEqual((await pool.query(`SELECT
+    count(DISTINCT m.id)::int AS memberships,count(DISTINCT s.id)::int AS sessions
+    FROM uptech.identities i
+    LEFT JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$1
+    LEFT JOIN uptech.sessions s ON s.membership_id=m.id AND s.workspace_id=m.workspace_id
+    WHERE i.provider_subject IN ('conflict-sub','never-denial-sub','suspended-sub','deleted-sub',
+      'prior-absent','stale-new-sub','stale-collision-sub','pending-sub')`, [workspaceId])).rows[0],
+  { memberships: 0, sessions: 0 });
+});

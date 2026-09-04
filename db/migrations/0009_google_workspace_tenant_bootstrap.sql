@@ -2703,6 +2703,10 @@ DECLARE
   insert_member boolean := false;
   reactivate_member boolean := false;
   credential_expiry timestamptz;
+  denial_access_state uptech.google_login_access_state_v2;
+  capability_reason text;
+  capability_public_state uptech.google_login_access_state_v2;
+  capability_committed boolean := false;
   transitioned_rows integer;
 BEGIN
   validation := uptech.validate_web_google_login_completion_v1(
@@ -2715,9 +2719,22 @@ BEGIN
 
   SELECT locator.workspace_id INTO selected_workspace_id
   FROM uptech.workspace_domain_locators AS locator
+  JOIN uptech.workspaces AS located_workspace
+    ON located_workspace.workspace_id=locator.workspace_id
+   AND located_workspace.google_customer_id=locator.google_customer_id
   WHERE locator.normalized_domain=(canonical_claims).normalized_hosted_domain
-    AND locator.status='VERIFIED'
-  FOR UPDATE;
+    AND locator.status='VERIFIED' AND locator.google_customer_id IS NOT NULL
+  FOR UPDATE OF locator;
+
+  IF selected_workspace_id IS NULL AND EXISTS (
+    SELECT 1 FROM uptech.workspace_domain_locators AS mismatched_locator
+    WHERE mismatched_locator.normalized_domain=(canonical_claims).normalized_hosted_domain
+      AND mismatched_locator.status='VERIFIED'
+  ) THEN
+    PERFORM uptech.record_google_login_rejection_v1(
+      p_completion_handle_hash,'CLAIMS_INVALID'::uptech.google_auth_rejection_class_v1,p_request_id);
+    RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+  END IF;
 
   IF selected_workspace_id IS NOT NULL THEN
     SELECT status,provisioning_policy,security_version
@@ -2746,41 +2763,6 @@ BEGIN
           (legacy_result).expires_at,NULL)::uptech.google_login_completion_result_v3;
       END IF;
       RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
-    END IF;
-
-    IF selected_workspace_status <> 'ACTIVE' THEN
-      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
-      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-      RETURN ROW('DENIED','WORKSPACE_SUSPENDED',NULL,NULL,NULL)
-        ::uptech.google_login_completion_result_v3;
-    END IF;
-
-    SELECT generation.id,generation.fresh_until
-    INTO selected_generation_id,selected_generation_fresh_until
-    FROM uptech.people_sync_generations AS generation
-    JOIN uptech.workspaces AS workspace ON workspace.workspace_id=generation.workspace_id
-      AND generation.google_customer_id=workspace.google_customer_id
-    WHERE generation.workspace_id=selected_workspace_id
-      AND generation.status='PUBLISHED' AND generation.traversal_complete
-      AND generation.completed_at IS NOT NULL AND generation.fresh_until IS NOT NULL
-    ORDER BY generation.completed_at DESC,generation.id DESC LIMIT 1;
-    IF selected_generation_id IS NULL THEN
-      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
-      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-      RETURN ROW('DENIED','DIRECTORY_SYNC_PENDING',NULL,NULL,NULL)
-        ::uptech.google_login_completion_result_v3;
-    ELSIF selected_generation_fresh_until <= pg_catalog.clock_timestamp() THEN
-      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
-      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-      RETURN ROW('DENIED','DIRECTORY_STALE',NULL,NULL,NULL)
-        ::uptech.google_login_completion_result_v3;
-    END IF;
-    IF NOT uptech.google_directory_generation_has_current_authority_v1(
-      selected_workspace_id,selected_generation_id) THEN
-      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
-      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-      RETURN ROW('DENIED','USER_NOT_PROVISIONED',NULL,NULL,NULL)
-        ::uptech.google_login_completion_result_v3;
     END IF;
 
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
@@ -2819,25 +2801,133 @@ BEGIN
       selected_membership_status,selected_membership_authz_version
     FROM uptech.workspace_memberships WHERE workspace_id=selected_workspace_id
       AND user_id=selected_user_id FOR UPDATE;
-    IF selected_membership_role='OWNER' AND selected_membership_status='ACTIVE' THEN
-      IF NOT EXISTS (SELECT 1 FROM uptech.people_profiles WHERE workspace_id=selected_workspace_id
-        AND generation_id=selected_generation_id AND google_subject=(canonical_claims).provider_subject::text
-        AND lifecycle_state='ACTIVE') THEN
-        UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=observed_at
-        WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-        RETURN ROW('DENIED','USER_NOT_PROVISIONED',NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
-      END IF;
+
+    IF selected_workspace_status <> 'ACTIVE' THEN
+      denial_access_state:='WORKSPACE_SUSPENDED';
     ELSE
-      SELECT (evaluation).outcome::text,(evaluation).target_role,(evaluation).target_department_key
-      INTO mapping_outcome,mapping_target_role,mapping_target_department
-      FROM uptech.evaluate_google_directory_mapping_v1(selected_workspace_id,
-        selected_generation_id,(canonical_claims).provider_subject::text) AS evaluation;
-      IF mapping_outcome NOT IN ('ADMIN','MEMBER') THEN
-        UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=observed_at
-        WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
-        RETURN ROW('DENIED',mapping_outcome::uptech.google_login_access_state_v2,
-          NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+      SELECT generation.id,generation.fresh_until
+      INTO selected_generation_id,selected_generation_fresh_until
+      FROM uptech.people_sync_generations AS generation
+      JOIN uptech.workspaces AS workspace ON workspace.workspace_id=generation.workspace_id
+        AND generation.google_customer_id=workspace.google_customer_id
+      WHERE generation.workspace_id=selected_workspace_id
+        AND generation.status='PUBLISHED' AND generation.traversal_complete
+        AND generation.completed_at IS NOT NULL AND generation.fresh_until IS NOT NULL
+      ORDER BY generation.completed_at DESC,generation.id DESC LIMIT 1;
+      IF selected_generation_id IS NULL THEN
+        denial_access_state:='DIRECTORY_SYNC_PENDING';
+      ELSIF selected_generation_fresh_until <= pg_catalog.clock_timestamp() THEN
+        IF selected_membership_status='ACTIVE' AND selected_membership_role IN ('OWNER','ADMIN') THEN
+          denial_access_state:='DIRECTORY_STALE';
+        ELSE
+          capability_reason:='DIRECTORY_STALE';
+          capability_public_state:='DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE';
+        END IF;
+      ELSIF NOT uptech.google_directory_generation_has_current_authority_v1(
+        selected_workspace_id,selected_generation_id) THEN
+        denial_access_state:='USER_NOT_PROVISIONED';
       END IF;
+    END IF;
+
+    IF denial_access_state IS NULL AND capability_reason IS NULL THEN
+      IF selected_membership_role='OWNER' AND selected_membership_status='ACTIVE' THEN
+        SELECT CASE
+          WHEN profile.lifecycle_state='SUSPENDED' THEN 'USER_SUSPENDED'
+          WHEN profile.lifecycle_state='DELETED' THEN 'USER_REMOVED'
+          ELSE NULL END
+        INTO mapping_outcome
+        FROM uptech.people_profiles AS profile
+        WHERE profile.workspace_id=selected_workspace_id
+          AND profile.generation_id=selected_generation_id
+          AND profile.google_subject=(canonical_claims).provider_subject::text;
+        IF NOT EXISTS (SELECT 1 FROM uptech.people_profiles WHERE workspace_id=selected_workspace_id
+          AND generation_id=selected_generation_id
+          AND google_subject=(canonical_claims).provider_subject::text
+          AND lifecycle_state='ACTIVE') THEN
+          SELECT (evaluation).outcome::text INTO mapping_outcome
+          FROM uptech.evaluate_google_directory_mapping_v1(selected_workspace_id,
+            selected_generation_id,(canonical_claims).provider_subject::text) AS evaluation;
+          denial_access_state:=mapping_outcome::uptech.google_login_access_state_v2;
+        END IF;
+      ELSE
+        SELECT (evaluation).outcome::text,(evaluation).target_role,(evaluation).target_department_key
+        INTO mapping_outcome,mapping_target_role,mapping_target_department
+        FROM uptech.evaluate_google_directory_mapping_v1(selected_workspace_id,
+          selected_generation_id,(canonical_claims).provider_subject::text) AS evaluation;
+        IF mapping_outcome IN ('ACCESS_MAPPING_CONFLICT','USER_NOT_PROVISIONED') THEN
+          capability_reason:=mapping_outcome;
+          capability_public_state:=mapping_outcome::uptech.google_login_access_state_v2;
+        ELSIF mapping_outcome IN ('USER_SUSPENDED','USER_REMOVED') THEN
+          denial_access_state:=mapping_outcome::uptech.google_login_access_state_v2;
+        END IF;
+      END IF;
+    END IF;
+
+    IF capability_reason IS NOT NULL THEN
+      IF p_onboarding_token_hash IS NOT NULL THEN
+        PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+          'UPTECH_CREDENTIAL_V1' || pg_catalog.encode(p_onboarding_token_hash,'hex'),0));
+      END IF;
+      IF p_onboarding_token_hash IS NOT NULL
+        AND p_onboarding_token_hash IS DISTINCT FROM p_session_token_hash
+        AND p_onboarding_token_hash IS DISTINCT FROM p_csrf_token_hash
+        AND NOT EXISTS (SELECT 1 FROM uptech.session_tokens
+          WHERE token_hash=p_onboarding_token_hash OR csrf_token_hash=p_onboarding_token_hash)
+        AND NOT EXISTS (SELECT 1 FROM uptech.onboarding_sessions
+          WHERE token_hash=p_onboarding_token_hash) THEN
+        credential_expiry:=observed_at+interval '30 minutes';
+        UPDATE uptech.onboarding_sessions SET status='REVOKED',revoked_at=observed_at
+        WHERE identity_id=selected_identity_id AND status='ACTIVE'
+          AND allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+          AND allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[];
+        INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,status,
+          created_at,expires_at,resource_workspace_id,access_request_reason_class)
+        VALUES(pg_catalog.gen_random_uuid(),selected_identity_id,p_onboarding_token_hash,
+          ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],'ACTIVE',observed_at,credential_expiry,
+          selected_workspace_id,capability_reason);
+        capability_committed:=true;
+      END IF;
+      IF capability_committed THEN
+        observed_at:=pg_catalog.clock_timestamp();
+        UPDATE uptech.oauth_transactions SET status='COMPLETED',completed_at=observed_at
+        WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED'
+          AND completion_expires_at>observed_at
+          AND (canonical_claims).issued_at>=observed_at-interval '5 minutes'
+          AND (canonical_claims).issued_at<=observed_at+interval '2 minutes'
+          AND (canonical_claims).expires_at>observed_at
+          AND (canonical_claims).expires_at>(canonical_claims).issued_at
+          AND (canonical_claims).expires_at<=(canonical_claims).issued_at+interval '2 hours';
+        GET DIAGNOSTICS transitioned_rows=ROW_COUNT;
+        IF transitioned_rows<>1 THEN RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='reservation expired'; END IF;
+        INSERT INTO uptech.platform_audit_events(id,identity_id,action,target_type,outcome,request_id,
+          metadata,occurred_at) VALUES(pg_catalog.gen_random_uuid(),selected_identity_id,
+          'GOOGLE_AUTH_ONBOARDING_ISSUED','ONBOARDING_SESSION','SUCCEEDED',p_request_id,
+          pg_catalog.jsonb_build_object('correlation_id',(validation).transaction_id,
+            'identity_id',selected_identity_id,'access_state',capability_public_state::text),observed_at);
+        INSERT INTO uptech.audit_events(workspace_id,id,actor_kind,actor_id,action,target_type,
+          outcome,request_id,metadata,occurred_at)
+        VALUES(selected_workspace_id,pg_catalog.gen_random_uuid(),'SYSTEM',NULL,
+          'GOOGLE_AUTH_ONBOARDING_ISSUED','ONBOARDING_SESSION','SUCCEEDED',p_request_id,
+          pg_catalog.jsonb_build_object('identity_id',selected_identity_id,
+            'access_state',capability_public_state::text,'reason_class',capability_reason),observed_at);
+        RETURN ROW('ONBOARDING',capability_public_state,
+          ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],credential_expiry,NULL)
+          ::uptech.google_login_completion_result_v3;
+      END IF;
+      denial_access_state:=CASE WHEN capability_reason='DIRECTORY_STALE'
+        THEN 'DIRECTORY_STALE'::uptech.google_login_access_state_v2 ELSE NULL END;
+    END IF;
+
+    IF denial_access_state IS NOT NULL OR capability_reason IS NOT NULL THEN
+      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
+      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
+      RETURN ROW('DENIED',denial_access_state,NULL,NULL,NULL)
+        ::uptech.google_login_completion_result_v3;
+    END IF;
+
+    IF selected_membership_role='OWNER' AND selected_membership_status='ACTIVE' THEN
+      NULL;
+    ELSE
       IF selected_membership_id IS NULL THEN
         selected_membership_id:=pg_catalog.gen_random_uuid(); selected_membership_authz_version:=1;
         insert_member:=true;
