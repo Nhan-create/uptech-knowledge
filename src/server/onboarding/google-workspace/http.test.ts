@@ -641,6 +641,7 @@ test("bodyless recovery POSTs reject a non-null zero-byte stream when Content-Le
 
 test("bodyless recovery POSTs reject noncanonical lengths and forbidden metadata before repository work", async () => {
   const hostileMetadata = [
+    { label: "Content-Length 1 with null body", values: [["content-length", "1"]] },
     { label: "Content-Length 00", values: [["content-length", "00"]] },
     { label: "Content-Length +0", values: [["content-length", "+0"]] },
     { label: "Content-Length 000", values: [["content-length", "000"]] },
@@ -658,6 +659,10 @@ test("bodyless recovery POSTs reject noncanonical lengths and forbidden metadata
       const f = recoveryFixture();
       const request = browserBodylessPost(path);
       for (const [name, value] of hostile.values) request.headers.append(name, value);
+      if (hostile.label === "Content-Length 1 with null body") {
+        assert.equal(request.body, null);
+        assert.equal(request.headers.get("content-length"), "1");
+      }
 
       const response = path === "sync-retry"
         ? await createBootstrapSyncRetryPost(f.dependencies)(request)
