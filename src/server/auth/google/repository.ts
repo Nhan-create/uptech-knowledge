@@ -31,26 +31,50 @@ export type GoogleLoginConsumeResult =
 export type GoogleLoginAccessState =
   | "UNKNOWN_WORKSPACE"
   | "USER_NOT_PROVISIONED"
+  | "ACCESS_MAPPING_CONFLICT"
   | "USER_SUSPENDED"
+  | "USER_REMOVED"
+  | "DIRECTORY_SYNC_PENDING"
+  | "DIRECTORY_STALE"
+  | "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE"
   | "WORKSPACE_SUSPENDED";
 
+type FirstDomainClaimOperation =
+  | "FIRST_DOMAIN_CLAIM_READ"
+  | "FIRST_DOMAIN_CLAIM_RESERVE"
+  | "FIRST_DOMAIN_CLAIM_COMPLETE";
+
+type AccessRequestOperation =
+  | "ACCESS_REQUEST_READ"
+  | "ACCESS_REQUEST_SUBMIT";
+
 export type GoogleLoginCompletionResult =
-  | { readonly outcome: "NORMAL" }
+  | { readonly outcome: "NORMAL"; readonly route: "/admin" | "/home" }
   | {
       readonly outcome: "ONBOARDING";
-      readonly accessState?: Extract<
-        GoogleLoginAccessState,
-        "UNKNOWN_WORKSPACE" | "USER_NOT_PROVISIONED"
-      >;
-      readonly allowedOperations: readonly string[];
+      readonly accessState: "UNKNOWN_WORKSPACE";
+      readonly allowedOperations: readonly [
+        FirstDomainClaimOperation,
+        FirstDomainClaimOperation,
+        FirstDomainClaimOperation,
+      ];
+      readonly expiresAt: Date;
+    }
+  | {
+      readonly outcome: "ONBOARDING";
+      readonly accessState:
+        | "USER_NOT_PROVISIONED"
+        | "ACCESS_MAPPING_CONFLICT"
+        | "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE";
+      readonly allowedOperations: readonly [
+        AccessRequestOperation,
+        AccessRequestOperation,
+      ];
       readonly expiresAt: Date;
     }
   | {
       readonly outcome: "DENIED";
-      readonly accessState?: Extract<
-        GoogleLoginAccessState,
-        "USER_SUSPENDED" | "WORKSPACE_SUSPENDED"
-      >;
+      readonly accessState: GoogleLoginAccessState;
     };
 
 export interface BeginGoogleLoginInput {
@@ -123,6 +147,7 @@ interface CompletionRow extends QueryResultRow {
   readonly access_state: unknown;
   readonly allowed_operations: unknown;
   readonly expires_at: unknown;
+  readonly route: unknown;
 }
 
 interface RejectionRow extends QueryResultRow {
@@ -175,8 +200,9 @@ const COMPLETE_SQL = `
 SELECT result.outcome::text AS outcome,
        result.access_state::text AS access_state,
        result.allowed_operations,
-       result.expires_at
-FROM uptech.complete_web_google_login_directory_v1(
+       result.expires_at,
+       result.route::text AS route
+FROM uptech.complete_web_google_login_directory_v2(
   $1::uptech.google_auth_hash32_v1,
   ROW(
     $2::uptech.google_auth_issuer_v1,
@@ -254,7 +280,12 @@ function accessState(value: unknown): GoogleLoginAccessState | null {
   if (
     value === "UNKNOWN_WORKSPACE" ||
     value === "USER_NOT_PROVISIONED" ||
+    value === "ACCESS_MAPPING_CONFLICT" ||
     value === "USER_SUSPENDED" ||
+    value === "USER_REMOVED" ||
+    value === "DIRECTORY_SYNC_PENDING" ||
+    value === "DIRECTORY_STALE" ||
+    value === "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE" ||
     value === "WORKSPACE_SUSPENDED"
   ) {
     return value;
@@ -269,6 +300,27 @@ function requiresExactOperations(
   return actual.length === expected.length && actual.every(
     (operation, index) => operation === expected[index],
   );
+}
+
+function requiresNoCompletionAuthority(row: CompletionRow): boolean {
+  return row.allowed_operations === null && row.expires_at === null;
+}
+
+const UNKNOWN_WORKSPACE_OPERATIONS = [
+  "FIRST_DOMAIN_CLAIM_READ",
+  "FIRST_DOMAIN_CLAIM_RESERVE",
+  "FIRST_DOMAIN_CLAIM_COMPLETE",
+] as const;
+
+const ACCESS_REQUEST_OPERATIONS = [
+  "ACCESS_REQUEST_READ",
+  "ACCESS_REQUEST_SUBMIT",
+] as const;
+
+function frozenOperations<const Operations extends readonly string[]>(
+  operations: Operations,
+): Operations {
+  return Object.freeze([...operations]) as Operations;
 }
 
 function requireEnvelope(row: ConsumeRow): WebPkceEnvelope {
@@ -381,7 +433,16 @@ export function createGoogleLoginRepository(
       ]);
       const row = requireSingleRow(result.rows);
       if (row.outcome === "NORMAL") {
-        return { outcome: "NORMAL" };
+        if (
+          row.access_state !== null ||
+          !requiresNoCompletionAuthority(row) ||
+          (row.route !== "/admin" && row.route !== "/home")
+        ) {
+          throw new GoogleLoginRepositoryError(
+            "Google login normal result is invalid",
+          );
+        }
+        return { outcome: "NORMAL", route: row.route };
       }
       if (row.outcome === "ONBOARDING") {
         if (
@@ -396,48 +457,50 @@ export function createGoogleLoginRepository(
           );
         }
         const state = accessState(row.access_state);
-        if (
-          (state !== null && state !== "UNKNOWN_WORKSPACE" && state !== "USER_NOT_PROVISIONED") ||
-          (state === "UNKNOWN_WORKSPACE" && !requiresExactOperations(
-            row.allowed_operations,
-            [
-              "FIRST_DOMAIN_CLAIM_READ",
-              "FIRST_DOMAIN_CLAIM_RESERVE",
-              "FIRST_DOMAIN_CLAIM_COMPLETE",
-              "ACCESS_REQUEST_READ",
-              "ACCESS_REQUEST_SUBMIT",
-            ],
-          )) ||
-          (state === "USER_NOT_PROVISIONED" && !requiresExactOperations(
-            row.allowed_operations,
-            ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
-          ))
-        ) {
+        if (row.route !== null || state === null) {
           throw new GoogleLoginRepositoryError(
             "Google login onboarding access state is invalid",
           );
         }
-        return {
-          outcome: "ONBOARDING",
-          ...(state === null ? {} : { accessState: state }),
-          allowedOperations: Object.freeze([...row.allowed_operations]),
-          expiresAt: requireDate(row.expires_at),
-        };
+        const expiresAt = requireDate(row.expires_at);
+        if (state === "UNKNOWN_WORKSPACE") {
+          if (!requiresExactOperations(row.allowed_operations, UNKNOWN_WORKSPACE_OPERATIONS)) {
+            throw new GoogleLoginRepositoryError(
+              "Google login onboarding operations are invalid",
+            );
+          }
+          return {
+            outcome: "ONBOARDING",
+            accessState: state,
+            allowedOperations: frozenOperations(UNKNOWN_WORKSPACE_OPERATIONS),
+            expiresAt,
+          };
+        }
+        if (
+          (state === "USER_NOT_PROVISIONED" ||
+            state === "ACCESS_MAPPING_CONFLICT" ||
+            state === "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE") &&
+          requiresExactOperations(row.allowed_operations, ACCESS_REQUEST_OPERATIONS)
+        ) {
+          return {
+            outcome: "ONBOARDING",
+            accessState: state,
+            allowedOperations: frozenOperations(ACCESS_REQUEST_OPERATIONS),
+            expiresAt,
+          };
+        }
+        throw new GoogleLoginRepositoryError(
+          "Google login onboarding access state is invalid",
+        );
       }
       if (row.outcome === "DENIED") {
         const state = accessState(row.access_state);
-        if (
-          state !== null &&
-          state !== "USER_SUSPENDED" &&
-          state !== "WORKSPACE_SUSPENDED"
-        ) {
+        if (state === null || !requiresNoCompletionAuthority(row) || row.route !== null) {
           throw new GoogleLoginRepositoryError(
             "Google login denied access state is invalid",
           );
         }
-        return state === null
-          ? { outcome: "DENIED" }
-          : { outcome: "DENIED", accessState: state };
+        return { outcome: "DENIED", accessState: state };
       }
       throw new GoogleLoginRepositoryError(
         "Google login completion result is invalid",

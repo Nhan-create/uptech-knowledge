@@ -209,18 +209,25 @@ for (const outcome of ["RATE_LIMITED", "DENIED"] as const) {
 
 test("complete sends exactly the approved typed assertion and credential hashes", async () => {
   const fake = fakePool([
-    { outcome: "NORMAL", allowed_operations: null, expires_at: null },
+    {
+      outcome: "NORMAL",
+      access_state: null,
+      allowed_operations: null,
+      expires_at: null,
+      route: "/admin",
+    },
   ]);
   const repository = createGoogleLoginRepository(fake.pool as never);
 
   assert.deepEqual(await repository.complete(COMPLETE_INPUT), {
     outcome: "NORMAL",
+    route: "/admin",
   });
 
   assert.equal(fake.calls.length, 1);
   assert.match(
     fake.calls[0].text,
-    /uptech\.complete_web_google_login_directory_v1/u,
+    /uptech\.complete_web_google_login_directory_v2/u,
   );
   assert.doesNotMatch(
     fake.calls[0].text,
@@ -259,6 +266,7 @@ test("complete strictly parses onboarding and copies its operations/expiry", asy
       access_state: "USER_NOT_PROVISIONED",
       allowed_operations: operations,
       expires_at: expiresAt,
+      route: null,
     },
   ]);
   const repository = createGoogleLoginRepository(fake.pool as never);
@@ -281,13 +289,37 @@ test("complete strictly parses onboarding and copies its operations/expiry", asy
 
 test("complete parses DENIED without returning candidate authority", async () => {
   const fake = fakePool([
-    { outcome: "DENIED", allowed_operations: null, expires_at: null },
+    {
+      outcome: "DENIED",
+      access_state: "USER_REMOVED",
+      allowed_operations: null,
+      expires_at: null,
+      route: null,
+    },
   ]);
   const repository = createGoogleLoginRepository(fake.pool as never);
 
   assert.deepEqual(await repository.complete(COMPLETE_INPUT), {
     outcome: "DENIED",
+    accessState: "USER_REMOVED",
   });
+});
+
+test("complete accepts only the database-provided member route", async () => {
+  const fake = fakePool([
+    {
+      outcome: "NORMAL",
+      access_state: null,
+      allowed_operations: null,
+      expires_at: null,
+      route: "/home",
+    },
+  ]);
+
+  assert.deepEqual(
+    await createGoogleLoginRepository(fake.pool as never).complete(COMPLETE_INPUT),
+    { outcome: "NORMAL", route: "/home" },
+  );
 });
 
 const ONBOARDING_ACCESS_STATES = [
@@ -297,9 +329,15 @@ const ONBOARDING_ACCESS_STATES = [
       "FIRST_DOMAIN_CLAIM_READ",
       "FIRST_DOMAIN_CLAIM_RESERVE",
       "FIRST_DOMAIN_CLAIM_COMPLETE",
-      "ACCESS_REQUEST_READ",
-      "ACCESS_REQUEST_SUBMIT",
     ],
+  ],
+  [
+    "ACCESS_MAPPING_CONFLICT",
+    ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+  ],
+  [
+    "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE",
+    ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
   ],
 ] as const satisfies readonly (readonly [
   GoogleLoginAccessState,
@@ -315,6 +353,7 @@ for (const [accessState, allowedOperations] of ONBOARDING_ACCESS_STATES) {
         access_state: accessState,
         allowed_operations: allowedOperations,
         expires_at: expiresAt,
+        route: null,
       },
     ]);
     const repository = createGoogleLoginRepository(fake.pool as never);
@@ -331,6 +370,9 @@ for (const [accessState, allowedOperations] of ONBOARDING_ACCESS_STATES) {
 
 const SUSPENDED_ACCESS_STATES = [
   "USER_SUSPENDED",
+  "USER_REMOVED",
+  "DIRECTORY_SYNC_PENDING",
+  "DIRECTORY_STALE",
   "WORKSPACE_SUSPENDED",
 ] as const satisfies readonly GoogleLoginAccessState[];
 
@@ -342,6 +384,7 @@ for (const accessState of SUSPENDED_ACCESS_STATES) {
         access_state: accessState,
         allowed_operations: null,
         expires_at: null,
+        route: null,
       },
     ]);
     const repository = createGoogleLoginRepository(fake.pool as never);
@@ -384,6 +427,7 @@ test("complete rejects onboarding operations mapped to the wrong safe access sta
       access_state: "UNKNOWN_WORKSPACE",
       allowed_operations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
       expires_at: new Date("2026-09-01T04:15:00.000Z"),
+      route: null,
     },
     {
       outcome: "ONBOARDING",
@@ -396,6 +440,112 @@ test("complete rejects onboarding operations mapped to the wrong safe access sta
         "ACCESS_REQUEST_SUBMIT",
       ],
       expires_at: new Date("2026-09-01T04:15:00.000Z"),
+      route: null,
+    },
+    {
+      outcome: "ONBOARDING",
+      access_state: "UNKNOWN_WORKSPACE",
+      allowed_operations: [
+        "FIRST_DOMAIN_CLAIM_READ",
+        "FIRST_DOMAIN_CLAIM_RESERVE",
+      ],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+      route: null,
+    },
+    {
+      outcome: "ONBOARDING",
+      access_state: "UNKNOWN_WORKSPACE",
+      allowed_operations: [
+        "FIRST_DOMAIN_CLAIM_READ",
+        "FIRST_DOMAIN_CLAIM_RESERVE",
+        "FIRST_DOMAIN_CLAIM_COMPLETE",
+        "FIRST_DOMAIN_CLAIM_COMPLETE",
+      ],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+      route: null,
+    },
+    {
+      outcome: "ONBOARDING",
+      access_state: "USER_NOT_PROVISIONED",
+      allowed_operations: ["ACCESS_REQUEST_SUBMIT", "ACCESS_REQUEST_READ"],
+      expires_at: new Date("2026-09-01T04:15:00.000Z"),
+      route: null,
+    },
+  ]) {
+    const fake = fakePool([row]);
+    const repository = createGoogleLoginRepository(fake.pool as never);
+    await assert.rejects(
+      repository.complete(COMPLETE_INPUT),
+      GoogleLoginRepositoryError,
+    );
+  }
+});
+
+test("complete rejects cross-outcome fields and opaque directory results", async () => {
+  const expiresAt = new Date("2026-09-01T04:15:00.000Z");
+  for (const row of [
+    {
+      outcome: "NORMAL",
+      access_state: null,
+      allowed_operations: null,
+      expires_at: null,
+      route: "/outside",
+    },
+    {
+      outcome: "NORMAL",
+      access_state: "USER_REMOVED",
+      allowed_operations: null,
+      expires_at: null,
+      route: "/home",
+    },
+    {
+      outcome: "NORMAL",
+      access_state: null,
+      allowed_operations: ["ACCESS_REQUEST_READ"],
+      expires_at: null,
+      route: "/home",
+    },
+    {
+      outcome: "NORMAL",
+      access_state: null,
+      allowed_operations: null,
+      expires_at: expiresAt,
+      route: "/home",
+    },
+    {
+      outcome: "ONBOARDING",
+      access_state: "USER_NOT_PROVISIONED",
+      allowed_operations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+      expires_at: expiresAt,
+      route: "/home",
+    },
+    {
+      outcome: "DENIED",
+      access_state: "USER_REMOVED",
+      allowed_operations: ["ACCESS_REQUEST_READ"],
+      expires_at: null,
+      route: null,
+    },
+    {
+      outcome: "DENIED",
+      access_state: "USER_REMOVED",
+      allowed_operations: null,
+      expires_at: expiresAt,
+      route: null,
+    },
+    {
+      outcome: "DENIED",
+      access_state: "USER_REMOVED",
+      allowed_operations: null,
+      expires_at: null,
+      route: "/home",
+    },
+    {
+      outcome: "DENIED",
+      access_state: null,
+      allowed_operations: null,
+      expires_at: null,
+      route: null,
     },
   ]) {
     const fake = fakePool([row]);
