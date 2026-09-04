@@ -30,9 +30,15 @@ test("production release requires an explicit one-shot flag before prebuild migr
   assert.match(script, /VERCEL_ENV === "production"/u);
   assert.match(script, /VERCEL_GIT_COMMIT_REF !== "main"/u);
   assert.match(script, /VERCEL_GIT_PROVIDER !== "github"/u);
-  assert.match(script, /safe_google_access_states_a4\.sql/u);
   assert.match(script, /0008_google_directory_production\.sql/u);
+  assert.match(script, /0009_google_workspace_tenant_bootstrap\.sql/u);
   assert.match(script, /verify\/enterprise_login\.sql/u);
+  assert.match(script, /verify\/google_workspace_tenant_bootstrap\.sql/u);
+  assert.match(script, /complete_google_workspace_bootstrap_v1/u);
+  assert.match(script, /complete_web_google_login_directory_v2/u);
+  assert.match(script, /complete_mobile_google_callback_directory_v2/u);
+  assert.match(script, /google_workspace_bootstrap_receipts/u);
+  assert.match(script, /google_workspace_bootstrap_receipts_committed_attempt/u);
   assert.match(script, /complete_web_google_login_directory_v1/u);
   assert.match(script, /pg_try_advisory_lock/u);
   assert.match(script, /UPTECH_ANDROID_APP_LINKS_SHA256/u);
@@ -49,7 +55,15 @@ test("production release requires an explicit one-shot flag before prebuild migr
   assert.match(script, /vn\.uptech\.uptech_knowledge_mobile/u);
   assert.match(script, /vn\.uptech\.uptechKnowledgeMobile/u);
   assert.doesNotMatch(script, /GOOGLE_WORKSPACE_DOMAIN/u);
+  assert.doesNotMatch(script, /process\.env\.DATABASE_URL/u);
   assert.doesNotMatch(script, /console\.(?:log|error)\([^\n]*(?:connectionString|migrationSource|verificationSource)/u);
+});
+
+test("bootstrap migration has a dedicated disposable PostgreSQL gate", () => {
+  assert.equal(
+    packageJson.scripts["test:postgres:bootstrap"],
+    "node --experimental-strip-types --test test/integration/google-workspace-bootstrap-postgres.test.ts test/integration/bootstrap-migration-runner-postgres.test.ts",
+  );
 });
 
 test("ordinary production app builds skip migration without privileged database configuration", () => {

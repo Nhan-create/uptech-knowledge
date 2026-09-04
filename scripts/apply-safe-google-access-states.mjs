@@ -286,15 +286,17 @@ function executableSql(source) {
 }
 
 const [
-  safeAccessVerificationSource,
   enterpriseLoginBaselineMigrationSource,
   googleDirectoryMigrationSource,
+  googleWorkspaceBootstrapMigrationSource,
   enterpriseLoginVerificationSource,
+  googleWorkspaceBootstrapVerificationSource,
 ] = await Promise.all([
-  readFile("db/verify/safe_google_access_states_a4.sql", "utf8"),
   readFile("db/migrations/0007_enterprise_login.sql", "utf8"),
   readFile("db/migrations/0008_google_directory_production.sql", "utf8"),
+  readFile("db/migrations/0009_google_workspace_tenant_bootstrap.sql", "utf8"),
   readFile("db/verify/enterprise_login.sql", "utf8"),
+  readFile("db/verify/google_workspace_tenant_bootstrap.sql", "utf8"),
 ]);
 
 const client = new pg.Client({
@@ -310,6 +312,15 @@ try {
     SET lock_timeout = '8s';
     SET idle_in_transaction_session_timeout = '60s';
   `);
+
+  const releaseLock = await client.query(`
+    SELECT pg_catalog.pg_try_advisory_lock(
+      pg_catalog.hashtextextended('uptech_multi_tenant_login_release_v1', 0)
+    ) AS acquired
+  `);
+  if (releaseLock.rows[0]?.acquired !== true) {
+    throw new Error("Multi-tenant login database release lock is unavailable");
+  }
 
   const preflight = await client.query(`
     SELECT
@@ -328,6 +339,9 @@ try {
       pg_catalog.to_regprocedure(
         'uptech.complete_web_google_login_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS directory_upgrade_present,
+      pg_catalog.to_regprocedure(
+        'uptech.complete_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,text,text,text,uptech.google_workspace_verified_domain_v1[],text,text[],uuid)'
+      ) IS NOT NULL AS workspace_bootstrap_present,
       NOT EXISTS (
         SELECT 1
         FROM uptech.identities AS legacy_identity
@@ -338,12 +352,7 @@ try {
          AND canonical_identity.id <> legacy_identity.id
         WHERE legacy_identity.provider = 'GOOGLE'
           AND legacy_identity.issuer = 'accounts.google.com'
-      ) AS issuer_reconciliation_safe,
-      pg_catalog.pg_try_advisory_lock(
-        pg_catalog.hashtextextended(
-          'uptech_multi_tenant_login_release_v1', 0
-        )
-      ) AS release_lock
+      ) AS issuer_reconciliation_safe
   `);
   const state = preflight.rows[0];
   const failedPreflightChecks = [
@@ -351,7 +360,6 @@ try {
     ["web_boundary_present", state?.web_boundary_present],
     ["mobile_boundary_present", state?.mobile_boundary_present],
     ["issuer_reconciliation_safe", state?.issuer_reconciliation_safe],
-    ["release_lock", state?.release_lock],
   ].filter(([, passed]) => passed !== true).map(([name]) => name);
   if (failedPreflightChecks.length > 0) {
     throw new Error(
@@ -359,12 +367,14 @@ try {
     );
   }
 
-  await client.query(executableSql(safeAccessVerificationSource));
   if (state.enterprise_login_baseline_present !== true) {
     await client.query(executableSql(enterpriseLoginBaselineMigrationSource));
   }
   if (state.directory_upgrade_present !== true) {
     await client.query(executableSql(googleDirectoryMigrationSource));
+  }
+  if (state.workspace_bootstrap_present !== true) {
+    await client.query(executableSql(googleWorkspaceBootstrapMigrationSource));
   }
   await client.query(`
     BEGIN;
@@ -381,6 +391,7 @@ try {
     COMMIT;
   `);
   await client.query(executableSql(enterpriseLoginVerificationSource));
+  await client.query(executableSql(googleWorkspaceBootstrapVerificationSource));
   await reconcileMobileRegistry(client);
 
   const verified = await client.query(`
@@ -392,14 +403,41 @@ try {
         'uptech.complete_web_google_login_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS web_boundary_present,
       pg_catalog.to_regprocedure(
-        'uptech.complete_web_google_login_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
+        'uptech.complete_web_google_login_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS directory_web_boundary_present,
       pg_catalog.to_regprocedure(
         'uptech.complete_mobile_google_callback_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS mobile_boundary_present,
       pg_catalog.to_regprocedure(
-        'uptech.complete_mobile_google_callback_directory_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
+        'uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'
       ) IS NOT NULL AS directory_mobile_boundary_present,
+      pg_catalog.to_regprocedure(
+        'uptech.complete_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,text,text,text,uptech.google_workspace_verified_domain_v1[],text,text[],uuid)'
+      ) IS NOT NULL AS workspace_bootstrap_boundary_present,
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'uptech'
+          AND relation.relname = 'google_workspace_bootstrap_receipts'
+          AND relation.relkind = 'r'
+      ) AS workspace_bootstrap_receipts_present,
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_trigger AS trigger
+        JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'uptech'
+          AND relation.relname = 'google_workspace_bootstrap_receipts'
+          AND trigger.tgname = 'google_workspace_bootstrap_receipts_committed_attempt'
+          AND NOT trigger.tgisinternal
+          AND trigger.tgconstraint <> 0
+          AND trigger.tgenabled = 'O'
+          AND trigger.tgtype = 5
+          AND trigger.tgdeferrable
+          AND trigger.tginitdeferred
+          AND trigger.tgfoid = 'uptech.enforce_google_workspace_bootstrap_receipt_v1()'::regprocedure
+      ) AS workspace_bootstrap_trigger_present,
       pg_catalog.to_regtype(
         'uptech.mobile_handoff_exchange_result_v2'
       ) IS NOT NULL AS mobile_exchange_result_present,
@@ -421,6 +459,9 @@ try {
     result?.directory_web_boundary_present !== true ||
     result?.mobile_boundary_present !== true ||
     result?.directory_mobile_boundary_present !== true ||
+    result?.workspace_bootstrap_boundary_present !== true ||
+    result?.workspace_bootstrap_receipts_present !== true ||
+    result?.workspace_bootstrap_trigger_present !== true ||
     result?.mobile_exchange_result_present !== true ||
     result?.mobile_denial_boundary_present !== true ||
     result?.mobile_exchange_boundary_present !== true ||
@@ -430,6 +471,19 @@ try {
   }
 
   console.log("Multi-tenant login database migration and mobile registry: PASS");
+} catch {
+  console.error("Multi-tenant login database migration and mobile registry: FAILED");
+  process.exitCode = 1;
 } finally {
-  await client.end().catch(() => undefined);
+  let closeTimer;
+  await Promise.race([
+    client.end().catch(() => undefined),
+    new Promise((resolve) => {
+      closeTimer = setTimeout(resolve, 5_000);
+    }),
+  ]);
+  clearTimeout(closeTimer);
+  if (client.connection?.stream && !client.connection.stream.destroyed) {
+    client.connection.stream.destroy();
+  }
 }
