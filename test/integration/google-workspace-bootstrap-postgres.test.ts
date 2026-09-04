@@ -1793,6 +1793,9 @@ test("Directory mapping evaluator is generation-bound, converges member signals,
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000034','ORG_UNIT','ou-sales','MEMBER','SALES','ACTIVE');
       UPDATE uptech.people_profiles SET google_is_admin=true,google_is_delegated_admin=true
         WHERE workspace_id='97400000-0000-4000-8000-000000000001' AND google_subject='none-sub';
+      UPDATE uptech.people_sync_generations SET status='PUBLISHED'
+        WHERE workspace_id='97400000-0000-4000-8000-000000000001'
+          AND id='97400000-0000-4000-8000-000000000021';
     `);
     const evaluated = (await client.query(`
       SELECT subject,(evaluation).outcome::text AS outcome,(evaluation).target_role,(evaluation).target_department_key
@@ -1921,6 +1924,21 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
         $5,$6,$7,$8)`, [fixture.handle, fixture.subject, `${fixture.subject}@mapping-a.example`,
       fixture.nonce, session, csrf, token(`${label}-onboarding`), fixture.id]));
+  const permissionContext = async (subject: string) => {
+    const authority = (await pool.query(`SELECT m.id AS membership_id,m.user_id,s.id AS session_id
+      FROM uptech.identities i JOIN uptech.workspace_memberships m ON m.user_id=i.user_id
+      JOIN uptech.sessions s ON s.workspace_id=m.workspace_id AND s.membership_id=m.id
+      WHERE m.workspace_id=$1 AND i.provider_subject=$2 AND s.status='ACTIVE'
+      ORDER BY s.created_at DESC LIMIT 1`, [workspaceId, subject])).rows[0];
+    return (await asApi(async (client) => {
+      await client.query(`SELECT set_config('app.workspace_id',$1,true),
+        set_config('app.membership_id',$2,true),set_config('app.actor_id',$3,true),
+        set_config('app.session_id',$4,true)`, [workspaceId, authority.membership_id,
+        authority.user_id, authority.session_id]);
+      return client.query(`SELECT workspace_id,membership_role,department_key,direct_group_ids
+        FROM uptech.load_people_permission_context_v1()`);
+    })).rows;
+  };
 
   await asMigrationOwner(async (client) => {
     await client.query(`UPDATE uptech.people_sync_generations
@@ -1944,11 +1962,14 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
        'OWNER','ACTIVE',3)`, [workspaceId]);
     await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,
       primary_email,department,lifecycle_state,org_unit_path) VALUES
-      ($1,$2,'rollback-sub','Rollback','rollback@mapping-a.example','engineering','ACTIVE','/Sales')`,
+      ($1,$2,'rollback-sub','Rollback','rollback@mapping-a.example','engineering','ACTIVE','/Sales'),
+      ($1,$2,'org-only-sub','Org Only','org-only@mapping-a.example',NULL,'ACTIVE','/Sales')`,
     [workspaceId, generationId]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject)
       VALUES ($1,$2,'g-sales','rollback-sub')`, [workspaceId, generationId]);
+    await client.query(`UPDATE uptech.people_sync_generations SET status='PUBLISHED'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
   });
 
   const member = await reserve("91", "mapped-member", "member-sub");
@@ -1959,11 +1980,67 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
   assert.deepEqual((await complete(owner, "existing-owner")).rows[0], {
     outcome: "NORMAL", access_state: null, route: "/admin",
   });
+  const orgOnly = await reserve("97", "org-only", "org-only-sub");
+  assert.deepEqual((await complete(orgOnly, "org-only")).rows[0], {
+    outcome: "NORMAL", access_state: null, route: "/home",
+  });
+  assert.deepEqual(await permissionContext("member-sub"), [{
+    workspace_id: workspaceId, membership_role: "MEMBER", department_key: "SALES",
+    direct_group_ids: ["g-sales"],
+  }]);
+  assert.deepEqual(await permissionContext("org-only-sub"), [{
+    workspace_id: workspaceId, membership_role: "MEMBER", department_key: "SALES",
+    direct_group_ids: [],
+  }]);
+  assert.deepEqual(await permissionContext("none-sub"), [{
+    workspace_id: workspaceId, membership_role: "OWNER", department_key: null,
+    direct_group_ids: [],
+  }]);
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.connectors SET status='REVOKED'
+    WHERE workspace_id=$1 AND id='97400000-0000-4000-8000-000000000010'`, [workspaceId]));
+  const disabledOwner = await reserve("98", "disabled-owner", "none-sub");
+  assert.deepEqual((await complete(disabledOwner, "disabled-owner")).rows[0], {
+    outcome: "DENIED", access_state: "USER_NOT_PROVISIONED", route: null,
+  });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.connectors SET status='ACTIVE'
+    WHERE workspace_id=$1 AND id='97400000-0000-4000-8000-000000000010'`, [workspaceId]));
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
+    SET hosted_domain_claim='mapping-b.example'
+    WHERE id='97400000-0000-4000-8000-000000000004'`));
+  const mismatchedOwner = await reserve("9b", "mismatched-owner", "none-sub");
+  assert.deepEqual((await complete(mismatchedOwner, "mismatched-owner")).rows[0], {
+    outcome: "DENIED", access_state: "USER_NOT_PROVISIONED", route: null,
+  });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
+    SET hosted_domain_claim='mapping-a.example'
+    WHERE id='97400000-0000-4000-8000-000000000004'`));
+
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.people_group_memberships(
+    workspace_id,generation_id,google_group_id,google_subject) VALUES ($1,$2,'g-admin','member-sub')`,
+  [workspaceId, generationId]));
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations
+    SET status='PUBLISHED' WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]));
+  const promoted = await reserve("99", "promoted-member", "member-sub");
+  assert.equal((await complete(promoted, "promoted-member")).rows[0].route, "/admin");
+  await asMigrationOwner((client) => client.query(`DELETE FROM uptech.people_group_memberships
+    WHERE workspace_id=$1 AND generation_id=$2 AND google_group_id='g-admin'
+      AND google_subject='member-sub'`, [workspaceId, generationId]));
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations
+    SET status='PUBLISHED' WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]));
+  const demoted = await reserve("9a", "demoted-admin", "member-sub");
+  assert.equal((await complete(demoted, "demoted-admin")).rows[0].route, "/home");
+  assert.deepEqual((await pool.query(`SELECT metadata FROM uptech.audit_events
+    WHERE request_id IN ($1,$2) AND action='MEMBERSHIP_AUTHORITY_CHANGED' ORDER BY occurred_at`,
+  [promoted.id, demoted.id])).rows, [
+    { metadata: { old_role: "MEMBER", new_role: "ADMIN" } },
+    { metadata: { old_role: "ADMIN", new_role: "MEMBER" } },
+  ]);
   assert.deepEqual((await pool.query(`SELECT role,status,authz_version::int
     FROM uptech.workspace_memberships WHERE workspace_id=$1 AND id IN(
       '97500000-0000-4000-8000-000000000121','97500000-0000-4000-8000-000000000122')
     ORDER BY id`, [workspaceId])).rows, [
-    { role: "MEMBER", status: "ACTIVE", authz_version: 8 },
+    { role: "MEMBER", status: "ACTIVE", authz_version: 10 },
     { role: "OWNER", status: "ACTIVE", authz_version: 3 },
   ]);
   assert.deepEqual((await pool.query(`SELECT action,count(*)::int AS count
@@ -2014,7 +2091,19 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     WHERE m.workspace_id=$1 AND i.provider_subject IN ('admin-sub','member-sub','none-sub')
     GROUP BY i.provider_subject,m.role ORDER BY i.provider_subject`, [workspaceId])).rows, [
     { provider_subject: "admin-sub", role: "ADMIN", sessions: 2, tokens: 2 },
-    { provider_subject: "member-sub", role: "MEMBER", sessions: 2, tokens: 2 },
+    { provider_subject: "member-sub", role: "MEMBER", sessions: 4, tokens: 4 },
     { provider_subject: "none-sub", role: "OWNER", sessions: 2, tokens: 2 },
   ]);
+  assert.deepEqual(await permissionContext("admin-sub"), [{
+    workspace_id: workspaceId, membership_role: "ADMIN", department_key: null,
+    direct_group_ids: [],
+  }]);
+  assert.deepEqual(await permissionContext("member-sub"), [{
+    workspace_id: workspaceId, membership_role: "MEMBER", department_key: null,
+    direct_group_ids: [],
+  }]);
+  assert.deepEqual(await permissionContext("none-sub"), [{
+    workspace_id: workspaceId, membership_role: "OWNER", department_key: null,
+    direct_group_ids: [],
+  }]);
 });

@@ -2693,6 +2693,8 @@ DECLARE
   selected_membership_role text;
   selected_membership_status text;
   selected_membership_authz_version bigint;
+  previous_membership_role text;
+  membership_authority_changed boolean := false;
   selected_session_id uuid;
   mapping_outcome text;
   mapping_target_role text;
@@ -2773,6 +2775,13 @@ BEGIN
       RETURN ROW('DENIED','DIRECTORY_STALE',NULL,NULL,NULL)
         ::uptech.google_login_completion_result_v3;
     END IF;
+    IF NOT uptech.google_directory_generation_has_current_authority_v1(
+      selected_workspace_id,selected_generation_id) THEN
+      UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
+      WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
+      RETURN ROW('DENIED','USER_NOT_PROVISIONED',NULL,NULL,NULL)
+        ::uptech.google_login_completion_result_v3;
+    END IF;
 
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
       (canonical_claims).issuer::text || pg_catalog.chr(31)
@@ -2847,10 +2856,12 @@ BEGIN
         WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
         RETURN ROW('DENIED','USER_SUSPENDED',NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
       ELSE
+        previous_membership_role:=selected_membership_role;
         UPDATE uptech.workspace_memberships SET role=mapping_target_role,
           authz_version=authz_version + CASE WHEN role IS DISTINCT FROM mapping_target_role THEN 1 ELSE 0 END,
           updated_at=observed_at WHERE workspace_id=selected_workspace_id AND id=selected_membership_id
         RETURNING role,authz_version INTO selected_membership_role,selected_membership_authz_version;
+        membership_authority_changed:=previous_membership_role IS DISTINCT FROM selected_membership_role;
       END IF;
       selected_membership_role:=mapping_target_role;
     END IF;
@@ -2882,6 +2893,15 @@ BEGIN
       token_hash,csrf_token_hash,session_security_version,rotation_version,issued_at,expires_at)
     VALUES(selected_workspace_id,pg_catalog.gen_random_uuid(),selected_session_id,'WEB','WEB_SESSION','CURRENT',
       p_session_token_hash,p_csrf_token_hash,1,1,observed_at,observed_at+interval '24 hours');
+    IF membership_authority_changed THEN
+      INSERT INTO uptech.audit_events(workspace_id,id,actor_kind,actor_id,membership_id,session_id,
+        action,target_type,target_id,outcome,request_id,metadata,occurred_at)
+      VALUES(selected_workspace_id,pg_catalog.gen_random_uuid(),'USER',selected_user_id,
+        selected_membership_id,selected_session_id,'MEMBERSHIP_AUTHORITY_CHANGED',
+        'WORKSPACE_MEMBERSHIP',selected_membership_id,'SUCCEEDED',p_request_id,
+        pg_catalog.jsonb_build_object('old_role',previous_membership_role,
+          'new_role',selected_membership_role),observed_at);
+    END IF;
     IF insert_member OR reactivate_member THEN
       INSERT INTO uptech.audit_events(workspace_id,id,actor_kind,actor_id,membership_id,session_id,
         action,target_type,target_id,outcome,request_id,metadata,occurred_at)
@@ -3050,6 +3070,134 @@ CREATE TYPE uptech.google_directory_mapping_outcome_v1 AS ENUM (
   'USER_REMOVED'
 );
 
+CREATE FUNCTION uptech.google_directory_generation_has_current_authority_v1(
+  p_workspace_id uuid,p_generation_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+  SELECT EXISTS (
+    SELECT 1 FROM uptech.workspaces AS workspace
+    JOIN uptech.people_sync_generations AS generation
+      ON generation.workspace_id=workspace.workspace_id AND generation.id=p_generation_id
+      AND generation.status='PUBLISHED' AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL AND generation.fresh_until>pg_catalog.statement_timestamp()
+      AND generation.google_customer_id=workspace.google_customer_id
+    JOIN uptech.connectors AS connector
+      ON connector.workspace_id=generation.workspace_id AND connector.id=generation.connector_id
+      AND connector.purpose='DIRECTORY' AND connector.status IN ('ACTIVE','DEGRADED')
+      AND connector.provider_customer_id=workspace.google_customer_id
+      AND connector.credential_reference IS NOT NULL
+      AND connector.directory_authorized_by_identity_id IS NOT NULL
+      AND uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)
+    JOIN uptech.identities AS authorized_identity
+      ON authorized_identity.id=connector.directory_authorized_by_identity_id
+      AND authorized_identity.provider='GOOGLE'
+      AND authorized_identity.issuer='https://accounts.google.com'
+      AND authorized_identity.status='ACTIVE' AND authorized_identity.email_verified
+    JOIN uptech.workspace_domain_locators AS locator
+      ON locator.workspace_id=workspace.workspace_id
+      AND locator.google_customer_id=workspace.google_customer_id
+      AND locator.normalized_domain::text=pg_catalog.lower(authorized_identity.hosted_domain_claim)
+      AND locator.status='VERIFIED'
+    WHERE workspace.workspace_id=p_workspace_id AND workspace.status='ACTIVE'
+      AND workspace.provisioning_policy='GOOGLE_GROUP_CONTROLLED')
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.google_directory_generation_has_current_authority_v1(uuid,uuid)
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+CREATE FUNCTION uptech.refresh_published_people_authority_v2()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+BEGIN
+  UPDATE uptech.people_profiles AS profile
+  SET effective_role = CASE
+        WHEN profile.lifecycle_state='ACTIVE' AND EXISTS (
+          SELECT 1 FROM uptech.people_group_memberships AS edge
+          JOIN uptech.people_permission_mappings AS mapping
+            ON mapping.workspace_id=edge.workspace_id AND mapping.source_kind='ADMIN_GROUP'
+           AND mapping.source_value=edge.google_group_id AND mapping.status='ACTIVE'
+          WHERE edge.workspace_id=NEW.workspace_id AND edge.generation_id=NEW.id
+            AND edge.google_subject=profile.google_subject) THEN 'ADMIN'
+        WHEN profile.lifecycle_state='ACTIVE' AND 1=(
+          SELECT pg_catalog.count(DISTINCT signal.target_department_key)
+          FROM (
+            SELECT mapping.target_department_key FROM uptech.people_permission_mappings AS mapping
+            WHERE mapping.workspace_id=NEW.workspace_id AND mapping.source_kind='DEPARTMENT'
+              AND mapping.source_value=pg_catalog.lower(pg_catalog.btrim(profile.department))
+              AND mapping.status='ACTIVE'
+            UNION ALL
+            SELECT mapping.target_department_key FROM uptech.people_group_memberships AS edge
+            JOIN uptech.people_permission_mappings AS mapping
+              ON mapping.workspace_id=edge.workspace_id AND mapping.source_kind='GROUP'
+             AND mapping.source_value=edge.google_group_id AND mapping.status='ACTIVE'
+            WHERE edge.workspace_id=NEW.workspace_id AND edge.generation_id=NEW.id
+              AND edge.google_subject=profile.google_subject
+            UNION ALL
+            SELECT mapping.target_department_key FROM uptech.people_org_units AS org_unit
+            JOIN uptech.people_permission_mappings AS mapping
+              ON mapping.workspace_id=org_unit.workspace_id AND mapping.source_kind='ORG_UNIT'
+             AND mapping.source_value=org_unit.google_org_unit_id AND mapping.status='ACTIVE'
+            WHERE org_unit.workspace_id=NEW.workspace_id AND org_unit.generation_id=NEW.id
+              AND org_unit.org_unit_path=profile.org_unit_path
+          ) AS signal) THEN 'MEMBER'
+        ELSE NULL END,
+      effective_department_key = CASE
+        WHEN profile.lifecycle_state='ACTIVE' AND NOT EXISTS (
+          SELECT 1 FROM uptech.people_group_memberships AS edge
+          JOIN uptech.people_permission_mappings AS mapping
+            ON mapping.workspace_id=edge.workspace_id AND mapping.source_kind='ADMIN_GROUP'
+           AND mapping.source_value=edge.google_group_id AND mapping.status='ACTIVE'
+          WHERE edge.workspace_id=NEW.workspace_id AND edge.generation_id=NEW.id
+            AND edge.google_subject=profile.google_subject)
+        THEN (SELECT pg_catalog.min(signal.target_department_key) FROM (
+          SELECT mapping.target_department_key FROM uptech.people_permission_mappings AS mapping
+          WHERE mapping.workspace_id=NEW.workspace_id AND mapping.source_kind='DEPARTMENT'
+            AND mapping.source_value=pg_catalog.lower(pg_catalog.btrim(profile.department))
+            AND mapping.status='ACTIVE'
+          UNION ALL
+          SELECT mapping.target_department_key FROM uptech.people_group_memberships AS edge
+          JOIN uptech.people_permission_mappings AS mapping
+            ON mapping.workspace_id=edge.workspace_id AND mapping.source_kind='GROUP'
+           AND mapping.source_value=edge.google_group_id AND mapping.status='ACTIVE'
+          WHERE edge.workspace_id=NEW.workspace_id AND edge.generation_id=NEW.id
+            AND edge.google_subject=profile.google_subject
+          UNION ALL
+          SELECT mapping.target_department_key FROM uptech.people_org_units AS org_unit
+          JOIN uptech.people_permission_mappings AS mapping
+            ON mapping.workspace_id=org_unit.workspace_id AND mapping.source_kind='ORG_UNIT'
+           AND mapping.source_value=org_unit.google_org_unit_id AND mapping.status='ACTIVE'
+          WHERE org_unit.workspace_id=NEW.workspace_id AND org_unit.generation_id=NEW.id
+            AND org_unit.org_unit_path=profile.org_unit_path
+        ) AS signal HAVING pg_catalog.count(DISTINCT signal.target_department_key)=1)
+        ELSE NULL END
+  WHERE profile.workspace_id=NEW.workspace_id AND profile.generation_id=NEW.id;
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.refresh_published_people_authority_v2()
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+CREATE TRIGGER refresh_published_people_authority_v2
+AFTER UPDATE OF status ON uptech.people_sync_generations
+FOR EACH ROW WHEN (NEW.status='PUBLISHED')
+EXECUTE FUNCTION uptech.refresh_published_people_authority_v2();
+
+-- Backfill the currently published snapshot when 0009 is applied to an
+-- installation that already published Directory data under the v1 calculator.
+UPDATE uptech.people_sync_generations
+SET status=status
+WHERE status='PUBLISHED';
+
 CREATE TYPE uptech.google_directory_mapping_result_v1 AS (
   outcome uptech.google_directory_mapping_outcome_v1,
   target_role text,
@@ -3169,72 +3317,44 @@ BEGIN
       ::uptech.google_directory_mapping_result_v1;
   END IF;
 
-  SELECT EXISTS (
-    SELECT 1
-    FROM uptech.people_group_memberships AS membership
-    JOIN uptech.people_permission_mappings AS mapping
-      ON mapping.workspace_id = membership.workspace_id
-     AND mapping.source_kind = 'ADMIN_GROUP'
-     AND mapping.source_value = membership.google_group_id
-     AND mapping.status = 'ACTIVE'
-    WHERE membership.workspace_id = p_workspace_id
-      AND membership.generation_id = p_generation_id
-      AND membership.google_subject = p_google_subject
-  ) INTO has_admin_mapping;
-
-  IF has_admin_mapping THEN
+  IF selected_profile.effective_role = 'ADMIN'
+     AND selected_profile.effective_department_key IS NULL THEN
     RETURN ROW('ADMIN','ADMIN',NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  ELSIF selected_profile.effective_role = 'MEMBER'
+        AND selected_profile.effective_department_key IS NOT NULL THEN
+    RETURN ROW('MEMBER','MEMBER',selected_profile.effective_department_key)
       ::uptech.google_directory_mapping_result_v1;
   END IF;
 
-  SELECT pg_catalog.count(DISTINCT signal.target_department_key),
-         pg_catalog.min(signal.target_department_key)
-  INTO member_department_count, selected_department_key
+  SELECT pg_catalog.count(DISTINCT signal.target_department_key)
+  INTO member_department_count
   FROM (
-    SELECT mapping.target_department_key
-    FROM uptech.people_group_memberships AS membership
+    SELECT mapping.target_department_key FROM uptech.people_group_memberships AS membership
     JOIN uptech.people_permission_mappings AS mapping
-      ON mapping.workspace_id = membership.workspace_id
-     AND mapping.source_kind = 'GROUP'
-     AND mapping.source_value = membership.google_group_id
-     AND mapping.status = 'ACTIVE'
-    WHERE membership.workspace_id = p_workspace_id
-      AND membership.generation_id = p_generation_id
-      AND membership.google_subject = p_google_subject
-
+      ON mapping.workspace_id=membership.workspace_id AND mapping.source_kind='GROUP'
+     AND mapping.source_value=membership.google_group_id AND mapping.status='ACTIVE'
+    WHERE membership.workspace_id=p_workspace_id AND membership.generation_id=p_generation_id
+      AND membership.google_subject=p_google_subject
     UNION ALL
-
-    SELECT mapping.target_department_key
-    FROM uptech.people_permission_mappings AS mapping
-    WHERE mapping.workspace_id = p_workspace_id
-      AND mapping.source_kind = 'DEPARTMENT'
-      AND mapping.source_value = pg_catalog.lower(
-        pg_catalog.btrim(selected_profile.department))
-      AND mapping.status = 'ACTIVE'
-
+    SELECT mapping.target_department_key FROM uptech.people_permission_mappings AS mapping
+    WHERE mapping.workspace_id=p_workspace_id AND mapping.source_kind='DEPARTMENT'
+      AND mapping.source_value=pg_catalog.lower(pg_catalog.btrim(selected_profile.department))
+      AND mapping.status='ACTIVE'
     UNION ALL
-
-    SELECT mapping.target_department_key
-    FROM uptech.people_org_units AS org_unit
+    SELECT mapping.target_department_key FROM uptech.people_org_units AS org_unit
     JOIN uptech.people_permission_mappings AS mapping
-      ON mapping.workspace_id = org_unit.workspace_id
-     AND mapping.source_kind = 'ORG_UNIT'
-     AND mapping.source_value = org_unit.google_org_unit_id
-     AND mapping.status = 'ACTIVE'
-    WHERE org_unit.workspace_id = p_workspace_id
-      AND org_unit.generation_id = p_generation_id
-      AND org_unit.org_unit_path = selected_profile.org_unit_path
+      ON mapping.workspace_id=org_unit.workspace_id AND mapping.source_kind='ORG_UNIT'
+     AND mapping.source_value=org_unit.google_org_unit_id AND mapping.status='ACTIVE'
+    WHERE org_unit.workspace_id=p_workspace_id AND org_unit.generation_id=p_generation_id
+      AND org_unit.org_unit_path=selected_profile.org_unit_path
   ) AS signal;
-
-  IF member_department_count = 0 THEN
-    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
-      ::uptech.google_directory_mapping_result_v1;
-  ELSIF member_department_count > 1 THEN
+  IF member_department_count > 1 THEN
     RETURN ROW('ACCESS_MAPPING_CONFLICT',NULL,NULL)
       ::uptech.google_directory_mapping_result_v1;
   END IF;
 
-  RETURN ROW('MEMBER','MEMBER',selected_department_key)
+  RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
     ::uptech.google_directory_mapping_result_v1;
 END
 $function$;
