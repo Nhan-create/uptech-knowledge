@@ -78,6 +78,34 @@ function startRequest(cookie = `__Host-uptech_onboarding=${ONBOARDING}`, headers
   });
 }
 
+function startFormRequest(options: {
+  readonly body?: BodyInit;
+  readonly contentLength?: string | null;
+  readonly headers?: Record<string, string>;
+  readonly method?: string;
+  readonly suffix?: string;
+} = {}) {
+  const body = options.body ?? `csrf_token=${deriveCsrfCredential(ONBOARDING, PEPPER)}`;
+  const headers: Record<string, string> = {
+    cookie: `__Host-uptech_onboarding=${ONBOARDING}`,
+    origin: APP_ORIGIN,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/x-www-form-urlencoded",
+    ...options.headers,
+  };
+  if (options.contentLength !== null) {
+    headers["content-length"] = options.contentLength ?? String(
+      typeof body === "string" ? Buffer.byteLength(body) : (body as Uint8Array).byteLength,
+    );
+  }
+  return new Request(`${APP_ORIGIN}/api/v1/onboarding/google-workspace/transactions${options.suffix ?? ""}`, {
+    method: options.method ?? "POST",
+    headers,
+    body,
+    duplex: "half",
+  } as RequestInit & { readonly duplex: "half" });
+}
+
 function callbackRequest(query = "?code=provider-code&state=" + issueOpaqueProof(), cookie = `__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`) {
   return new Request(`${APP_ORIGIN}/api/v1/onboarding/google-workspace/callback${query}`, {
     headers: { cookie },
@@ -102,6 +130,93 @@ test("setup POST accepts only the derived same-origin authority and redirects to
   assert.deepEqual(fixtureValue.calls, [{ onboardingCredential: ONBOARDING, requestId: REQUEST_ID }]);
   assert.deepEqual(fixtureValue.admissions, [{ networkHmac: NETWORK_HMAC, requestId: REQUEST_ID }]);
   assertSafe(response);
+});
+
+test("setup POST accepts the exact native form envelope with the legacy service contract", async () => {
+  const f = fixture();
+  const response = await createGoogleWorkspaceBootstrapPost(f.dependencies)(startFormRequest());
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), AUTHORIZATION.href);
+  assert.deepEqual(f.calls, [{ onboardingCredential: ONBOARDING, requestId: REQUEST_ID }]);
+  assert.deepEqual(f.admissions, [{ networkHmac: NETWORK_HMAC, requestId: REQUEST_ID }]);
+  assert.match(response.headers.get("set-cookie") ?? "", new RegExp(`^${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=`));
+  assertSafe(response);
+});
+
+test("setup POST denies a canonical but wrong native-form CSRF proof before admission", async () => {
+  const f = fixture();
+  const response = await createGoogleWorkspaceBootstrapPost(f.dependencies)(startFormRequest({
+    body: `csrf_token=${issueOpaqueProof()}`,
+  }));
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(f.admissions, []);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(response.headers.getSetCookie(), []);
+});
+
+test("setup POST rejects hostile native-form envelopes before admission or authority issuance", async () => {
+  const proof = deriveCsrfCredential(ONBOARDING, PEPPER);
+  const invalidUtf8 = new Uint8Array([0xff]);
+  const hostile = [
+    startFormRequest({ method: "PUT" }),
+    startFormRequest({ suffix: "?workspace_id=caller" }),
+    startFormRequest({ suffix: "#fragment" }),
+    startFormRequest({ headers: { authorization: "Bearer caller" } }),
+    startFormRequest({ headers: { "transfer-encoding": "chunked" }, contentLength: null }),
+    ...["content-encoding", "content-range", "expect", "trailer"].map((name) => startFormRequest({ headers: { [name]: "caller" } })),
+    startFormRequest({ headers: { "x-csrf-token": proof } }),
+    startFormRequest({ body: "" }),
+    startFormRequest({ body: `csrf_token=${proof}&csrf_token=${proof}` }),
+    startFormRequest({ body: `csrf_token=${proof}&role=OWNER` }),
+    startFormRequest({ body: `role=OWNER&csrf_token=${proof}` }),
+    startFormRequest({ headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" } }),
+    startFormRequest({ headers: { "content-type": "text/plain" } }),
+    startFormRequest({ body: `csrf_token=%41${proof.slice(1)}` }),
+    startFormRequest({ body: `csrf_token=${proof}\0` }),
+    startFormRequest({ body: `csrf_token=${proof}%00` }),
+    startFormRequest({ body: invalidUtf8 }),
+    startFormRequest({ body: `csrf_token=${proof.slice(1)}` }),
+    startFormRequest({ body: `csrf_token=${proof}A` }),
+    startFormRequest({ body: `csrf_token=${"!".repeat(43)}` }),
+    startFormRequest({ contentLength: "054" }),
+    startFormRequest({ contentLength: "55" }),
+    ...["tenant", "workspace", "customer", "domain", "role", "return_url"].map((field) =>
+      startFormRequest({ body: `csrf_token=${proof}&${field}=caller` })),
+  ];
+
+  for (const [index, request] of hostile.entries()) {
+    const f = fixture();
+    const response = await createGoogleWorkspaceBootstrapPost(f.dependencies)(request);
+    assert.ok([400, 403].includes(response.status), `hostile case ${index} returned ${response.status}`);
+    assert.deepEqual(f.admissions, []);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(response.headers.getSetCookie(), []);
+  }
+});
+
+test("setup POST cancels a native-form stream as soon as it exceeds the bounded parser cap", async () => {
+  let cancelled = false;
+  const proof = deriveCsrfCredential(ONBOARDING, PEPPER);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`csrf_token=${proof}`));
+      controller.enqueue(new Uint8Array(512));
+    },
+    cancel() { cancelled = true; },
+  });
+  const f = fixture();
+  const response = await createGoogleWorkspaceBootstrapPost(f.dependencies)(startFormRequest({
+    body: stream,
+    contentLength: null,
+  }));
+
+  assert.equal(response.status, 400);
+  assert.equal(cancelled, true);
+  assert.deepEqual(f.admissions, []);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(response.headers.getSetCookie(), []);
 });
 
 test("setup POST rate-limit admission runs before and can prevent all service/provider work", async () => {

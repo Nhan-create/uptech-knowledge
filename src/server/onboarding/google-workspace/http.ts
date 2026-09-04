@@ -32,8 +32,16 @@ const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const MAX_COOKIE_VALUE_BYTES = 4_500;
 const MAX_COOKIE_HEADER_BYTES = 16_384;
 const MAX_CALLBACK_SEARCH_BYTES = 4_096;
+const MAX_MUTATING_FORM_BYTES = 96;
 const MAX_STATUS_AGE_SECONDS = 24 * 60 * 60;
 const EMPTY_BODY_BYTES = "0";
+const FORM_CONTENT_TYPE = "application/x-www-form-urlencoded";
+const FORM_FORBIDDEN_BODY_HEADERS = Object.freeze([
+  "content-encoding",
+  "content-range",
+  "expect",
+  "trailer",
+]);
 const BODY_METADATA_HEADERS = Object.freeze([
   "content-encoding",
   "content-range",
@@ -273,6 +281,90 @@ function bodylessEnvelope(
   return null;
 }
 
+type MutatingPostEnvelope =
+  | { readonly csrfToken: string }
+  | { readonly response: Response };
+
+async function readBoundedFormBody(request: Request, declaredLength: number | null): Promise<string | null> {
+  if (request.body === null) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      if (total + item.value.byteLength > MAX_MUTATING_FORM_BYTES) {
+        try { await reader.cancel(); } catch { /* rejection remains fail-closed */ }
+        return null;
+      }
+      chunks.push(item.value);
+      total += item.value.byteLength;
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  if (declaredLength !== null && declaredLength !== total) return null;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+async function mutatingPostEnvelope(request: Request, requestId: string): Promise<MutatingPostEnvelope> {
+  if (request.method !== "POST") return { response: problem("VALIDATION_FAILED", requestId) };
+  let url: URL;
+  try { url = new URL(request.url); } catch { return { response: problem("VALIDATION_FAILED", requestId) }; }
+  if (url.search !== "" || url.hash !== "" || request.headers.has("authorization") ||
+      request.headers.has("transfer-encoding") ||
+      FORM_FORBIDDEN_BODY_HEADERS.some((name) => request.headers.has(name))) {
+    return { response: problem("VALIDATION_FAILED", requestId) };
+  }
+
+  const contentType = request.headers.get("content-type");
+  const headerToken = request.headers.get("x-csrf-token");
+  const contentLength = request.headers.get("content-length");
+  if (contentType === null) {
+    if (request.body !== null || contentLength !== EMPTY_BODY_BYTES ||
+        headerToken === null || !isCanonicalProof(headerToken)) {
+      return { response: problem("VALIDATION_FAILED", requestId) };
+    }
+    return { csrfToken: headerToken };
+  }
+
+  if (contentType !== FORM_CONTENT_TYPE || request.headers.has("x-csrf-token")) {
+    return { response: problem("VALIDATION_FAILED", requestId) };
+  }
+  let declaredLength: number | null = null;
+  if (contentLength !== null) {
+    if (!/^[1-9][0-9]*$/u.test(contentLength)) {
+      return { response: problem("VALIDATION_FAILED", requestId) };
+    }
+    declaredLength = Number(contentLength);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength > MAX_MUTATING_FORM_BYTES) {
+      if (request.body !== null) {
+        try { await request.body.cancel(); } catch { /* rejection remains fail-closed */ }
+      }
+      return { response: problem("VALIDATION_FAILED", requestId) };
+    }
+  }
+  const body = await readBoundedFormBody(request, declaredLength);
+  const match = body === null ? null : /^csrf_token=([A-Za-z0-9_-]{43})$/u.exec(body);
+  if (match === null || !isCanonicalProof(match[1])) {
+    return { response: problem("VALIDATION_FAILED", requestId) };
+  }
+  return { csrfToken: match[1]! };
+}
+
 function recoveryCredential(
   request: Request,
   runtime: Pick<BootstrapStatusRuntime, "appOrigin" | "sessionPepper">,
@@ -509,8 +601,8 @@ export function createCurrentAccessRequestGet(dependencies: AccessRequestDepende
 export function createGoogleWorkspaceBootstrapPost(dependencies: BootstrapHttpDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
-    if (invalidEnvelope !== null) return invalidEnvelope;
+    const envelope = await mutatingPostEnvelope(request, requestId);
+    if ("response" in envelope) return envelope.response;
     let runtime: BootstrapHttpRuntime;
     try {
       runtime = dependencies.loadRuntime();
@@ -527,7 +619,8 @@ export function createGoogleWorkspaceBootstrapPost(dependencies: BootstrapHttpDe
     let requestOrigin: string;
     try { requestOrigin = new URL(request.url).origin; } catch { return problem("VALIDATION_FAILED", requestId); }
     if (requestOrigin !== runtime.appOrigin || request.headers.get("origin") !== runtime.appOrigin ||
-        !exactCsrf(request.headers, onboardingCredential, runtime.sessionPepper)) {
+        request.headers.get("sec-fetch-site") !== "same-origin" ||
+        !exactCsrfCredential(envelope.csrfToken, onboardingCredential, runtime.sessionPepper)) {
       return problem("FORBIDDEN", requestId);
     }
     try {
