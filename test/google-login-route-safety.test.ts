@@ -15,6 +15,7 @@ let onboardingSessionResult: unknown = null;
 let callbackResult: unknown = { outcome: "DENIED" };
 let runtimeCreationError: Error | null = null;
 let webSessionResult: unknown = new WebSessionAuthenticationError("stale");
+let detailedWebRouteResult: unknown = { kind: "NOT_CURRENT" };
 let bootstrapInitiateResult: unknown;
 let bootstrapCallbackResult: unknown;
 const bootstrapAdmissionResult: unknown = { outcome: "ADMITTED" };
@@ -31,6 +32,9 @@ const bootstrapPepper = new Uint8Array(32).fill(7);
 mock.module("@/server/auth/web-session", {
   namedExports: {
     WebSessionAuthenticationError,
+    clearedWebSessionCookie() {
+      return "__Host-uptech_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
+    },
     async authenticateWebSession() {
       if (webSessionResult instanceof Error) throw webSessionResult;
       return webSessionResult;
@@ -102,6 +106,14 @@ mock.module("@/server/onboarding/google-workspace/runtime", {
           },
         },
       };
+    },
+  },
+});
+
+mock.module("@/server/auth/web-route-authority", {
+  namedExports: {
+    async resolveWebRouteAuthorityDetailed() {
+      return detailedWebRouteResult;
     },
   },
 });
@@ -299,7 +311,7 @@ test("transaction rejects hostile request envelopes before initiating OIDC", asy
     { label: "hash", url: `${appOrigin}/api/v1/auth/google/transactions#intent=LOGIN`, headers: {}, body: undefined },
     { label: "duplicate intent", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN&intent=LOGIN" },
     { label: "unknown intent", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=ATTACK" },
-    { label: "LOGIN csrf", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: `intent=LOGIN&csrf_token=${issueOpaqueProof()}` },
+    { label: "LOGIN malformed csrf", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN&csrf_token=wrong" },
     { label: "wrong content type", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/json" }, body: "intent=LOGIN" },
     { label: "oversized", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: `intent=LOGIN&pad=${"x".repeat(257)}` },
     { label: "invalid UTF-8", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: malformedBytes },
@@ -330,6 +342,7 @@ test("transaction accepts the empty, LOGIN, and SWITCH_ACCOUNT intents without b
   for (const init of [
     {} as RequestInit,
     { headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN" },
+    { headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" }, body: `intent=LOGIN&csrf_token=${issueOpaqueProof()}` },
     { headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" }, body: "intent=SWITCH_ACCOUNT" },
   ]) {
     const response = await transactionRoute.POST(new Request(
@@ -340,15 +353,19 @@ test("transaction accepts the empty, LOGIN, and SWITCH_ACCOUNT intents without b
     assert.equal(response.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
     assert.match(response.headers.getSetCookie().at(-1) ?? "", /^__Host-uptech_login_tx=/u);
   }
-  assert.equal(initiateCalls, 3);
+  assert.equal(initiateCalls, 4);
 });
 
-test("transaction preserves an active Web session and denies every login intent", async () => {
+test("transaction routes current Web roles and preserves unavailable Web authority", async () => {
   initiateCalls = 0;
   webSessionResult = {};
   const session = issueSessionCredential().raw_token;
   try {
-    for (const body of ["intent=LOGIN", "intent=SWITCH_ACCOUNT"]) {
+    for (const scenario of [
+      { decision: "ADMIN", path: "/admin" },
+      { decision: "ALLOW", path: "/home" },
+    ] as const) {
+      detailedWebRouteResult = { kind: "ROUTE", decision: scenario.decision };
       const response = await transactionRoute.POST(new Request(
         `${appOrigin}/api/v1/auth/google/transactions`,
         {
@@ -358,19 +375,104 @@ test("transaction preserves an active Web session and denies every login intent"
             cookie: `__Host-uptech_session=${session}`,
             "content-type": "application/x-www-form-urlencoded",
           },
-          body,
+          body: "intent=LOGIN",
         },
       ));
-      loginLocation(response, "active_authority");
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get("location"), `${appOrigin}${scenario.path}`);
       assert.equal(response.headers.getSetCookie().length, 0);
     }
+    detailedWebRouteResult = { kind: "UNAVAILABLE" };
+    const unavailable = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      { method: "POST", headers: { ...trustedHeaders, cookie: `__Host-uptech_session=${session}` } },
+    ));
+    loginLocation(unavailable, "temporarily_unavailable");
+    assert.equal(unavailable.headers.getSetCookie().length, 0);
     assert.equal(initiateCalls, 0);
   } finally {
+    detailedWebRouteResult = { kind: "NOT_CURRENT" };
     webSessionResult = new WebSessionAuthenticationError("stale");
   }
 });
 
-test("transaction preserves active onboarding for LOGIN and only switches with exact same-origin CSRF", async () => {
+test("transaction clears only a non-current Web cookie with a same-origin 307 then initiates once on replay", async () => {
+  initiateCalls = 0;
+  webSessionResult = {};
+  detailedWebRouteResult = { kind: "NOT_CURRENT" };
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+  const session = issueSessionCredential().raw_token;
+  try {
+    const hostile = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      {
+        method: "POST",
+        headers: {
+          ...trustedHeaders,
+          cookie: `__Host-uptech_session=${session}`,
+          origin: "https://attacker.example",
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "intent=LOGIN",
+      },
+    ));
+    loginLocation(hostile, "login_failed");
+    assert.equal(hostile.headers.getSetCookie().length, 0);
+    assert.equal(initiateCalls, 0);
+
+    for (const body of ["intent=LOGIN", "intent=SWITCH_ACCOUNT"] as const) {
+      webSessionResult = {};
+      const bridge = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            cookie: `__Host-uptech_session=${session}`,
+            origin: appOrigin,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body,
+        },
+      ));
+      assert.equal(bridge.status, 307);
+      assert.equal(bridge.headers.get("location"), `${appOrigin}/api/v1/auth/google/transactions`);
+      assert.deepEqual(bridge.headers.getSetCookie(), [
+        "__Host-uptech_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+      ]);
+
+      webSessionResult = new WebSessionAuthenticationError("stale");
+      const replay = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            origin: appOrigin,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body,
+        },
+      ));
+      assert.equal(replay.status, 303);
+      assert.equal(replay.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
+      assert.deepEqual(nonEmptyAuthorityCookieNames(replay), ["__Host-uptech_login_tx"]);
+    }
+    assert.equal(initiateCalls, 2);
+  } finally {
+    detailedWebRouteResult = { kind: "NOT_CURRENT" };
+    webSessionResult = new WebSessionAuthenticationError("stale");
+  }
+});
+
+test("transaction starts LOGIN and SWITCH from active onboarding only with exact same-origin CSRF", async () => {
   initiateCalls = 0;
   const onboarding = issueOpaqueProof();
   onboardingSessionResult = {
@@ -384,42 +486,29 @@ test("transaction preserves active onboarding for LOGIN and only switches with e
     loginCookie: issueOpaqueProof(),
   };
   try {
-    const login = await transactionRoute.POST(new Request(
-      `${appOrigin}/api/v1/auth/google/transactions`,
-      {
-        method: "POST",
-        headers: {
-          ...trustedHeaders,
-          cookie: `__Host-uptech_onboarding=${onboarding}`,
-          "content-type": "application/x-www-form-urlencoded",
+    for (const intent of ["LOGIN", "SWITCH_ACCOUNT"] as const) {
+      const response = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
+            origin: appOrigin,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body: `intent=${intent}&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`,
         },
-        body: "intent=LOGIN",
-      },
-    ));
-    loginLocation(login, "access_required");
-    assert.equal(login.headers.getSetCookie().length, 0);
-
-    const response = await transactionRoute.POST(new Request(
-      `${appOrigin}/api/v1/auth/google/transactions`,
-      {
-        method: "POST",
-        headers: {
-          ...trustedHeaders,
-          cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
-          origin: appOrigin,
-          "sec-fetch-site": "same-origin",
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`,
-      },
-    ));
-    assert.equal(response.status, 303);
-    assert.deepEqual(response.headers.getSetCookie().map((cookie) => cookie.split("=", 1)[0]), [
-      "__Host-uptech_onboarding",
-      "__Host-uptech_workspace_setup_tx",
-      "__Host-uptech_login_tx",
-    ]);
-    assert.equal(initiateCalls, 1);
+      ));
+      assert.equal(response.status, 303);
+      assert.deepEqual(response.headers.getSetCookie().map((cookie) => cookie.split("=", 1)[0]), [
+        "__Host-uptech_onboarding",
+        "__Host-uptech_workspace_setup_tx",
+        "__Host-uptech_login_tx",
+      ]);
+    }
+    assert.equal(initiateCalls, 2);
   } finally {
     onboardingSessionResult = null;
   }
@@ -434,6 +523,8 @@ test("transaction rejects malformed SWITCH_ACCOUNT authority requests before ini
   };
   try {
     for (const input of [
+      { body: "intent=LOGIN", headers: {} },
+      { body: "intent=LOGIN&csrf_token=wrong", headers: {} },
       { body: "intent=SWITCH_ACCOUNT", headers: {} },
       { body: "intent=SWITCH_ACCOUNT&csrf_token=wrong", headers: {} },
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${issueOpaqueProof()}`, headers: {} },
@@ -467,7 +558,7 @@ test("transaction rejects malformed SWITCH_ACCOUNT authority requests before ini
   }
 });
 
-test("transaction preserves valid onboarding and setup cookies when SWITCH initiation fails", async () => {
+test("transaction preserves valid onboarding and setup cookies when LOGIN or SWITCH initiation fails", async () => {
   const onboarding = issueOpaqueProof();
   onboardingSessionResult = {
     kind: "onboarding",
@@ -476,30 +567,32 @@ test("transaction preserves valid onboarding and setup cookies when SWITCH initi
   };
   const csrf = deriveCsrfCredential(onboarding, bootstrapPepper);
   try {
-    for (const scenario of [
-      { label: "denied", result: { outcome: "DENIED" }, error: "login_failed" },
-      { label: "rate limited", result: { outcome: "RATE_LIMITED" }, error: "rate_limited" },
-      { label: "provider failure", result: new Error("provider unavailable"), error: "temporarily_unavailable" },
-    ]) {
-      initiateCalls = 0;
-      initiateResult = scenario.result;
-      const response = await transactionRoute.POST(new Request(
-        `${appOrigin}/api/v1/auth/google/transactions`,
-        {
-          method: "POST",
-          headers: {
-            ...trustedHeaders,
-            cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
-            origin: appOrigin,
-            "sec-fetch-site": "same-origin",
-            "content-type": "application/x-www-form-urlencoded",
+    for (const intent of ["LOGIN", "SWITCH_ACCOUNT"] as const) {
+      for (const scenario of [
+        { label: "denied", result: { outcome: "DENIED" }, error: "login_failed" },
+        { label: "rate limited", result: { outcome: "RATE_LIMITED" }, error: "rate_limited" },
+        { label: "provider failure", result: new Error("provider unavailable"), error: "temporarily_unavailable" },
+      ]) {
+        initiateCalls = 0;
+        initiateResult = scenario.result;
+        const response = await transactionRoute.POST(new Request(
+          `${appOrigin}/api/v1/auth/google/transactions`,
+          {
+            method: "POST",
+            headers: {
+              ...trustedHeaders,
+              cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
+              origin: appOrigin,
+              "sec-fetch-site": "same-origin",
+              "content-type": "application/x-www-form-urlencoded",
+            },
+            body: `intent=${intent}&csrf_token=${csrf}`,
           },
-          body: `intent=SWITCH_ACCOUNT&csrf_token=${csrf}`,
-        },
-      ));
-      loginLocation(response, scenario.error);
-      assert.equal(initiateCalls, 1, scenario.label);
-      assert.equal(response.headers.getSetCookie().length, 0, scenario.label);
+        ));
+        loginLocation(response, scenario.error);
+        assert.equal(initiateCalls, 1, `${intent} ${scenario.label}`);
+        assert.equal(response.headers.getSetCookie().length, 0, `${intent} ${scenario.label}`);
+      }
     }
   } finally {
     onboardingSessionResult = null;

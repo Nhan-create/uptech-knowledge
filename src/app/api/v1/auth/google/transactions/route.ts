@@ -10,6 +10,8 @@ import {
 import { inspectBrowserAuthority } from "@/server/auth/browser-authority";
 import { createGoogleLoginRuntime } from "@/server/auth/google/runtime";
 import { logAuthOperation } from "@/server/auth/operational-log";
+import { resolveWebRouteAuthorityDetailed } from "@/server/auth/web-route-authority";
+import { clearedWebSessionCookie } from "@/server/auth/web-session";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "@/server/onboarding/google-workspace/crypto";
 import { exactCsrfCredential } from "@/server/onboarding/google-workspace/http";
 import { WEB_SESSION_COOKIE_NAME } from "@/server/sessions/session-security";
@@ -21,7 +23,7 @@ const FORM_CONTENT_TYPE = "application/x-www-form-urlencoded";
 const MAX_INTENT_BODY_BYTES = 256;
 
 type LoginIntent =
-  | { readonly kind: "LOGIN" }
+  | { readonly kind: "LOGIN"; readonly csrfToken: string | null }
   | { readonly kind: "SWITCH_ACCOUNT"; readonly csrfToken: string | null };
 
 function clearingCookie(name: string): string {
@@ -92,7 +94,9 @@ async function loginIntent(request: Request): Promise<LoginIntent | null> {
   if (bytes === null) return null;
   if (bytes.byteLength === 0) {
     const contentType = request.headers.get("content-type");
-    return contentType === null || contentType === FORM_CONTENT_TYPE ? { kind: "LOGIN" } : null;
+    return contentType === null || contentType === FORM_CONTENT_TYPE
+      ? { kind: "LOGIN", csrfToken: null }
+      : null;
   }
   if (bytes.byteLength > MAX_INTENT_BODY_BYTES ||
       request.headers.get("content-type") !== FORM_CONTENT_TYPE) return null;
@@ -106,7 +110,15 @@ async function loginIntent(request: Request): Promise<LoginIntent | null> {
   const intent = values.getAll("intent");
   if (intent.length !== 1) return null;
   if (intent[0] === "LOGIN") {
-    return values.size === 1 && body === "intent=LOGIN" ? { kind: "LOGIN" } : null;
+    const csrfToken = values.getAll("csrf_token");
+    if (values.size !== 1 + csrfToken.length || csrfToken.length > 1) return null;
+    if (csrfToken.length === 0) {
+      return body === "intent=LOGIN" ? { kind: "LOGIN", csrfToken: null } : null;
+    }
+    const csrf = csrfToken[0]!;
+    return isCanonicalProof(csrf) && body === `intent=LOGIN&csrf_token=${csrf}`
+      ? { kind: "LOGIN", csrfToken: csrf }
+      : null;
   }
   if (intent[0] !== "SWITCH_ACCOUNT") return null;
   const csrfToken = values.getAll("csrf_token");
@@ -118,6 +130,43 @@ async function loginIntent(request: Request): Promise<LoginIntent | null> {
   return isCanonicalProof(csrf) && body === `intent=SWITCH_ACCOUNT&csrf_token=${csrf}`
     ? { kind: "SWITCH_ACCOUNT", csrfToken: csrf }
     : null;
+}
+
+function isExactSameOriginAction(request: Request, appOrigin: string): boolean {
+  try {
+    return request.url === new URL("/api/v1/auth/google/transactions", appOrigin).href &&
+      request.headers.get("origin") === appOrigin &&
+      request.headers.get("sec-fetch-site") === "same-origin";
+  } catch {
+    return false;
+  }
+}
+
+function fixedRedirect(appOrigin: string, path: "/admin" | "/home", requestId: string): Response {
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "Cache-Control": "no-store, max-age=0",
+      Location: new URL(path, appOrigin).href,
+      Pragma: "no-cache",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Request-Id": requestId,
+    },
+  });
+}
+
+function staleWebReplay(appOrigin: string, requestId: string): Response {
+  const headers = new Headers({
+    "Cache-Control": "no-store, max-age=0",
+    Location: new URL("/api/v1/auth/google/transactions", appOrigin).href,
+    Pragma: "no-cache",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Request-Id": requestId,
+  });
+  headers.append("Set-Cookie", clearedWebSessionCookie());
+  return new Response(null, { status: 307, headers });
 }
 
 function redirectResponse(
@@ -198,19 +247,23 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (authority.activeKind === "WEB_SESSION") {
-      logAuthOperation({ requestId: operationRequestId, operation: "GOOGLE_LOGIN_TRANSACTION", outcome: "DENIED" });
-      return redirectToLogin(appOrigin, "active_authority", operationRequestId);
+      const webAuthority = await resolveWebRouteAuthorityDetailed(request.headers, "HOME");
+      if (webAuthority.kind === "ROUTE") {
+        const path = webAuthority.decision === "ADMIN" ? "/admin" : "/home";
+        return fixedRedirect(appOrigin, path, operationRequestId);
+      }
+      if (webAuthority.kind === "UNAVAILABLE") {
+        return redirectToLogin(appOrigin, "temporarily_unavailable", operationRequestId);
+      }
+      if (!isExactSameOriginAction(request, appOrigin)) {
+        logAuthOperation({ requestId: operationRequestId, operation: "GOOGLE_LOGIN_TRANSACTION", outcome: "DENIED" });
+        return redirectToLogin(appOrigin, "login_failed", operationRequestId);
+      }
+      return staleWebReplay(appOrigin, operationRequestId);
     }
     if (authority.activeKind === "ONBOARDING") {
-      if (intent.kind !== "SWITCH_ACCOUNT") {
-        logAuthOperation({ requestId: operationRequestId, operation: "GOOGLE_LOGIN_TRANSACTION", outcome: "DENIED" });
-        return redirectToLogin(appOrigin, "access_required", operationRequestId);
-      }
-      let requestUrl: URL;
-      try { requestUrl = new URL(request.url); } catch { requestUrl = new URL("https://invalid.example"); }
       const onboardingCredential = exactlyOneCookie(request.headers, ONBOARDING_COOKIE_NAME);
-      if (requestUrl.origin !== appOrigin || request.headers.get("origin") !== appOrigin ||
-          request.headers.get("sec-fetch-site") !== "same-origin" ||
+      if (!isExactSameOriginAction(request, appOrigin) ||
           onboardingCredential === null || !isCanonicalProof(onboardingCredential) ||
           !exactCsrfCredential(intent.csrfToken, onboardingCredential, runtimeContext.config.sessionPepper)) {
         logAuthOperation({ requestId: operationRequestId, operation: "GOOGLE_LOGIN_TRANSACTION", outcome: "DENIED" });
@@ -233,7 +286,7 @@ export async function POST(request: Request): Promise<Response> {
         result.loginCookie,
         operationRequestId,
         authority.staleCookieHeaders,
-        authority.activeKind === "ONBOARDING" && intent.kind === "SWITCH_ACCOUNT",
+        authority.activeKind === "ONBOARDING",
         hasCookieName(request.headers, GOOGLE_WORKSPACE_SETUP_COOKIE_NAME),
       );
     }
