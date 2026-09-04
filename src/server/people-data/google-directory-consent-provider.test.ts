@@ -474,7 +474,7 @@ test("Directory redirects and timeouts fail closed without leaking bearer materi
       }),
       (error: unknown) => {
         assert.ok(error instanceof GoogleDirectoryConsentProviderError);
-        assert.doesNotMatch(error.message, /access-token|attacker|timed out/u);
+        assert.doesNotMatch(error.message, /access-token|attacker|timed out|tenant-b\.example/u);
         return true;
       },
     );

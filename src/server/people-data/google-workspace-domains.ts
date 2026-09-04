@@ -16,6 +16,16 @@ function fail(): never {
   throw new TypeError("Google Workspace domain evidence is invalid");
 }
 
+function rawEvidenceByteLength(value: unknown): number {
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized !== "string") return fail();
+    return new TextEncoder().encode(serialized).byteLength;
+  } catch {
+    return fail();
+  }
+}
+
 function domain(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 253 || value.trim() !== value) return fail();
   const normalized = domainToASCII(value.toLowerCase());
@@ -36,10 +46,15 @@ export function normalizeVerifiedGoogleWorkspaceDomains(input: {
   readonly customerDomain: string;
   readonly domains: readonly Readonly<Record<string, unknown>>[];
 }): readonly VerifiedGoogleWorkspaceDomain[] {
+  const domains = input.domains;
+  if (
+    !Array.isArray(domains) ||
+    domains.length > MAX_DOMAINS ||
+    rawEvidenceByteLength(domains) > MAX_PAYLOAD_BYTES
+  ) return fail();
   const customerDomain = domain(input.customerDomain);
-  if (!Array.isArray(input.domains) || input.domains.length > MAX_DOMAINS) return fail();
   const evidence: VerifiedGoogleWorkspaceDomain[] = [];
-  for (const item of input.domains) {
+  for (const item of domains) {
     if (typeof item !== "object" || item === null || Array.isArray(item)) return fail();
     if (item.verified !== true && item.verified !== false) return fail();
     if (item.verified !== true) continue;

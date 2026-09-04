@@ -180,7 +180,7 @@ test("callback rejects duplicate cookies and masks provider or token details", a
         ...dependencies().loadRuntime().service,
         callback: async () => {
           called += 1;
-          throw new Error("refresh-token-secret customer-123");
+          throw new Error("refresh-token-secret customer-123 tenant-b.example");
         },
       },
     }),
@@ -200,7 +200,17 @@ test("callback rejects duplicate cookies and masks provider or token details", a
   ));
   assert.equal(failed.status, 303);
   assert.equal(failed.headers.get("location"), "https://tenant-a.example/admin/connectors?directory=failed");
+  const failedCookie = failed.headers.get("set-cookie") ?? "";
+  assert.match(failedCookie, /^__Host-uptech_directory_tx=;/u);
+  assert.match(failedCookie, /Max-Age=0/u);
+  const responseEvidence = JSON.stringify({
+    status: failed.status,
+    headers: Object.fromEntries(failed.headers),
+    body: await failed.text(),
+  });
+  assert.equal(responseEvidence.includes("tenant-b.example"), false);
   const serialized = JSON.stringify(events);
   assert.equal(serialized.includes("refresh-token-secret"), false);
   assert.equal(serialized.includes("customer-123"), false);
+  assert.equal(serialized.includes("tenant-b.example"), false);
 });
