@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2569,6 +2570,115 @@ test("V2 controlled completion revalidates Directory authority after credential-
         bool_and(metadata=$2::jsonb) AS redacted
       FROM uptech.${auditTable} WHERE request_id=$1 AND action='GOOGLE_AUTH_LOGIN_DENIED'`,
     [requestId, JSON.stringify({
+      access_state: "INTERNAL_ERROR", reason_class: "AUTHORITY_COMMIT_FAILED",
+    })])).rows[0];
+    assert.deepEqual(audit, { count: 1, correlated: true, redacted: true });
+  }
+});
+
+test("V2 controlled completion denies when the locked Directory generation expires after authority writes", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97400000-0000-4000-8000-000000000021";
+  const connectorId = "97400000-0000-4000-8000-000000000010";
+  const transactionId = "97900000-0000-4000-8000-000000000001";
+  const subject = "directory-ttl-race-sub";
+  const hash = (value: string) => createHash("sha256").update(value).digest();
+  const sessionToken = hash("directory-ttl-race-session");
+  const csrfToken = hash("directory-ttl-race-csrf");
+  const onboardingToken = hash("directory-ttl-race-onboarding");
+  const handle = hash("directory-ttl-race-handle");
+  const nonce = hash("directory-ttl-race-nonce");
+  const environment = await ensureActiveGoogleEnvironment();
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.workspaces
+      SET status='ACTIVE',provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+      WHERE workspace_id=$1`, [workspaceId]);
+    await client.query(`UPDATE uptech.connectors SET status='ACTIVE'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, connectorId]);
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET status='SUPERSEDED',fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND status='PUBLISHED' AND id<>$2`, [workspaceId, generationId]);
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET status='PUBLISHED',fresh_until=clock_timestamp()+interval '1 second'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_profiles(
+      workspace_id,generation_id,google_subject,full_name,primary_email,department,
+      lifecycle_state,org_unit_path,effective_role,effective_department_key
+    ) VALUES ($1,$2,$3,'Directory TTL Race','directory-ttl-race@mapping-a.example','sales',
+      'ACTIVE','/Sales','MEMBER','SALES')`, [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject
+    ) VALUES ($1,$2,'g-sales',$3)`, [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
+      web_browser_binding_hash,web_pkce_envelope_version,web_pkce_algorithm,web_pkce_nonce,
+      web_pkce_ciphertext,web_pkce_tag,web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',decode(repeat('c6',32),'hex'),
+      decode(repeat('c6',32),'hex'),$3,decode(repeat('c7',32),'hex'),1,'AES-256-GCM',
+      decode(repeat('c8',12),'hex'),decode(repeat('c9',40),'hex'),decode(repeat('ca',16),'hex'),
+      'test-key-v1',decode(repeat('cb',32),'hex'),'EXCHANGE_RESERVED',$4,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '9 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [transactionId, environment, nonce, handle]);
+    await client.query(`CREATE FUNCTION uptech.test_block_login_success_audit_v1()
+      RETURNS trigger LANGUAGE plpgsql SET search_path TO pg_catalog,uptech AS $function$
+      BEGIN
+        IF NEW.request_id='${transactionId}'::uuid
+           AND NEW.action='GOOGLE_AUTH_LOGIN_SUCCEEDED' THEN
+          PERFORM pg_catalog.pg_sleep(2);
+        END IF;
+        RETURN NEW;
+      END $function$;
+      CREATE TRIGGER test_block_login_success_audit_v1
+      BEFORE INSERT ON uptech.platform_audit_events FOR EACH ROW
+      EXECUTE FUNCTION uptech.test_block_login_success_audit_v1()`);
+  });
+
+  const completion = await pool.connect();
+  try {
+    await completion.query("BEGIN");
+    await completion.query("SET LOCAL ROLE uptech_api_runtime");
+    const row = (await completion.query(`SELECT outcome::text,access_state::text,route::text
+      FROM uptech.complete_web_google_login_directory_v2(
+        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+      sessionToken, csrfToken, onboardingToken, transactionId])).rows[0];
+    await completion.query("COMMIT");
+    assert.deepEqual(row, { outcome: "DENIED", access_state: null, route: null });
+  } finally {
+    await completion.query("ROLLBACK").catch(() => undefined);
+    completion.release();
+    await asMigrationOwner((client) => client.query(`DROP TRIGGER IF EXISTS test_block_login_success_audit_v1
+      ON uptech.platform_audit_events;
+      DROP FUNCTION IF EXISTS uptech.test_block_login_success_audit_v1()`));
+  }
+
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.workspace_memberships membership
+      JOIN uptech.identities identity_row ON identity_row.user_id=membership.user_id
+      WHERE membership.workspace_id=$1 AND identity_row.provider_subject=$2) AS memberships,
+    (SELECT count(*)::int FROM uptech.sessions session_row
+      JOIN uptech.identities identity_row ON identity_row.id=session_row.identity_id
+      WHERE session_row.workspace_id=$1 AND identity_row.provider_subject=$2) AS sessions,
+    (SELECT count(*)::int FROM uptech.session_tokens token_row
+      JOIN uptech.sessions session_row ON session_row.workspace_id=token_row.workspace_id
+        AND session_row.id=token_row.session_id
+      JOIN uptech.identities identity_row ON identity_row.id=session_row.identity_id
+      WHERE token_row.workspace_id=$1 AND identity_row.provider_subject=$2) AS tokens,
+    (SELECT count(*)::int FROM uptech.platform_audit_events
+      WHERE request_id=$3 AND action='GOOGLE_AUTH_LOGIN_SUCCEEDED') AS success_audits`,
+  [workspaceId, subject, transactionId])).rows[0],
+  { memberships: 0, sessions: 0, tokens: 0, success_audits: 0 });
+  for (const auditTable of ["platform_audit_events", "audit_events"] as const) {
+    const audit = (await pool.query(`SELECT count(*)::int AS count,
+        bool_and(request_id=$1) AS correlated,
+        bool_and(metadata=$2::jsonb) AS redacted
+      FROM uptech.${auditTable} WHERE request_id=$1 AND action='GOOGLE_AUTH_LOGIN_DENIED'`,
+    [transactionId, JSON.stringify({
       access_state: "INTERNAL_ERROR", reason_class: "AUTHORITY_COMMIT_FAILED",
     })])).rows[0];
     assert.deepEqual(audit, { count: 1, correlated: true, redacted: true });

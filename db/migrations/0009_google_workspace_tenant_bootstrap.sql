@@ -3228,7 +3228,25 @@ BEGIN
       AND (canonical_claims).issued_at<=observed_at+interval '2 minutes'
       AND (canonical_claims).expires_at>observed_at
       AND (canonical_claims).expires_at>(canonical_claims).issued_at
-      AND (canonical_claims).expires_at<=(canonical_claims).issued_at+interval '2 hours';
+      AND (canonical_claims).expires_at<=(canonical_claims).issued_at+interval '2 hours'
+      AND EXISTS (
+        SELECT 1 FROM uptech.people_sync_generations AS final_generation
+        WHERE final_generation.workspace_id=selected_workspace_id
+          AND final_generation.id=selected_generation_id
+          AND final_generation.status='PUBLISHED'
+          AND final_generation.traversal_complete
+          AND final_generation.completed_at IS NOT NULL
+          AND final_generation.fresh_until>observed_at
+          AND NOT EXISTS (
+            SELECT 1 FROM uptech.people_sync_generations AS newer_generation
+            WHERE newer_generation.workspace_id=final_generation.workspace_id
+              AND newer_generation.status='PUBLISHED'
+              AND newer_generation.traversal_complete
+              AND newer_generation.completed_at IS NOT NULL
+              AND (newer_generation.completed_at,newer_generation.id)>
+                  (final_generation.completed_at,final_generation.id)
+          )
+      );
     GET DIAGNOSTICS transitioned_rows=ROW_COUNT;
     IF transitioned_rows<>1 THEN RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='reservation expired'; END IF;
     RETURN ROW('NORMAL',NULL,NULL,NULL,
