@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { inspectBrowserAuthority } from "./browser-authority.ts";
+import {
+  RECOVERY_OPERATION_FAMILIES,
+  type RecoveryAuthority,
+} from "./recovery-actions.ts";
 import { ONBOARDING_COOKIE_NAME } from "./google/crypto.ts";
 import { WebSessionAuthenticationError } from "./web-session.ts";
 import {
@@ -9,133 +13,203 @@ import {
   WEB_SESSION_COOKIE_NAME,
 } from "../sessions/session-security.ts";
 
-const NORMAL = Object.freeze({
-  kind: "session",
-  clientType: "WEB",
-  tokenKind: "WEB_SESSION",
-});
-const ONBOARDING = Object.freeze({ kind: "onboarding" });
 const SESSION_PEPPER = new Uint8Array(32).fill(0x31);
+const FUTURE = new Date("2030-01-01T00:00:00.000Z");
 
 function credential(): string {
   return issueSessionCredential().raw_token;
 }
 
-test("a valid normal credential is active Web authority", async () => {
+function onboardingContext(operations: readonly string[], contextExpiresAt = FUTURE) {
+  return { kind: "onboarding" as const, identityId: "must-not-return", actorId: "must-not-return", allowedOperations: operations, contextExpiresAt };
+}
+
+function options(authenticateSession: (digest: Uint8Array) => Promise<unknown>, authenticateWebSession = async () => ({})) {
+  return {
+    sessionPepper: SESSION_PEPPER,
+    authenticateSession: authenticateSession as never,
+    authenticateWebSession: authenticateWebSession as never,
+  };
+}
+
+test("a valid normal Web session retains only Web authority", async () => {
   const result = await inspectBrowserAuthority(
     new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}` }),
     {} as never,
-    {
-      sessionPepper: SESSION_PEPPER,
-      authenticateSession: async () => NORMAL as never,
-      authenticateWebSession: async () => ({}) as never,
-    },
+    options(async () => null),
   );
+
   assert.deepEqual(result, {
     active: true,
     activeKind: "WEB_SESSION",
+    onboardingAuthority: null,
     staleCookieHeaders: [],
   });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.staleCookieHeaders), true);
 });
 
-test("legacy onboarding authority is classified and retired when no route exists", async () => {
-  const result = await inspectBrowserAuthority(
-    new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
-    {} as never,
-    {
-      sessionPepper: SESSION_PEPPER,
-      authenticateSession: async () => ONBOARDING as never,
-      authenticateWebSession: async () => ({}) as never,
-    },
-  );
-  assert.equal(result.active, true);
-  assert.equal(result.activeKind, "ONBOARDING");
-  assert.equal(result.staleCookieHeaders.length, 1);
-  assert.match(result.staleCookieHeaders[0], new RegExp(`^${ONBOARDING_COOKIE_NAME}=;`));
-});
-
-test("expired, revoked, garbage, duplicate, and wrong-kind cookies are recoverable", async () => {
-  const stale = credential();
-  const cases: readonly Readonly<{
-    cookie: string;
-    authenticate: () => Promise<Readonly<{
-      kind?: string;
-      clientType?: string;
-      tokenKind?: string;
-    }> | null>;
-    cleared: string;
-  }>[] = [
-    {
-      cookie: `${WEB_SESSION_COOKIE_NAME}=${stale}`,
-      authenticate: async () => null,
-      cleared: WEB_SESSION_COOKIE_NAME,
-    },
-    {
-      cookie: `${ONBOARDING_COOKIE_NAME}=garbage`,
-      authenticate: async () => {
-        throw new Error("malformed credentials must not reach PostgreSQL");
-      },
-      cleared: ONBOARDING_COOKIE_NAME,
-    },
-    {
-      cookie: `${WEB_SESSION_COOKIE_NAME}=${stale}; ${WEB_SESSION_COOKIE_NAME}=${credential()}`,
-      authenticate: async () => {
-        throw new Error("ambiguous credentials must not reach PostgreSQL");
-      },
-      cleared: WEB_SESSION_COOKIE_NAME,
-    },
-    {
-      cookie: `${ONBOARDING_COOKIE_NAME}=${stale}`,
-      authenticate: async () => NORMAL,
-      cleared: ONBOARDING_COOKIE_NAME,
-    },
-  ];
-  for (const scenario of cases) {
+for (const [family, operations] of Object.entries(RECOVERY_OPERATION_FAMILIES)) {
+  test(`a valid ${family} onboarding session retains sanitized exact authority`, async () => {
     const result = await inspectBrowserAuthority(
-      new Headers({ cookie: scenario.cookie }),
+      new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
       {} as never,
-      {
-        sessionPepper: SESSION_PEPPER,
-        authenticateSession: scenario.authenticate as never,
-        authenticateWebSession: async () => {
-          const context = await scenario.authenticate();
-          if (
-            context?.kind === "session" &&
-            context.clientType === "WEB" &&
-            context.tokenKind === "WEB_SESSION"
-          ) {
-            return {} as never;
-          }
-          throw new WebSessionAuthenticationError("stale Web authority");
-        },
-      },
+      options(async () => onboardingContext(operations)),
     );
-    assert.equal(result.active, false);
-    assert.equal(result.activeKind, null);
-    assert.equal(result.staleCookieHeaders.length, 1);
-    assert.match(
-      result.staleCookieHeaders[0],
-      new RegExp(`^${scenario.cleared}=;`),
+    const expected: RecoveryAuthority = {
+      kind: "AUTHENTICATED_ONBOARDING",
+      operations: [...operations],
+    };
+
+    assert.deepEqual(result, {
+      active: true,
+      activeKind: "ONBOARDING",
+      onboardingAuthority: expected,
+      staleCookieHeaders: [],
+    });
+    assert.equal(Object.isFrozen(result.onboardingAuthority), true);
+    assert.equal(Object.isFrozen(result.onboardingAuthority?.operations), true);
+    assert.notEqual(result.onboardingAuthority?.operations, operations);
+  });
+}
+
+test("simultaneous authority names clear both names without invoking an authenticator", async () => {
+  let calls = 0;
+  const result = await inspectBrowserAuthority(
+    new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}; ${ONBOARDING_COOKIE_NAME}=garbage` }),
+    {} as never,
+    options(async () => {
+      calls += 1;
+      return null;
+    }, async () => {
+      calls += 1;
+      return {};
+    }),
+  );
+
+  assert.deepEqual(result, {
+    active: false,
+    activeKind: null,
+    onboardingAuthority: null,
+    staleCookieHeaders: [
+      `${WEB_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+      `${ONBOARDING_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+    ],
+  });
+  assert.equal(calls, 0);
+});
+
+test("ambiguous or malformed cookies clear without invoking an authenticator", async () => {
+  for (const cookie of [
+    `${WEB_SESSION_COOKIE_NAME}=${credential()}; ${WEB_SESSION_COOKIE_NAME}=${credential()}`,
+    `${ONBOARDING_COOKIE_NAME}=${credential()}; ${ONBOARDING_COOKIE_NAME}=${credential()}`,
+    `${WEB_SESSION_COOKIE_NAME}=garbage`,
+    `${ONBOARDING_COOKIE_NAME}=`,
+  ]) {
+    let calls = 0;
+    const result = await inspectBrowserAuthority(
+      new Headers({ cookie }),
+      {} as never,
+      options(async () => {
+        calls += 1;
+        return null;
+      }, async () => {
+        calls += 1;
+        return {};
+      }),
     );
+    assert.equal(result.active, false, cookie);
+    assert.equal(result.activeKind, null, cookie);
+    assert.equal(result.onboardingAuthority, null, cookie);
+    assert.equal(result.staleCookieHeaders.length, 1, cookie);
+    assert.equal(calls, 0, cookie);
   }
 });
 
-test("database uncertainty neither clears nor reclassifies authority", async () => {
+test("stale authenticated contexts clear their cookie", async () => {
+  const cases = [
+    ["null onboarding context", null],
+    ["wrong context kind", { kind: "session" }],
+    ["expired onboarding context", onboardingContext(RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN, new Date("2020-01-01T00:00:00.000Z"))],
+    ["boundary expiry", onboardingContext(RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN, new Date(Date.now()))],
+    ["invalid expiry", onboardingContext(RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN, new Date("invalid"))],
+  ] as const;
+  for (const [name, context] of cases) {
+    const result = await inspectBrowserAuthority(
+      new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
+      {} as never,
+      options(async () => context),
+    );
+    assert.deepEqual(result, {
+      active: false,
+      activeKind: null,
+      onboardingAuthority: null,
+      staleCookieHeaders: [`${ONBOARDING_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`],
+    }, name);
+  }
+});
+
+test("malformed operation families clear onboarding authority", async () => {
+  const expected = RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN;
+  const malformed = [
+    [],
+    expected.slice(0, 1),
+    [...expected, "ACCESS_REQUEST_READ"],
+    [...expected].reverse(),
+    [expected[0], expected[0], expected[2]],
+    ["UNKNOWN_OPERATION"],
+    ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT", "FIRST_DOMAIN_CLAIM_READ"],
+  ] as const;
+  for (const operations of malformed) {
+    const result = await inspectBrowserAuthority(
+      new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
+      {} as never,
+      options(async () => onboardingContext(operations)),
+    );
+    assert.equal(result.active, false, JSON.stringify(operations));
+    assert.equal(result.onboardingAuthority, null, JSON.stringify(operations));
+    assert.equal(result.staleCookieHeaders.length, 1, JSON.stringify(operations));
+  }
+});
+
+test("a missing onboarding operation family clears the cookie", async () => {
+  const result = await inspectBrowserAuthority(
+    new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
+    {} as never,
+    options(async () => ({ kind: "onboarding", contextExpiresAt: FUTURE })),
+  );
+  assert.deepEqual(result, {
+    active: false,
+    activeKind: null,
+    onboardingAuthority: null,
+    staleCookieHeaders: [`${ONBOARDING_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`],
+  });
+});
+
+test("normal authentication failures clear only Web authority", async () => {
+  const result = await inspectBrowserAuthority(
+    new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}` }),
+    {} as never,
+    options(async () => null, async () => {
+      throw new WebSessionAuthenticationError("revoked");
+    }),
+  );
+  assert.deepEqual(result, {
+    active: false,
+    activeKind: null,
+    onboardingAuthority: null,
+    staleCookieHeaders: [`${WEB_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`],
+  });
+});
+
+test("database uncertainty propagates without a clearing decision", async () => {
   await assert.rejects(
     inspectBrowserAuthority(
-      new Headers({
-        cookie: `${WEB_SESSION_COOKIE_NAME}=${credential()}`,
-      }),
+      new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${credential()}` }),
       {} as never,
-      {
-        sessionPepper: SESSION_PEPPER,
-        authenticateSession: async () => {
-          throw new Error("database unavailable");
-        },
-        authenticateWebSession: async () => {
-          throw new Error("database unavailable");
-        },
-      },
+      options(async () => {
+        throw new Error("database unavailable");
+      }),
     ),
     /database unavailable/u,
   );

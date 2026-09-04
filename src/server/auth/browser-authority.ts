@@ -5,6 +5,12 @@ import {
 } from "../sessions/session-security.ts";
 import { ONBOARDING_COOKIE_NAME } from "./google/crypto.ts";
 import {
+  RECOVERY_AUTHORITY_KIND,
+  RECOVERY_OPERATION_FAMILIES,
+  type RecoveryAuthority,
+  type RecoveryOperation,
+} from "./recovery-actions.ts";
+import {
   authenticateWebSession,
   WebSessionAuthenticationError,
 } from "./web-session.ts";
@@ -15,6 +21,7 @@ type WebSessionAuthenticator = typeof authenticateWebSession;
 export interface BrowserAuthorityInspection {
   readonly active: boolean;
   readonly activeKind: "WEB_SESSION" | "ONBOARDING" | null;
+  readonly onboardingAuthority: RecoveryAuthority | null;
   readonly staleCookieHeaders: readonly string[];
 }
 
@@ -36,6 +43,48 @@ function clearingCookie(name: string): string {
   return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
+function isExactOperationFamily(
+  operations: unknown,
+): operations is readonly RecoveryOperation[] {
+  return Object.values(RECOVERY_OPERATION_FAMILIES).some(
+    (family) =>
+      Array.isArray(operations) &&
+      operations.length === family.length &&
+      operations.every((operation, index) => operation === family[index]),
+  );
+}
+
+function sanitizedOnboardingAuthority(context: unknown): RecoveryAuthority | null {
+  if (context === null || typeof context !== "object") return null;
+  const candidate = context as Readonly<{
+    kind?: unknown;
+    allowedOperations?: unknown;
+    contextExpiresAt?: unknown;
+  }>;
+  if (
+    candidate.kind !== "onboarding" ||
+    !(candidate.contextExpiresAt instanceof Date) ||
+    !Number.isFinite(candidate.contextExpiresAt.getTime()) ||
+    candidate.contextExpiresAt.getTime() <= Date.now() ||
+    !isExactOperationFamily(candidate.allowedOperations)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    kind: RECOVERY_AUTHORITY_KIND,
+    operations: Object.freeze([...candidate.allowedOperations]),
+  });
+}
+
+function emptyInspection(staleCookieHeaders: string[]): BrowserAuthorityInspection {
+  return Object.freeze({
+    active: false,
+    activeKind: null,
+    onboardingAuthority: null,
+    staleCookieHeaders: Object.freeze(staleCookieHeaders),
+  });
+}
+
 export async function inspectBrowserAuthority(
   headers: Headers,
   pool: Pick<DatabasePool, "query">,
@@ -48,14 +97,23 @@ export async function inspectBrowserAuthority(
   const authenticate = options.authenticateSession ?? authenticateSession;
   const authenticateWeb =
     options.authenticateWebSession ?? authenticateWebSession;
+  const webValues = cookieValues(headers, WEB_SESSION_COOKIE_NAME);
+  const onboardingValues = cookieValues(headers, ONBOARDING_COOKIE_NAME);
+  if (webValues.length > 0 && onboardingValues.length > 0) {
+    return emptyInspection([
+      clearingCookie(WEB_SESSION_COOKIE_NAME),
+      clearingCookie(ONBOARDING_COOKIE_NAME),
+    ]);
+  }
   let active = false;
   let activeKind: BrowserAuthorityInspection["activeKind"] = null;
+  let onboardingAuthority: RecoveryAuthority | null = null;
   const staleCookieHeaders: string[] = [];
   for (const [name, expectedKind] of [
     [WEB_SESSION_COOKIE_NAME, "session"],
     [ONBOARDING_COOKIE_NAME, "onboarding"],
   ] as const) {
-    const values = cookieValues(headers, name);
+    const values = name === WEB_SESSION_COOKIE_NAME ? webValues : onboardingValues;
     if (values.length === 0) continue;
     if (values.length !== 1 || values[0].length === 0) {
       staleCookieHeaders.push(clearingCookie(name));
@@ -88,16 +146,13 @@ export async function inspectBrowserAuthority(
       continue;
     }
 
-    const context = await authenticate(digest, pool);
-    const matchesExpectedAuthority =
-      context?.kind === "onboarding";
-    if (matchesExpectedAuthority) {
+    const authority = sanitizedOnboardingAuthority(
+      await authenticate(digest, pool),
+    );
+    if (authority !== null) {
       active = true;
       activeKind = "ONBOARDING";
-      // There is no production onboarding route yet. Retire this legacy
-      // browser credential so the user can choose another account instead of
-      // being trapped behind a credential that has no usable destination.
-      staleCookieHeaders.push(clearingCookie(name));
+      onboardingAuthority = authority;
     } else {
       staleCookieHeaders.push(clearingCookie(name));
     }
@@ -105,6 +160,7 @@ export async function inspectBrowserAuthority(
   return Object.freeze({
     active,
     activeKind,
+    onboardingAuthority,
     staleCookieHeaders: Object.freeze(staleCookieHeaders),
   });
 }
