@@ -123,7 +123,10 @@ mock.module("@/server/auth/google/runtime", {
             if (initiateResult instanceof Error) throw initiateResult;
             return initiateResult;
           },
-          async callback() {
+          async callback(input: {
+            readonly inspectPreexistingBrowserAuthority?: () => Promise<boolean>;
+          }) {
+            await input.inspectPreexistingBrowserAuthority?.();
             if (callbackResult instanceof Error) throw callbackResult;
             return callbackResult;
           },
@@ -177,6 +180,21 @@ function hasSessionCookie(response: Response): boolean {
 function hasOnboardingCookie(response: Response): boolean {
   return response.headers.getSetCookie().some((cookie) =>
     cookie.startsWith("__Host-uptech_onboarding="),
+  );
+}
+
+function nonEmptyAuthorityCookieNames(response: Response): string[] {
+  return response.headers.getSetCookie().flatMap((cookie) => {
+    const separator = cookie.indexOf("=");
+    const name = cookie.slice(0, separator);
+    const value = cookie.slice(separator + 1).split(";", 1)[0];
+    return value === "" || !name?.startsWith("__Host-uptech_") ? [] : [name];
+  });
+}
+
+function hasCookieClear(response: Response, name: string): boolean {
+  return response.headers.getSetCookie().some((cookie) =>
+    cookie.startsWith(`${name}=;`) && cookie.includes("Max-Age=0"),
   );
 }
 
@@ -259,8 +277,33 @@ for (const scenario of [
   },
   {
     outcome: "ACCESS_DENIED",
+    accessState: "ACCESS_MAPPING_CONFLICT",
+    error: "access_mapping_conflict",
+  },
+  {
+    outcome: "ACCESS_DENIED",
     accessState: "USER_SUSPENDED",
     error: "user_suspended",
+  },
+  {
+    outcome: "ACCESS_DENIED",
+    accessState: "USER_REMOVED",
+    error: "user_removed",
+  },
+  {
+    outcome: "ACCESS_DENIED",
+    accessState: "DIRECTORY_SYNC_PENDING",
+    error: "directory_sync_pending",
+  },
+  {
+    outcome: "ACCESS_DENIED",
+    accessState: "DIRECTORY_STALE",
+    error: "directory_stale",
+  },
+  {
+    outcome: "ACCESS_DENIED",
+    accessState: "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE",
+    error: "directory_stale_access_request_available",
   },
   {
     outcome: "ACCESS_DENIED",
@@ -269,13 +312,6 @@ for (const scenario of [
   },
   { outcome: "PROVIDER_REJECTED", error: "provider_rejected" },
   { outcome: "PROVIDER_UNAVAILABLE", error: "temporarily_unavailable" },
-  {
-    outcome: "ONBOARDING",
-    onboardingCredential: issueSessionCredential().raw_token,
-    allowedOperations: ["ACCESS_REQUEST_READ"],
-    expiresAt: new Date("2026-09-01T04:15:00.000Z"),
-    error: "access_required",
-  },
   { outcome: "DENIED", error: "login_failed" },
 ]) {
   test(`callback maps ${scenario.outcome} to its safe ${scenario.error} login state without a session`, async () => {
@@ -294,21 +330,103 @@ for (const scenario of [
   });
 }
 
-test("only a NORMAL callback establishes a browser session", async () => {
+for (const route of ["/admin", "/home"] as const) {
+  test(`NORMAL callback redirects only to the server-selected ${route} route and replaces stale authority`, async () => {
+    const sessionCredential = issueSessionCredential().raw_token;
+    callbackResult = { outcome: "NORMAL", sessionCredential, route };
+
+    const response = await callbackRoute.GET(
+      new Request(`${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state&route=https://attacker.example`, {
+        headers: {
+          ...trustedHeaders,
+          cookie: "__Host-uptech_login_tx=transaction; __Host-uptech_session=stale; __Host-uptech_onboarding=stale; __Host-uptech_workspace_setup_tx=stale",
+        },
+      }),
+    );
+
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("location"), `${appOrigin}${route}`);
+    assert.deepEqual(nonEmptyAuthorityCookieNames(response), ["__Host-uptech_session"]);
+    assert.ok(response.headers.getSetCookie().some((cookie) =>
+      cookie === `__Host-uptech_session=${sessionCredential}; Path=/; HttpOnly; Secure; SameSite=Lax`,
+    ));
+    for (const name of [
+      "__Host-uptech_login_tx",
+      "__Host-uptech_session",
+      "__Host-uptech_onboarding",
+      "__Host-uptech_workspace_setup_tx",
+    ]) assert.equal(hasCookieClear(response, name), true);
+  });
+}
+
+for (const scenario of [
+  {
+    accessState: "UNKNOWN_WORKSPACE",
+    allowedOperations: [
+      "FIRST_DOMAIN_CLAIM_READ",
+      "FIRST_DOMAIN_CLAIM_RESERVE",
+      "FIRST_DOMAIN_CLAIM_COMPLETE",
+    ],
+    error: "unknown_workspace",
+  },
+  {
+    accessState: "USER_NOT_PROVISIONED",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    error: "access_required",
+  },
+] as const) {
+  test(`ONBOARDING ${scenario.accessState} commits only its onboarding authority`, async () => {
+    const onboardingCredential = issueSessionCredential().raw_token;
+    callbackResult = {
+      outcome: "ONBOARDING",
+      ...scenario,
+      onboardingCredential,
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+
+    const response = await callbackRoute.GET(
+      new Request(`${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`, {
+        headers: {
+          ...trustedHeaders,
+          cookie: "__Host-uptech_login_tx=transaction; __Host-uptech_session=stale; __Host-uptech_onboarding=stale; __Host-uptech_workspace_setup_tx=stale",
+        },
+      }),
+    );
+
+    loginLocation(response, scenario.error);
+    assert.deepEqual(nonEmptyAuthorityCookieNames(response), ["__Host-uptech_onboarding"]);
+    assert.ok(response.headers.getSetCookie().some((cookie) =>
+      /^__Host-uptech_onboarding=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=[1-9][0-9]*$/u.test(cookie),
+    ));
+    for (const name of [
+      "__Host-uptech_login_tx",
+      "__Host-uptech_session",
+      "__Host-uptech_onboarding",
+      "__Host-uptech_workspace_setup_tx",
+    ]) assert.equal(hasCookieClear(response, name), true);
+  });
+}
+
+test("callback fails closed when a runtime result supplies an attacker route or access state", async () => {
   callbackResult = {
     outcome: "NORMAL",
     sessionCredential: issueSessionCredential().raw_token,
+    route: "https://attacker.example/admin",
   };
+  const routeResponse = await callbackRoute.GET(new Request(
+    `${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`,
+    { headers: trustedHeaders },
+  ));
+  loginLocation(routeResponse, "login_failed");
+  assert.equal(nonEmptyAuthorityCookieNames(routeResponse).length, 0);
 
-  const response = await callbackRoute.GET(
-    new Request(`${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`, {
-      headers: trustedHeaders,
-    }),
-  );
-
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), `${appOrigin}/home`);
-  assert.equal(hasSessionCookie(response), true);
+  callbackResult = { outcome: "ACCESS_DENIED", accessState: "ATTACKER_STATE" };
+  const stateResponse = await callbackRoute.GET(new Request(
+    `${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`,
+    { headers: trustedHeaders },
+  ));
+  loginLocation(stateResponse, "login_failed");
+  assert.equal(nonEmptyAuthorityCookieNames(stateResponse).length, 0);
 });
 
 test("session bootstrap treats an integrity failure as stale authority instead of a provider outage", async () => {

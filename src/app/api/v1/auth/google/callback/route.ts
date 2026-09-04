@@ -1,10 +1,13 @@
 import {
   LOGIN_TRANSACTION_COOKIE_NAME,
+  isCanonicalProof,
+  ONBOARDING_COOKIE_NAME,
   trustedVercelClientIp,
 } from "@/server/auth/google/crypto";
 import { createGoogleLoginRuntime } from "@/server/auth/google/runtime";
 import { inspectBrowserAuthority } from "@/server/auth/browser-authority";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
+import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "@/server/onboarding/google-workspace/crypto";
 import {
   requestIdFromHeaders,
 } from "@/server/http/problem";
@@ -17,6 +20,8 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MAX_ONBOARDING_COOKIE_AGE_SECONDS = 24 * 60 * 60;
 
 function readUniqueCookie(headers: Headers, name: string): string | null {
   const cookieHeader = headers.get("cookie");
@@ -39,6 +44,37 @@ function clearLoginCookie(headers: Headers): void {
     "Set-Cookie",
     `${LOGIN_TRANSACTION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
   );
+}
+
+function clearingCookie(name: string): string {
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+}
+
+function hasCookie(headers: Headers, name: string): boolean {
+  const cookieHeader = headers.get("cookie");
+  return cookieHeader !== null && cookieHeader.split(";").some((part) => {
+    const separator = part.indexOf("=");
+    return separator >= 0 && part.slice(0, separator).trim() === name;
+  });
+}
+
+function serializeOnboardingCookie(
+  credential: string,
+  expiresAt: Date,
+  now: Date,
+): string | null {
+  if (
+    !isCanonicalProof(credential) ||
+    !(expiresAt instanceof Date) ||
+    !Number.isFinite(expiresAt.getTime())
+  ) {
+    return null;
+  }
+  const maxAge = Math.floor((expiresAt.getTime() - now.getTime()) / 1_000);
+  if (!Number.isSafeInteger(maxAge) || maxAge < 1) {
+    return null;
+  }
+  return `${ONBOARDING_COOKIE_NAME}=${credential}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.min(maxAge, MAX_ONBOARDING_COOKIE_AGE_SECONDS)}`;
 }
 
 function redirectToLogin(
@@ -80,14 +116,23 @@ function appendCookies(response: Response, cookies: readonly string[]): Response
 function safeAccessError(accessState: string): string {
   if (accessState === "UNKNOWN_WORKSPACE") return "unknown_workspace";
   if (accessState === "USER_NOT_PROVISIONED") return "access_required";
+  if (accessState === "ACCESS_MAPPING_CONFLICT") return "access_mapping_conflict";
   if (accessState === "USER_SUSPENDED") return "user_suspended";
+  if (accessState === "USER_REMOVED") return "user_removed";
+  if (accessState === "DIRECTORY_SYNC_PENDING") return "directory_sync_pending";
+  if (accessState === "DIRECTORY_STALE") return "directory_stale";
+  if (accessState === "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE") return "directory_stale_access_request_available";
   if (accessState === "WORKSPACE_SUSPENDED") return "workspace_suspended";
   return "login_failed";
 }
 
 export async function GET(request: Request): Promise<Response> {
   const operationRequestId = requestIdFromHeaders(request.headers);
-  let staleCookieHeaders: readonly string[] = [];
+  const setupCookieClear = hasCookie(
+    request.headers,
+    GOOGLE_WORKSPACE_SETUP_COOKIE_NAME,
+  ) ? [clearingCookie(GOOGLE_WORKSPACE_SETUP_COOKIE_NAME)] : [];
+  let staleCookieHeaders: readonly string[] = setupCookieClear;
   let preexistingBrowserAuthority = false;
   let preexistingBrowserAuthorityKind: "WEB_SESSION" | "ONBOARDING" | null = null;
   try {
@@ -106,7 +151,10 @@ export async function GET(request: Request): Promise<Response> {
           getRuntimeDatabasePool(runtimeContext.config.databaseUrl),
           { sessionPepper: runtimeContext.config.sessionPepper },
         );
-        staleCookieHeaders = authority.staleCookieHeaders;
+        staleCookieHeaders = [
+          ...authority.staleCookieHeaders,
+          ...setupCookieClear,
+        ];
         preexistingBrowserAuthority = authority.active;
         preexistingBrowserAuthorityKind = authority.activeKind;
         return authority.active;
@@ -127,10 +175,21 @@ export async function GET(request: Request): Promise<Response> {
       );
     }
     if (result.outcome === "NORMAL") {
+      if (result.route !== "/admin" && result.route !== "/home") {
+        logCallback(operationRequestId, "DENIED");
+        return appendCookies(
+          redirectToLogin(
+            runtimeContext.config.appOrigin,
+            "login_failed",
+            operationRequestId,
+          ),
+          staleCookieHeaders,
+        );
+      }
       logCallback(operationRequestId, "NORMAL");
       const headers = new Headers({
         "Cache-Control": "no-store, max-age=0",
-        Location: new URL("/home", runtimeContext.config.appOrigin).href,
+        Location: new URL(result.route, runtimeContext.config.appOrigin).href,
         Pragma: "no-cache",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
@@ -157,14 +216,31 @@ export async function GET(request: Request): Promise<Response> {
       );
     }
     if (result.outcome === "ONBOARDING") {
-      // No production onboarding route exists. Do not expose an unusable
-      // authority cookie or a dead action; preserve the safe access state.
-      logCallback(operationRequestId, "DENIED");
-      return appendCookies(redirectToLogin(
-        runtimeContext.config.appOrigin,
-        "access_required",
-        operationRequestId,
-      ), staleCookieHeaders);
+      const onboardingCookie = serializeOnboardingCookie(
+        result.onboardingCredential,
+        result.expiresAt,
+        new Date(),
+      );
+      if (onboardingCookie === null) {
+        logCallback(operationRequestId, "DENIED");
+        return appendCookies(
+          redirectToLogin(
+            runtimeContext.config.appOrigin,
+            "login_failed",
+            operationRequestId,
+          ),
+          staleCookieHeaders,
+        );
+      }
+      logCallback(operationRequestId, "ONBOARDING");
+      return appendCookies(
+        redirectToLogin(
+          runtimeContext.config.appOrigin,
+          safeAccessError(result.accessState),
+          operationRequestId,
+        ),
+        replacementCookieHeaders(staleCookieHeaders, onboardingCookie),
+      );
     }
     const safeError =
       result.outcome === "RATE_LIMITED"
