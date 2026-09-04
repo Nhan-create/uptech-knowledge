@@ -1,8 +1,19 @@
 \set ON_ERROR_STOP on
 
--- Run after 0009 against a disposable database. Catalog checks and behavior probes
--- execute in one transaction; nothing in this verifier persists.
-BEGIN;
+-- Production-safe, read-only structural verifier. Run after migration 0009.
+-- Behavioral mutation probes remain in disposable PostgreSQL integration tests.
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '30s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL idle_in_transaction_session_timeout = '30s';
+
+DO $verify_read_only$
+BEGIN
+  IF pg_catalog.current_setting('transaction_read_only') <> 'on' THEN
+    RAISE EXCEPTION 'bootstrap verifier requires a read-only transaction';
+  END IF;
+END
+$verify_read_only$;
 
 DO $verify$
 DECLARE
@@ -300,42 +311,43 @@ BEGIN
 
   SELECT count(*) INTO missing_count
   FROM (VALUES
-    ('workspaces_workspace_customer_unique','u'),
-    ('onboarding_sessions_resource_workspace_fk','f'),
-    ('onboarding_sessions_operations_check','c'),
-    ('onboarding_sessions_expiry_check','c'),
-    ('onboarding_sessions_access_reason_check','c'),
-    ('workspace_domain_locators_customer_shape_check','c'),
-    ('workspace_domain_locators_workspace_customer_fk','f'),
-    ('workspace_domain_locators_workspace_customer_domain_unique','u'),
-    ('workspace_domain_locators_alias_parent_fk','f'),
-    ('connectors_directory_authorized_identity_fk','f'),
-    ('connectors_directory_setup_metadata_check','c'),
-    ('people_permission_mappings_source_check','c'),
-    ('people_permission_mappings_target_check','c'),
-    ('google_workspace_bootstrap_attempts_identity_fk','f'),
-    ('google_workspace_bootstrap_attempts_candidate_workspace_unique','u'),
-    ('google_workspace_bootstrap_attempts_candidate_status_hash_uniqu','u'),
-    ('google_workspace_bootstrap_attempts_receipt_binding_unique','u'),
-    ('google_workspace_bootstrap_attempts_deadline_check','c'),
-    ('google_workspace_bootstrap_attempts_state_check','c'),
-    ('google_workspace_bootstrap_attempts_timestamps_check','c'),
-    ('google_workspace_bootstrap_receipts_attempt_binding_fk','f'),
-    ('google_workspace_bootstrap_receipts_identity_fk','f'),
-    ('google_workspace_bootstrap_receipts_workspace_fk','f'),
-    ('google_workspace_bootstrap_receipts_connector_fk','f'),
-    ('google_workspace_bootstrap_receipts_connector_unique','u'),
-    ('workspace_access_requests_workspace_fk','f'),
-    ('workspace_access_requests_identity_fk','f'),
-    ('workspace_access_requests_reason_check','c'),
-    ('workspace_access_requests_state_check','c'),
-    ('workspace_access_requests_timestamps_check','c')
-  ) AS required(constraint_name, constraint_type)
+    ('workspaces','workspaces_workspace_customer_unique','u'),
+    ('onboarding_sessions','onboarding_sessions_resource_workspace_fk','f'),
+    ('onboarding_sessions','onboarding_sessions_operations_check','c'),
+    ('onboarding_sessions','onboarding_sessions_expiry_check','c'),
+    ('onboarding_sessions','onboarding_sessions_access_reason_check','c'),
+    ('workspace_domain_locators','workspace_domain_locators_customer_shape_check','c'),
+    ('workspace_domain_locators','workspace_domain_locators_workspace_customer_fk','f'),
+    ('workspace_domain_locators','workspace_domain_locators_workspace_customer_domain_unique','u'),
+    ('workspace_domain_locators','workspace_domain_locators_alias_parent_fk','f'),
+    ('connectors','connectors_directory_authorized_identity_fk','f'),
+    ('connectors','connectors_directory_setup_metadata_check','c'),
+    ('people_permission_mappings','people_permission_mappings_source_check','c'),
+    ('people_permission_mappings','people_permission_mappings_target_check','c'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_identity_fk','f'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_candidate_workspace_unique','u'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_candidate_status_hash_uniqu','u'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_receipt_binding_unique','u'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_deadline_check','c'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_state_check','c'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_timestamps_check','c'),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_attempt_binding_fk','f'),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_identity_fk','f'),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_workspace_fk','f'),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_connector_fk','f'),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_connector_unique','u'),
+    ('workspace_access_requests','workspace_access_requests_workspace_fk','f'),
+    ('workspace_access_requests','workspace_access_requests_identity_fk','f'),
+    ('workspace_access_requests','workspace_access_requests_reason_check','c'),
+    ('workspace_access_requests','workspace_access_requests_state_check','c'),
+    ('workspace_access_requests','workspace_access_requests_timestamps_check','c')
+  ) AS required(relation_name, constraint_name, constraint_type)
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_constraint AS constraint_row
     JOIN pg_catalog.pg_namespace AS namespace
       ON namespace.oid = constraint_row.connamespace
     WHERE namespace.nspname = 'uptech'
+      AND constraint_row.conrelid = pg_catalog.to_regclass('uptech.' || required.relation_name)
       AND constraint_row.conname = required.constraint_name
       AND constraint_row.contype = required.constraint_type::"char"
       AND constraint_row.convalidated
@@ -352,16 +364,17 @@ DECLARE
 BEGIN
   SELECT count(*) INTO missing_count
   FROM (VALUES
-    ('workspace_domain_locators_one_primary_customer', '(domain_kind = ''PRIMARY''::uptech.google_workspace_domain_kind_v1)'),
-    ('service_actors_one_active_sync_worker', '((actor_kind = ''SYNC_WORKER''::text) AND (status = ''ACTIVE''::text))'),
-    ('google_workspace_bootstrap_attempts_one_live_source', '(state = ''PREPARED''::uptech.google_workspace_bootstrap_attempt_state_v1)'),
-    ('workspace_access_requests_one_pending_identity_reason', '(status = ''PENDING''::uptech.workspace_access_request_status_v1)')
-  ) AS required(index_name, predicate)
+    ('workspace_domain_locators','workspace_domain_locators_one_primary_customer', '(domain_kind = ''PRIMARY''::uptech.google_workspace_domain_kind_v1)'),
+    ('service_actors','service_actors_one_active_sync_worker', '((actor_kind = ''SYNC_WORKER''::text) AND (status = ''ACTIVE''::text))'),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_one_live_source', '(state = ''PREPARED''::uptech.google_workspace_bootstrap_attempt_state_v1)'),
+    ('workspace_access_requests','workspace_access_requests_one_pending_identity_reason', '(status = ''PENDING''::uptech.workspace_access_request_status_v1)')
+  ) AS required(relation_name, index_name, predicate)
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_index AS index_row
     JOIN pg_catalog.pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
     JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = index_relation.relnamespace
     WHERE namespace.nspname = 'uptech' AND index_relation.relname = required.index_name
+      AND index_row.indrelid = pg_catalog.to_regclass('uptech.' || required.relation_name)
       AND index_row.indisunique AND index_row.indisvalid
       AND pg_catalog.pg_get_expr(index_row.indpred, index_row.indrelid) = required.predicate
   );
@@ -371,17 +384,25 @@ BEGIN
 
   SELECT count(*) INTO missing_count
   FROM (VALUES
-    ('workspace_domain_locators_alias_parent_check','enforce_workspace_domain_alias_parent_v1'),
-    ('google_workspace_bootstrap_attempts_transition_guard','enforce_google_workspace_bootstrap_attempt_transition_v1'),
-    ('google_workspace_bootstrap_receipts_committed_attempt','enforce_google_workspace_bootstrap_receipt_v1'),
-    ('google_workspace_bootstrap_receipts_immutable','enforce_google_workspace_bootstrap_receipt_v1'),
-    ('workspace_access_requests_transition_guard','enforce_workspace_access_request_transition_v1')
-  ) AS required(trigger_name, function_name)
+    ('workspace_domain_locators','workspace_domain_locators_alias_parent_check','enforce_workspace_domain_alias_parent_v1',21,true,true),
+    ('google_workspace_bootstrap_attempts','google_workspace_bootstrap_attempts_transition_guard','enforce_google_workspace_bootstrap_attempt_transition_v1',27,false,false),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_committed_attempt','enforce_google_workspace_bootstrap_receipt_v1',5,true,true),
+    ('google_workspace_bootstrap_receipts','google_workspace_bootstrap_receipts_immutable','enforce_google_workspace_bootstrap_receipt_v1',27,false,false),
+    ('workspace_access_requests','workspace_access_requests_transition_guard','enforce_workspace_access_request_transition_v1',27,false,false)
+  ) AS required(relation_name, trigger_name, function_name, trigger_type, is_constraint, is_deferred)
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+    LEFT JOIN pg_catalog.pg_constraint AS constraint_row
+      ON constraint_row.oid = trigger_row.tgconstraint
     WHERE trigger_row.tgname = required.trigger_name
-      AND NOT trigger_row.tgisinternal AND trigger_row.tgenabled <> 'D'
+      AND trigger_row.tgrelid = pg_catalog.to_regclass('uptech.' || required.relation_name)
+      AND NOT trigger_row.tgisinternal AND trigger_row.tgenabled = 'O'
       AND trigger_row.tgfoid = pg_catalog.to_regprocedure('uptech.' || required.function_name || '()')
+      AND trigger_row.tgtype = required.trigger_type
+      AND (trigger_row.tgconstraint <> 0) = required.is_constraint
+      AND COALESCE(constraint_row.conrelid = trigger_row.tgrelid, NOT required.is_constraint)
+      AND COALESCE(constraint_row.condeferrable, false) = required.is_constraint
+      AND COALESCE(constraint_row.condeferred, false) = required.is_deferred
   );
   IF missing_count <> 0 THEN
     RAISE EXCEPTION 'Task 2 enforcement trigger is missing or disabled';
@@ -683,56 +704,6 @@ BEGIN
 END
 $verify$;
 
--- The API-facing routines must also fail closed behaviorally for an unknown
--- capability, and their public response shapes must contain no tenant fields.
-RESET ROLE;
-SET LOCAL ROLE uptech_api_runtime;
-DO $verify$
-DECLARE
-  status_result uptech.google_workspace_bootstrap_status_result_v1;
-  retry_result uptech.google_workspace_bootstrap_retry_result_v1;
-  finish_result uptech.google_workspace_bootstrap_finish_result_v1;
-  reissue_result uptech.google_workspace_bootstrap_reissue_result_v1;
-  revoke_result uptech.onboarding_capability_revoke_result_v1;
-  submit_result uptech.workspace_access_request_submit_result_v1;
-  read_result uptech.workspace_access_request_read_result_v1;
-BEGIN
-  status_result := uptech.read_google_workspace_bootstrap_status_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fe');
-  retry_result := uptech.retry_google_workspace_bootstrap_sync_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000ff');
-  finish_result := uptech.finish_google_workspace_bootstrap_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fd');
-  reissue_result := uptech.reissue_google_workspace_bootstrap_status_v1(
-    decode(repeat('fe',32),'hex'), NULL::uptech.google_verified_claims_assertion_v1,
-    decode(repeat('fd',32),'hex'), '92000000-0000-4000-8000-0000000000fc');
-  revoke_result := uptech.revoke_onboarding_capability_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fb');
-  submit_result := uptech.submit_workspace_access_request_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fa');
-  read_result := uptech.read_workspace_access_request_v1(
-    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000f9');
-  IF pg_catalog.to_jsonb(status_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
-     OR pg_catalog.to_jsonb(retry_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
-     OR pg_catalog.to_jsonb(finish_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
-     OR pg_catalog.to_jsonb(reissue_result) IS DISTINCT FROM
-       '{"outcome":"DENIED","status_expires_at":null}'::jsonb
-     OR pg_catalog.to_jsonb(revoke_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
-     OR pg_catalog.to_jsonb(submit_result) IS DISTINCT FROM
-       '{"outcome":"DENIED","request_id":null,"status":null}'::jsonb
-     OR pg_catalog.to_jsonb(read_result) IS DISTINCT FROM
-       '{"outcome":"DENIED","request_id":null,"status":null}'::jsonb
-  THEN
-    RAISE EXCEPTION 'bootstrap status routines do not fail closed without tenant fields';
-  END IF;
-END
-$verify$;
-
--- Catalog/ACL checks above intentionally evaluate the runtime roles' denied
--- privileges. The normalization behavior probe itself is owner-only.
-RESET ROLE;
-SET LOCAL ROLE uptech_migration_owner;
-
 DO $verify$
 DECLARE
   publisher_oid regprocedure :=
@@ -848,55 +819,6 @@ BEGIN
         ::uptech.google_workspace_verified_domain_v1]);
     RAISE EXCEPTION 'invalid alias provenance was accepted';
   EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
-  END;
-END
-$verify$;
-
--- Execute transition guards; a correctly named but faulty trigger must fail here.
-DO $verify$
-BEGIN
-  INSERT INTO uptech.google_workspace_bootstrap_attempts(
-    id,source_onboarding_session_id,identity_id,candidate_workspace_id,
-    candidate_status_hash,completion_deadline
-  ) VALUES (
-    '91000000-0000-0000-0000-000000000001',
-    '90000000-0000-0000-0000-000000000004',
-    '90000000-0000-0000-0000-000000000003',
-    '91000000-0000-0000-0000-000000000002',decode(repeat('91',32),'hex'),
-    statement_timestamp()+interval '5 minutes');
-  BEGIN
-    UPDATE uptech.google_workspace_bootstrap_attempts
-      SET candidate_workspace_id='91000000-0000-0000-0000-000000000003'
-      WHERE id='91000000-0000-0000-0000-000000000001';
-    RAISE EXCEPTION 'attempt binding mutation was accepted';
-  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-  END;
-
-  UPDATE uptech.google_workspace_bootstrap_attempts
-    SET state='ABORTED',aborted_at=statement_timestamp()
-    WHERE id='91000000-0000-0000-0000-000000000001';
-  BEGIN
-    UPDATE uptech.google_workspace_bootstrap_attempts
-      SET state='PREPARED',aborted_at=NULL
-      WHERE id='91000000-0000-0000-0000-000000000001';
-    RAISE EXCEPTION 'aborted attempt was reopened';
-  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-  END;
-  BEGIN
-    DELETE FROM uptech.google_workspace_bootstrap_attempts
-      WHERE id='91000000-0000-0000-0000-000000000001';
-    RAISE EXCEPTION 'retained attempt was deleted';
-  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-  END;
-
-  INSERT INTO uptech.workspace_access_requests(workspace_id,id,identity_id,reason_class)
-    VALUES ('90000000-0000-0000-0000-000000000001','91000000-0000-0000-0000-000000000004',
-      '90000000-0000-0000-0000-000000000003','USER_NOT_PROVISIONED');
-  BEGIN
-    UPDATE uptech.workspace_access_requests SET reason_class='DIRECTORY_STALE'
-      WHERE id='91000000-0000-0000-0000-000000000004';
-    RAISE EXCEPTION 'access-request binding mutation was accepted';
-  EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
   END;
 END
 $verify$;

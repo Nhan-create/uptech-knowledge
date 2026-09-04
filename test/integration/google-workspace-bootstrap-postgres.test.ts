@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test, { before, after } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -100,7 +100,11 @@ async function asMigrationOwner<T>(operation: (client: PoolClient) => Promise<T>
 function databaseUrl(): string {
   const value = process.env.UPTECH_TEST_DATABASE_URL;
   if (!value) throw new Error("UPTECH_TEST_DATABASE_URL is required; PostgreSQL integration tests never skip");
-  const name = decodeURIComponent(new URL(value).pathname.slice(1));
+  const parsed = new URL(value);
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) {
+    throw new Error("refusing non-loopback PostgreSQL for bootstrap integration tests");
+  }
+  const name = decodeURIComponent(parsed.pathname.slice(1));
   if (!name.startsWith(PREFIX)) throw new Error(`refusing non-disposable database: name must start with ${PREFIX}`);
   return value;
 }
@@ -599,6 +603,71 @@ test("revoked, expired, wrong-operation, and inactive bootstrap sources authenti
 
 test("Task 2 standalone verifier passes against the migrated disposable database", async () => {
   await pool.query(await sql("db/verify/google_workspace_tenant_bootstrap.sql"));
+});
+
+test("bootstrap verifier is a bounded production-safe read-only catalog contract", async () => {
+  const verifier = await sql("db/verify/google_workspace_tenant_bootstrap.sql");
+  assert.match(verifier, /BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;/u);
+  assert.match(verifier, /SET LOCAL statement_timeout\s*=/u);
+  assert.match(verifier, /SET LOCAL lock_timeout\s*=/u);
+  assert.match(verifier, /SET LOCAL idle_in_transaction_session_timeout\s*=/u);
+  assert.doesNotMatch(verifier, /^\s*(?:INSERT\s+INTO|UPDATE\s+uptech\.|DELETE\s+FROM)\b/imu);
+  assert.doesNotMatch(verifier, /^\s*SET LOCAL ROLE\b/imu);
+  assert.doesNotMatch(verifier, /^\s*(?:status_result|retry_result|finish_result|reissue_result|revoke_result|submit_result|read_result)\s*:=\s*uptech\./imu);
+  assert.match(verifier, /ROLLBACK;\s*$/u);
+});
+
+test("bootstrap verifier passes on a clean 0001-0009 database with zero application rows", async () => {
+  const source = new URL(databaseUrl());
+  const childName = `${PREFIX}_verifier_${randomUUID().replaceAll("-", "")}`;
+  assert.match(childName, /^uptech_phase1_test_verifier_[a-f0-9]{32}$/u);
+  const adminUrl = new URL(source);
+  adminUrl.pathname = "/postgres";
+  const childUrl = new URL(source);
+  childUrl.pathname = `/${childName}`;
+  const admin = new Pool({ connectionString: adminUrl.toString(), max: 1 });
+  let child: Pool | undefined;
+  try {
+    await admin.query(`CREATE DATABASE ${childName}`);
+    child = new Pool({ connectionString: childUrl.toString(), max: 1 });
+    await child.query("CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner; SET ROLE uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime,uptech_worker_runtime; RESET ROLE");
+    const names = [
+      "phase1_foundation", "google_auth_a1", "initial_owner_bootstrap_a2",
+      "mobile_public_client_auth_a3", "mobile_session_direct_access_boundary_a3",
+      "safe_google_access_states_a4", "enterprise_login", "google_directory_production",
+      "google_workspace_tenant_bootstrap",
+    ];
+    for (let number = 1; number <= 9; number += 1) {
+      await child.query(await sql(`db/migrations/${String(number).padStart(4, "0")}_${names[number - 1]}.sql`));
+    }
+    await child.query(await sql("db/verify/google_workspace_tenant_bootstrap.sql"));
+    const rowCount = await child.query(`SELECT
+      (SELECT count(*)::int FROM uptech.workspaces) AS workspaces,
+      (SELECT count(*)::int FROM uptech.users) AS users,
+      (SELECT count(*)::int FROM uptech.onboarding_sessions) AS onboarding_sessions`);
+    assert.deepEqual(rowCount.rows[0], { workspaces: 0, users: 0, onboarding_sessions: 0 });
+  } finally {
+    await child?.end();
+    await admin.query(`DROP DATABASE IF EXISTS ${childName}`);
+    await admin.end();
+  }
+});
+
+test("bootstrap verifier rejects and survives reversible trigger and ACL drift", async () => {
+  const verifier = await sql("db/verify/google_workspace_tenant_bootstrap.sql");
+  try {
+    await pool.query("ALTER TABLE uptech.google_workspace_bootstrap_attempts DISABLE TRIGGER google_workspace_bootstrap_attempts_transition_guard");
+    await assert.rejects(pool.query(verifier), /enforcement trigger/u);
+  } finally {
+    await pool.query("ALTER TABLE uptech.google_workspace_bootstrap_attempts ENABLE TRIGGER google_workspace_bootstrap_attempts_transition_guard");
+  }
+  try {
+    await pool.query("REVOKE EXECUTE ON FUNCTION uptech.prepare_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uuid,uptech.google_auth_hash32_v1,uuid) FROM uptech_api_runtime");
+    await assert.rejects(pool.query(verifier), /bootstrap entrypoint/u);
+  } finally {
+    await pool.query("GRANT EXECUTE ON FUNCTION uptech.prepare_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uuid,uptech.google_auth_hash32_v1,uuid) TO uptech_api_runtime");
+  }
+  await pool.query(verifier);
 });
 
 test("0009 fails closed legacy access capabilities that have no server reason provenance", async () => {
