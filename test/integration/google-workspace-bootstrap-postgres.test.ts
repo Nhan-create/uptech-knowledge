@@ -3226,12 +3226,12 @@ test("Mobile Directory V2 creates only mapped handoffs and preserves an active O
       environment_name,platform,configuration_key,google_client_id,google_audience,
       callback_uri,app_return_uri,scopes,allowed_azp_configuration_keys,pkce_kms_key_version,
       android_application_id,android_release_cert_sha256,is_enabled
-    ) VALUES ($1,'ANDROID','GOOGLE_MOBILE_ANDROID_V1','mobile-v2.example.apps.googleusercontent.com',
-      'mobile-v2.example.apps.googleusercontent.com',
+    ) VALUES ($1,'ANDROID','GOOGLE_MOBILE_ANDROID_V1','mobile-v2.apps.googleusercontent.com',
+      'mobile-v2.apps.googleusercontent.com',
       'https://uptech-knowledge-sigma.vercel.app/api/v1/auth/mobile/google/callback',
       'https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback',
       ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
-      'mobile-v2-kms','com.example.uptech',repeat('AA:',31)||'AA',true)
+      'mobile-v2-kms','com.uptech.knowledge',repeat('AA:',31)||'AA',true)
     ON CONFLICT (environment_name,platform) DO UPDATE SET is_enabled=true`, [environment]);
     await client.query(`UPDATE uptech.people_sync_generations SET status='PUBLISHED',
       traversal_complete=true,completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '5 minutes'
@@ -3243,9 +3243,9 @@ test("Mobile Directory V2 creates only mapped handoffs and preserves an active O
       workspace_id,generation_id,google_subject,full_name,primary_email,department,lifecycle_state,
       google_is_admin,google_is_delegated_admin,effective_role,effective_department_key
     ) VALUES
-      ($1,$2,'mobile-v2-admin-sub','Mobile Admin','mobile-admin@mapping-a.example',NULL,'ACTIVE',false,false,'ADMIN',NULL),
-      ($1,$2,'mobile-v2-member-sub','Mobile Member','mobile-member@mapping-a.example','sales','ACTIVE',true,true,'MEMBER','SALES'),
-      ($1,$2,'mobile-v2-owner-sub','Mobile Owner','mobile-owner@mapping-a.example',NULL,'ACTIVE',false,false,NULL,NULL)`,
+      ($1,$2,'mobile-v2-admin-sub','Mobile Admin','mobile-admin@${TENANT_A_DOMAIN}',NULL,'ACTIVE',false,false,'ADMIN',NULL),
+      ($1,$2,'mobile-v2-member-sub','Mobile Member','mobile-member@${TENANT_A_DOMAIN}','sales','ACTIVE',true,true,'MEMBER','SALES'),
+      ($1,$2,'mobile-v2-owner-sub','Mobile Owner','mobile-owner@${TENANT_A_DOMAIN}',NULL,'ACTIVE',false,false,NULL,NULL)`,
     [workspaceId, generationId]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject
@@ -3255,7 +3255,7 @@ test("Mobile Directory V2 creates only mapped handoffs and preserves an active O
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,
         email_verified,hosted_domain_claim,claims_observed_at)
       VALUES ($2,$1,'GOOGLE','https://accounts.google.com','mobile-v2-owner-sub',
-        'mobile-owner@mapping-a.example',true,'mapping-a.example',statement_timestamp())`,
+        'mobile-owner@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp())`,
     [ownerUserId, ownerIdentityId]);
     await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status)
       VALUES ($2,$3,$1,'OWNER','ACTIVE')`, [ownerUserId, workspaceId, ownerMembershipId]);
@@ -3290,10 +3290,10 @@ test("Mobile Directory V2 creates only mapped handoffs and preserves an active O
       Buffer.alloc(16, 0xe0 + index), handle]));
     const row = (await asApi((client) => client.query(`SELECT outcome::text,app_return_uri::text,
         denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2(
-          $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+          $1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
             statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
             'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-    [handle, fixture.subject, `${fixture.subject}@mapping-a.example`, nonce, handoff, requestId]))).rows[0];
+    [handle, fixture.subject, `${fixture.subject}@${TENANT_A_DOMAIN}`, nonce, handoff, requestId]))).rows[0];
     if (fixture.manual) await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces
       SET provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1`, [workspaceId]));
     assert.deepEqual(row, { outcome: "NORMAL",
@@ -3333,7 +3333,7 @@ test("Mobile Directory V2 rejects a verified hosted-domain claim with no normali
     await client.query(`INSERT INTO uptech.people_profiles(
       workspace_id,generation_id,google_subject,full_name,primary_email,lifecycle_state,
       effective_role,effective_department_key
-    ) VALUES ($1,$2,$3,'Null Email','null-email@mapping-a.example','ACTIVE','ADMIN',NULL)`,
+    ) VALUES ($1,$2,$3,'Null Email','null-email@${TENANT_A_DOMAIN}','ACTIVE','ADMIN',NULL)`,
     [workspaceId, generationId, subject]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject
@@ -3353,7 +3353,7 @@ test("Mobile Directory V2 rejects a verified hosted-domain claim with no normali
 
   const row = (await asApi((client) => client.query(`SELECT outcome::text,denial_category::text
     FROM uptech.complete_mobile_google_callback_directory_v2(
-      $1,ROW('accounts.google.com',$2,NULL,true,'mapping-a.example',
+      $1,ROW('accounts.google.com',$2,NULL,true,'${TENANT_A_DOMAIN}',
         statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
         'GOOGLE_WEB_LOGIN_V1',NULL,$3)::uptech.google_verified_claims_assertion_v1,$4,$5)`,
   [handle, subject, nonce, handoff, transactionId]))).rows[0];
@@ -3409,10 +3409,10 @@ test("Mobile Directory V2 classifies revoked Directory authority without tenant 
   try {
     const row = (await asApi((client) => client.query(`SELECT outcome::text,app_return_uri::text,
         denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2(
-          $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+          $1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
             statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
             'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-    [handle, subject, `${subject}@mapping-a.example`, nonce, handoff, transactionId]))).rows[0];
+    [handle, subject, `${subject}@${TENANT_A_DOMAIN}`, nonce, handoff, transactionId]))).rows[0];
     assert.deepEqual(row, {
       outcome: "DENIED",
       app_return_uri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
@@ -3469,21 +3469,21 @@ test("Mobile Directory V2 denial categories roll back every core authority sourc
       VALUES ($1,$2,'g-hr','HR') ON CONFLICT DO NOTHING`, [workspaceId, generationId]);
     await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,
       full_name,primary_email,lifecycle_state,effective_role,effective_department_key) VALUES
-      ($1,$2,$3,'Mapped','mapped@mapping-a.example','ACTIVE','MEMBER','SALES'),
-      ($1,$2,$4,'Unmapped','unmapped@mapping-a.example','ACTIVE',NULL,NULL),
-      ($1,$2,$5,'Conflict','conflict-matrix@mapping-a.example','ACTIVE',NULL,NULL),
-      ($1,$2,$6,'Suspended','suspended-matrix@mapping-a.example','SUSPENDED',NULL,NULL),
-      ($1,$2,$7,'Deleted','deleted-matrix@mapping-a.example','DELETED',NULL,NULL),
-      ($1,$2,$8,'Inactive User','inactive-user@mapping-a.example','ACTIVE','MEMBER','SALES'),
-      ($1,$2,$9,'Inactive Identity','inactive-identity@mapping-a.example','ACTIVE','MEMBER','SALES'),
-      ($1,$2,$10,'Suspended Membership','membership-suspended@mapping-a.example','ACTIVE','MEMBER','SALES'),
-      ($1,$2,$11,'Deprovisioned Membership','membership-deprovisioned@mapping-a.example','ACTIVE','MEMBER','SALES')`,
+      ($1,$2,$3,'Mapped','mapped@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$4,'Unmapped','unmapped@${TENANT_A_DOMAIN}','ACTIVE',NULL,NULL),
+      ($1,$2,$5,'Conflict','conflict-matrix@${TENANT_A_DOMAIN}','ACTIVE',NULL,NULL),
+      ($1,$2,$6,'Suspended','suspended-matrix@${TENANT_A_DOMAIN}','SUSPENDED',NULL,NULL),
+      ($1,$2,$7,'Deleted','deleted-matrix@${TENANT_A_DOMAIN}','DELETED',NULL,NULL),
+      ($1,$2,$8,'Inactive User','inactive-user@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$9,'Inactive Identity','inactive-identity@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$10,'Suspended Membership','membership-suspended@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$11,'Deprovisioned Membership','membership-deprovisioned@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES')`,
     [workspaceId, generationId, subjects.mapped, subjects.unmapped, subjects.conflict,
       subjects.suspended, subjects.deleted, subjects.inactiveUser, subjects.inactiveIdentity,
       subjects.suspendedMembership, subjects.deprovisionedMembership]);
     await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,
       full_name,primary_email,lifecycle_state) VALUES
-      ($1,$2,$3,'Prior','prior-matrix@mapping-a.example','ACTIVE')`,
+      ($1,$2,$3,'Prior','prior-matrix@${TENANT_A_DOMAIN}','ACTIVE')`,
     [workspaceId, priorGenerationId, subjects.prior]);
     await client.query(`INSERT INTO uptech.people_group_memberships(
       workspace_id,generation_id,google_group_id,google_subject)
@@ -3498,10 +3498,10 @@ test("Mobile Directory V2 denial categories roll back every core authority sourc
       ('97a00000-0000-4000-8000-000000000003'),('97a00000-0000-4000-8000-000000000004')`);
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
         hosted_domain_claim,claims_observed_at) VALUES
-      ('97a00000-0000-4000-8000-000000000011','97a00000-0000-4000-8000-000000000001','GOOGLE','https://accounts.google.com',$1,$1||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
-      ('97a00000-0000-4000-8000-000000000012','97a00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$2,$2||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
-      ('97a00000-0000-4000-8000-000000000013','97a00000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com',$3,$3||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
-      ('97a00000-0000-4000-8000-000000000014','97a00000-0000-4000-8000-000000000004','GOOGLE','https://accounts.google.com',$4,$4||'@mapping-a.example',true,'mapping-a.example',statement_timestamp())`,
+      ('97a00000-0000-4000-8000-000000000011','97a00000-0000-4000-8000-000000000001','GOOGLE','https://accounts.google.com',$1,$1||'@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000012','97a00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$2,$2||'@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000013','97a00000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com',$3,$3||'@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000014','97a00000-0000-4000-8000-000000000004','GOOGLE','https://accounts.google.com',$4,$4||'@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp())`,
     [subjects.inactiveUser, subjects.inactiveIdentity, subjects.suspendedMembership,
       subjects.deprovisionedMembership]);
     await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status) VALUES
@@ -3569,10 +3569,10 @@ test("Mobile Directory V2 denial categories roll back every core authority sourc
     try {
       const row = (await asApi((client) => client.query(`SELECT outcome::text,denial_category::text
         FROM uptech.complete_mobile_google_callback_directory_v2($1,
-          ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+          ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',statement_timestamp()-interval '5 seconds',
             statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)
             ::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-      [handle,fixture.subject,`${fixture.subject}@mapping-a.example`,nonce,handoff,transactionId]))).rows[0];
+      [handle,fixture.subject,`${fixture.subject}@${TENANT_A_DOMAIN}`,nonce,handoff,transactionId]))).rows[0];
       assert.deepEqual(row,{ outcome:"DENIED",denial_category:fixture.category },fixture.label);
       assert.deepEqual((await pool.query(`SELECT identity_id,user_id,workspace_id,membership_id,
           denial_category::text,extract(epoch FROM expires_at-created_at)::int AS lifetime_seconds
@@ -3631,10 +3631,10 @@ test("Mobile Directory V2 rejects a handoff hash colliding with onboarding autho
 
   const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,
       denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2($1,
-      ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+      ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',statement_timestamp()-interval '5 seconds',
         statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)
         ::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-  [handle,subject,`${subject}@mapping-a.example`,nonce,collided,transactionId]))).rows[0];
+  [handle,subject,`${subject}@${TENANT_A_DOMAIN}`,nonce,collided,transactionId]))).rows[0];
   assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"});
   assert.deepEqual((await pool.query(`SELECT
       (SELECT status::text FROM uptech.mobile_google_transactions WHERE id=$1) AS transaction_status,
@@ -3654,12 +3654,12 @@ test("Mobile Directory V2 denies a stable subject bound only to Tenant B without
   await asMigrationOwner(async (client)=> {
     await client.query(`INSERT INTO uptech.users(id) VALUES ('97d00000-0000-4000-8000-000000000002')`);
     await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
-      VALUES ('97d00000-0000-4000-8000-000000000003','97d00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$1,'member@mapping-b.example',true,'mapping-b.example',statement_timestamp());
+      VALUES ('97d00000-0000-4000-8000-000000000003','97d00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$1,'member@${TENANT_B_DOMAIN}',true,'${TENANT_B_DOMAIN}',statement_timestamp());
     `,[subject]);
     await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status)
       VALUES ($1,'97d00000-0000-4000-8000-000000000004','97d00000-0000-4000-8000-000000000002','MEMBER','ACTIVE')`,[b]);
     await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,primary_email,lifecycle_state,effective_role,effective_department_key)
-      VALUES ($2,$3,$1,'Tenant B only','member@mapping-a.example','ACTIVE','MEMBER','SALES')`,[subject,a,generation]);
+      VALUES ($2,$3,$1,'Tenant B only','member@${TENANT_A_DOMAIN}','ACTIVE','MEMBER','SALES')`,[subject,a,generation]);
     await client.query(`INSERT INTO uptech.people_group_memberships(workspace_id,generation_id,google_group_id,google_subject) VALUES ($2,$3,'g-sales',$1)`,[subject,a,generation]);
     await client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,nonce_hash,installation_binding_hash,
       app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
@@ -3670,9 +3670,9 @@ test("Mobile Directory V2 denies a stable subject bound only to Tenant B without
   const before=(await pool.query(`SELECT to_jsonb(i) AS identity,to_jsonb(m) AS membership FROM uptech.identities i
     JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$2 WHERE i.provider_subject=$1`,[subject,b])).rows[0];
   const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
-    FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+    FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
       statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-  [handle,subject,"member@mapping-a.example",nonce,handoff,tx]))).rows[0];
+  [handle,subject,`member@${TENANT_A_DOMAIN}`,nonce,handoff,tx]))).rows[0];
   assert.deepEqual(row,{outcome:"DENIED",app_return_uri:"https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",denial_category:"AUTH_ERROR"});
   assert.deepEqual((await pool.query(`SELECT to_jsonb(i) AS identity,to_jsonb(m) AS membership FROM uptech.identities i
     JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$2 WHERE i.provider_subject=$1`,[subject,b])).rows[0],before);
@@ -3698,9 +3698,9 @@ test("Mobile Directory V2 replay never creates a second transition or authority"
       (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$1) AS audits`,[f.tx]);
     const before=(await snapshot()).rows[0];
     const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
-      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
         statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-    [f.handle,f.subject,`${f.subject}@mapping-a.example`,f.nonce,f.handoff,f.tx]))).rows[0];
+    [f.handle,f.subject,`${f.subject}@${TENANT_A_DOMAIN}`,f.nonce,f.handoff,f.tx]))).rows[0];
     assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"});
     assert.deepEqual((await snapshot()).rows[0],before);
   }
@@ -3727,9 +3727,9 @@ test("Mobile Directory V2 rejects collisions in handoff, session-token, and CSRF
       (SELECT count(*)::int FROM uptech.session_tokens) AS tokens,(SELECT count(*)::int FROM uptech.onboarding_sessions) AS capabilities`,[subject]);
     const before=(await snapshot()).rows[0];
     const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
-      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',
         statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-    [handle,subject,`${subject}@mapping-a.example`,nonce,collision.value,tx]))).rows[0];
+    [handle,subject,`${subject}@${TENANT_A_DOMAIN}`,nonce,collision.value,tx]))).rows[0];
     assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"},collision.kind);
     assert.deepEqual((await snapshot()).rows[0],before,collision.kind);
     assert.deepEqual((await pool.query(`SELECT status::text,(SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$1) AS added,
@@ -3782,9 +3782,9 @@ test("Mobile handoff TTL starts only after credential-lock contention", async ()
       const pid=(await runner.query<{pid:number}>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
       const pending=fixture.kind==="NORMAL"
         ? runner.query(`SELECT outcome::text FROM uptech.complete_mobile_google_callback_directory_v2($1,
-            ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+            ROW('accounts.google.com',$2,$3,true,'${TENANT_A_DOMAIN}',statement_timestamp()-interval '5 seconds',
               statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
-          [handle,fixture.subject,`${fixture.subject}@mapping-a.example`,nonce,handoff,fixture.tx])
+          [handle,fixture.subject,`${fixture.subject}@${TENANT_A_DOMAIN}`,nonce,handoff,fixture.tx])
         : runner.query(`SELECT outcome::text FROM uptech.complete_mobile_google_denial_v1($1,$2,'IDENTITY_INELIGIBLE','USER_NOT_PROVISIONED',$3)`,
           [handle,handoff,fixture.tx]);
       for(let attempt=0;attempt<100;attempt+=1){
