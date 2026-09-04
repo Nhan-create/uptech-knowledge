@@ -222,7 +222,7 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
     if(!link) return null;
     window.__uptechSupportActivation=0;
     document.addEventListener('click',(event)=>{if(event.target.closest('a')===link){event.preventDefault();window.__uptechSupportActivation+=1;}},{capture:true});
-    return {fixedRecipient:link.getAttribute('href').startsWith('mailto:contact@uptech.vn?'),noReflection:!link.getAttribute('href').includes('evil.example')};
+    return {fixedRecipient:link.getAttribute('href').startsWith('mailto:contact@uptech.vn?'),noReflection:!link.getAttribute('href').includes('tenant-b.example')};
   })()`), { fixedRecipient: true, noReflection: true });
   await click('a[href^="mailto:contact@uptech.vn"]');
   await waitForBrowser("Boolean(document.querySelector('textarea[readonly]'))");
@@ -230,14 +230,14 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
     activation:window.__uptechSupportActivation,
     stayed:location.pathname==='/setup/provisioning',
     fixedFallback:document.querySelector('textarea[readonly]')?.value.split('\\n')[0]==='contact@uptech.vn',
-    noReflection:!document.querySelector('textarea[readonly]')?.value.includes('evil.example')
+    noReflection:!document.querySelector('textarea[readonly]')?.value.includes('tenant-b.example')
   })`), { activation: 1, stayed: true, fixedFallback: true, noReflection: true });
 
   await control.query(`INSERT INTO uptech.people_sync_generations(
     workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,started_at,completed_at,fresh_until,google_customer_id,primary_domain)
     SELECT job.workspace_id,gen_random_uuid(),job.connector_id,job.id,gen_random_uuid(),'PUBLISHED',true,
       statement_timestamp()-interval '1 minute',statement_timestamp(),statement_timestamp()+interval '1 hour',
-      'browser-bootstrap-customer','browser.test' FROM uptech.sync_jobs job
+      'browser-bootstrap-customer','tenant-a.example' FROM uptech.sync_jobs job
     WHERE job.workspace_id=$1 AND job.job_kind='DIRECTORY_SYNC'`, [bootstrapWorkspaceId]);
   await navigate("/setup/provisioning", "provisioning-ready");
   assert.equal(await evaluate("Boolean(document.querySelector('form[action=\"/api/v1/onboarding/google-workspace/finish\"]'))"), true);
@@ -290,7 +290,7 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
   await waitForBrowser("location.pathname === '/help/enterprise-login'");
   assert.equal(helpResponses.includes(200), true);
   assert.equal(await evaluate("location.pathname"), "/help/enterprise-login");
-  assert.equal(await evaluate("document.body.innerText.includes('evil.example')"), false);
+  assert.equal(await evaluate("document.body.innerText.includes('tenant-b.example')"), false);
 
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
     source: "Object.defineProperty(navigator,'clipboard',{configurable:true,value:undefined});",
@@ -304,8 +304,8 @@ test("real Chromium hydrates recovery actions, fixed help, and stale-session rep
   assert.equal(await evaluate("document.querySelector('textarea[readonly]')?.value.includes('contact@uptech.vn')"), true);
 
   for (const path of ["/help/enterprise-login", "/help/google-workspace/domain-verification"]) {
-    await navigate(`${path}?domain=evil.example&returnUrl=https%3A%2F%2Fevil.example%2Ftakeover`);
-    assert.equal(await evaluate("document.querySelector('main').innerText.includes('evil.example')"), false);
+    await navigate(`${path}?domain=tenant-b.example&returnUrl=${encodeURIComponent("https://tenant-b.example/takeover")}`);
+    assert.equal(await evaluate("document.querySelector('main').innerText.includes('tenant-b.example')"), false);
     const hrefs = await evaluate("Array.from(document.querySelectorAll('main a')).map(a=>a.getAttribute('href')).sort()");
     assert.deepEqual(hrefs, path.includes("domain-verification")
       ? ["/login", "https://admin.google.com/ac/domains/manage"]

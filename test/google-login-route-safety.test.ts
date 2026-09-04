@@ -267,7 +267,7 @@ test("transaction rejects an unapproved form field before initiating OIDC", asyn
         ...trustedHeaders,
         "content-type": "application/x-www-form-urlencoded",
       },
-      body: "intent=LOGIN&returnUrl=https%3A%2F%2Fattacker.example",
+      body: new URLSearchParams({ intent: "LOGIN", returnUrl: "https://tenant-b.example" }).toString(),
     },
   ));
 
@@ -402,7 +402,7 @@ test("transaction denies every stale Web replay lookalike for LOGIN and SWITCH_A
   const hostileEnvelopes = [
     {
       label: "wrong request host",
-      url: "https://attacker.example/api/v1/auth/google/transactions",
+      url: "https://tenant-b.example/api/v1/auth/google/transactions",
       origin: appOrigin,
       fetchSite: "same-origin",
     },
@@ -501,7 +501,7 @@ test("transaction clears only a non-current Web cookie with a same-origin 307 th
         headers: {
           ...trustedHeaders,
           cookie: `__Host-uptech_session=${session}`,
-          origin: "https://attacker.example",
+          origin: "https://tenant-b.example",
           "sec-fetch-site": "same-origin",
           "content-type": "application/x-www-form-urlencoded",
         },
@@ -617,7 +617,7 @@ test("transaction rejects malformed SWITCH_ACCOUNT authority requests before ini
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${issueOpaqueProof()}`, headers: {} },
       { body: `csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&intent=SWITCH_ACCOUNT`, headers: {} },
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: {} },
-      { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { origin: "https://attacker.example" } },
+      { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { origin: "https://tenant-b.example" } },
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { "sec-fetch-site": "same-site" } },
     ]) {
       initiateCalls = 0;
@@ -877,7 +877,7 @@ for (const route of ["/admin", "/home"] as const) {
     callbackResult = { outcome: "NORMAL", sessionCredential, route };
 
     const response = await callbackRoute.GET(
-      new Request(`${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state&route=https://attacker.example`, {
+      new Request(`${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state&route=https://tenant-b.example`, {
         headers: {
           ...trustedHeaders,
           cookie: "__Host-uptech_login_tx=transaction; __Host-uptech_session=stale; __Host-uptech_onboarding=stale; __Host-uptech_workspace_setup_tx=stale",
@@ -952,7 +952,7 @@ test("callback fails closed when a runtime result supplies an attacker route or 
   callbackResult = {
     outcome: "NORMAL",
     sessionCredential: issueSessionCredential().raw_token,
-    route: "https://attacker.example/admin",
+    route: "https://tenant-b.example/admin",
   };
   const routeResponse = await callbackRoute.GET(new Request(
     `${appOrigin}/api/v1/auth/google/callback?code=provider-code&state=opaque-state`,
@@ -974,7 +974,7 @@ test("callback service failures after runtime load retain the configured login o
   callbackResult = new Error("provider callback failed");
 
   const response = await callbackRoute.GET(new Request(
-    "https://attacker.example/api/v1/auth/google/callback?code=provider-code&state=opaque-state",
+    "https://tenant-b.example/api/v1/auth/google/callback?code=provider-code&state=opaque-state",
     { headers: trustedHeaders },
   ));
 

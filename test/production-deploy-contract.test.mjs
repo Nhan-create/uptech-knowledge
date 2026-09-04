@@ -355,7 +355,7 @@ test("requires exact Google Cloud Directory workload identity metadata", async (
     { UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: '{"type":"service_account"}' },
     { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "service-account-key.json" },
     { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "../service-account.json" },
-    { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: '{"client_email":"directory@example.com"}' },
+    { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: '{"client_email":"directory@tenant-b.example"}' },
   ]) {
     const fixtureRoot = await createValidProductionFixture();
     const result = runGuard(fixtureRoot, overrides);
@@ -597,7 +597,7 @@ test("browser harness rejects a remote database before any acceptance work", () 
   const result = spawnSync(process.execPath, [browserHarnessPath], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: { ...process.env, UPTECH_TEST_DATABASE_URL: "postgresql://test-user:test-password@db.example/uptech_phase1_test_remote" },
+    env: { ...process.env, UPTECH_TEST_DATABASE_URL: "postgresql://test-user:test-password@tenant-a.example/uptech_phase1_test_remote" },
   });
   assert.notEqual(result.status, 0);
   assert.match(`${result.stdout}\n${result.stderr}`, /refusing a non-loopback test database/);

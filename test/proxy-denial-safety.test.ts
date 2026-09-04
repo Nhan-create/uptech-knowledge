@@ -14,7 +14,7 @@ const { proxy } = await import("../src/proxy.ts");
 
 test("generic proxy denial suppresses referrers for suffixed bootstrap ingress", () => {
   const response = proxy({
-    nextUrl: new URL("https://knowledge.uptech.example/api/v1/onboarding/google-workspace/transactions/suffix"),
+    nextUrl: new URL("https://tenant-a.example/api/v1/onboarding/google-workspace/transactions/suffix"),
     method: "POST",
     headers: new Headers(),
   } as never);

@@ -241,14 +241,14 @@ test("only a valid request ID is displayed on the login error state", async (con
 
 test("login never reflects or trusts browser-supplied account, domain, action, or return URL", async (context) => {
   const html = await loginHtml(
-    "/login?error=login_failed&account=person@unknown.example&domain=evil.example&action=START_ORGANIZATION_SETUP&returnUrl=https%3A%2F%2Fevil.example%2Ftakeover",
+    `/login?error=login_failed&account=person@unknown.example&domain=tenant-b.example&action=START_ORGANIZATION_SETUP&returnUrl=${encodeURIComponent("https://tenant-b.example/takeover")}`,
     context,
   );
   if (html === undefined) return;
 
   const main = renderedMain(html);
   assert.doesNotMatch(main, /person@unknown\.example/);
-  assert.doesNotMatch(main, /evil\.example|START_ORGANIZATION_SETUP|takeover/);
+  assert.doesNotMatch(main, /tenant-b\.example|START_ORGANIZATION_SETUP|takeover/);
   assertNativeIntentForm(main, "LOGIN");
 });
 

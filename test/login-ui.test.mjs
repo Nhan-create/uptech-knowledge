@@ -155,14 +155,14 @@ test("help pages localize only from the locale cookie and ignore hostile queries
       ["uptech-locale=en", entry.en, entry.vi],
       ["uptech-locale=unsafe", entry.vi, entry.en],
     ]) {
-      const response = await fetch(new URL(`${entry.path}?domain=evil.example&returnUrl=https%3A%2F%2Fevil.example%2Ftakeover`, baseUrl), {
+      const response = await fetch(new URL(`${entry.path}?domain=tenant-b.example&returnUrl=${encodeURIComponent("https://tenant-b.example/takeover")}`, baseUrl), {
         headers: { cookie },
       });
       assert.equal(response.status, 200);
       const main = mainMarkup(await response.text());
       assert.match(main, new RegExp(expected));
       assert.doesNotMatch(main, new RegExp(rejected));
-      assert.doesNotMatch(main, /evil\.example|takeover/);
+      assert.doesNotMatch(main, /tenant-b\.example|takeover/);
       assert.deepEqual(
         [...main.matchAll(/<a\b[^>]*href="([^"]+)"/gu)].map((match) => match[1]).sort(),
         [...entry.hrefs].sort(),

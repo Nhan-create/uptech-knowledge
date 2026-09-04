@@ -30,7 +30,7 @@ const session = {
 
 test("session bootstrap denies a stale ADMIN before exposing role or CSRF", async () => {
   const GET = createWebSessionBootstrapGet({
-    loadConfig: () => ({ appOrigin: "https://app.example", databaseUrl: "postgresql://runtime@tenant-a.example/test", sessionPepper: new Uint8Array(32) }),
+    loadConfig: () => ({ appOrigin: "https://tenant-a.example", databaseUrl: "postgresql://runtime@tenant-a.example/test", sessionPepper: new Uint8Array(32) }),
     getPool: () => ({}) as never,
     authenticate: async () => session,
     requireDirectoryAuthority: async () => false,
@@ -38,7 +38,7 @@ test("session bootstrap denies a stale ADMIN before exposing role or CSRF", asyn
     log: () => {},
   });
 
-  const response = await GET(new Request("https://app.example/api/v1/auth/session", {
+  const response = await GET(new Request("https://tenant-a.example/api/v1/auth/session", {
     headers: { cookie: "__Host-uptech_session=value" },
   }));
 
@@ -50,7 +50,7 @@ test("session bootstrap denies a stale ADMIN before exposing role or CSRF", asyn
 
 test("session bootstrap preserves OWNER access only with current Directory bootstrap authority", async () => {
   const GET = createWebSessionBootstrapGet({
-    loadConfig: () => ({ appOrigin: "https://app.example", databaseUrl: "postgresql://runtime@tenant-a.example/test", sessionPepper: new Uint8Array(32) }),
+    loadConfig: () => ({ appOrigin: "https://tenant-a.example", databaseUrl: "postgresql://runtime@tenant-a.example/test", sessionPepper: new Uint8Array(32) }),
     getPool: () => ({}) as never,
     authenticate: async () => ({ ...session, context: { ...session.context, workspaceRole: "OWNER" as const } }),
     requireDirectoryAuthority: async () => true,
@@ -58,7 +58,7 @@ test("session bootstrap preserves OWNER access only with current Directory boots
     log: () => {},
   });
 
-  const response = await GET(new Request("https://app.example/api/v1/auth/session", {
+  const response = await GET(new Request("https://tenant-a.example/api/v1/auth/session", {
     headers: { cookie: "__Host-uptech_session=value" },
   }));
 
