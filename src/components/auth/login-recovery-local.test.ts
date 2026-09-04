@@ -31,10 +31,29 @@ test("bounded response JSON accepts normal and exact-bound UTF-8 streams", async
     },
   }));
   assert.deepEqual(await readBoundedRecoveryJson(normal), { state: "READY" });
+  assert.equal(normal.body?.locked, false);
 
   const exactText = `"${"a".repeat(MAX_RECOVERY_JSON_CHARS - 2)}"`;
   assert.equal(new TextEncoder().encode(exactText).byteLength, MAX_RECOVERY_JSON_CHARS);
-  assert.equal(await readBoundedRecoveryJson(new Response(exactText)), "a".repeat(MAX_RECOVERY_JSON_CHARS - 2));
+  const exact = new Response(exactText);
+  assert.equal(await readBoundedRecoveryJson(exact), "a".repeat(MAX_RECOVERY_JSON_CHARS - 2));
+  assert.equal(exact.body?.locked, false);
+});
+
+test("bounded response JSON cancels an oversized single chunk and releases its reader", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(MAX_RECOVERY_JSON_CHARS + 1));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }));
+
+  assert.equal(await readBoundedRecoveryJson(response), null);
+  assert.equal(cancelled, true);
+  assert.equal(response.body?.locked, false);
 });
 
 test("bounded response JSON cancels a multi-chunk stream as soon as it crosses the byte ceiling", async () => {
@@ -51,6 +70,19 @@ test("bounded response JSON cancels a multi-chunk stream as soon as it crosses t
 
   assert.equal(await readBoundedRecoveryJson(response), null);
   assert.equal(cancelled, true);
+  assert.equal(response.body?.locked, false);
+});
+
+test("bounded response JSON rejects malformed UTF-8 within the byte ceiling and releases its reader", async () => {
+  const malformedUtf8 = new Response(new Uint8Array([0x22, 0x80, 0x22]));
+  assert.equal(await readBoundedRecoveryJson(malformedUtf8), null);
+  assert.equal(malformedUtf8.body?.locked, false);
+});
+
+test("bounded response JSON rejects invalid JSON within the byte ceiling and releases its reader", async () => {
+  const invalidJson = new Response("not-json");
+  assert.equal(await readBoundedRecoveryJson(invalidJson), null);
+  assert.equal(invalidJson.body?.locked, false);
 });
 
 test("bounded response JSON fails closed for a missing or errored stream", async () => {
@@ -61,6 +93,7 @@ test("bounded response JSON fails closed for a missing or errored stream", async
     },
   }));
   assert.equal(await readBoundedRecoveryJson(errored), null);
+  assert.equal(errored.body?.locked, false);
 });
 
 test("fixed clipboard templates are localized and include only a canonical request UUID", () => {
