@@ -39,25 +39,23 @@ export type GoogleLoginAccessState =
   | "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE"
   | "WORKSPACE_SUSPENDED";
 
-type FirstDomainClaimOperation =
-  | "FIRST_DOMAIN_CLAIM_READ"
-  | "FIRST_DOMAIN_CLAIM_RESERVE"
-  | "FIRST_DOMAIN_CLAIM_COMPLETE";
+type FirstDomainClaimOperations = readonly [
+  "FIRST_DOMAIN_CLAIM_READ",
+  "FIRST_DOMAIN_CLAIM_RESERVE",
+  "FIRST_DOMAIN_CLAIM_COMPLETE",
+];
 
-type AccessRequestOperation =
-  | "ACCESS_REQUEST_READ"
-  | "ACCESS_REQUEST_SUBMIT";
+type AccessRequestOperations = readonly [
+  "ACCESS_REQUEST_READ",
+  "ACCESS_REQUEST_SUBMIT",
+];
 
 export type GoogleLoginCompletionResult =
   | { readonly outcome: "NORMAL"; readonly route: "/admin" | "/home" }
   | {
       readonly outcome: "ONBOARDING";
       readonly accessState: "UNKNOWN_WORKSPACE";
-      readonly allowedOperations: readonly [
-        FirstDomainClaimOperation,
-        FirstDomainClaimOperation,
-        FirstDomainClaimOperation,
-      ];
+      readonly allowedOperations: FirstDomainClaimOperations;
       readonly expiresAt: Date;
     }
   | {
@@ -66,10 +64,7 @@ export type GoogleLoginCompletionResult =
         | "USER_NOT_PROVISIONED"
         | "ACCESS_MAPPING_CONFLICT"
         | "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE";
-      readonly allowedOperations: readonly [
-        AccessRequestOperation,
-        AccessRequestOperation,
-      ];
+      readonly allowedOperations: AccessRequestOperations;
       readonly expiresAt: Date;
     }
   | {

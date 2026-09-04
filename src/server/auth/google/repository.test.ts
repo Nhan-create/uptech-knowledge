@@ -12,7 +12,38 @@ import {
   type CompleteGoogleLoginInput,
   type ConsumeGoogleLoginInput,
   type GoogleLoginAccessState,
+  type GoogleLoginCompletionResult,
 } from "./repository.ts";
+
+type Equal<Actual, Expected> =
+  (<Value>() => Value extends Actual ? 1 : 2) extends
+  (<Value>() => Value extends Expected ? 1 : 2) ? true : false;
+type Assert<Type extends true> = Type;
+type UnknownWorkspaceCompletion = Extract<
+  GoogleLoginCompletionResult,
+  { readonly outcome: "ONBOARDING"; readonly accessState: "UNKNOWN_WORKSPACE" }
+>;
+type AccessRequestCompletion = Extract<
+  GoogleLoginCompletionResult,
+  {
+    readonly allowedOperations: readonly [
+      "ACCESS_REQUEST_READ",
+      "ACCESS_REQUEST_SUBMIT",
+    ];
+  }
+>;
+type _UnknownWorkspaceOperationsAreAnExactTuple = Assert<Equal<
+  UnknownWorkspaceCompletion["allowedOperations"],
+  readonly [
+    "FIRST_DOMAIN_CLAIM_READ",
+    "FIRST_DOMAIN_CLAIM_RESERVE",
+    "FIRST_DOMAIN_CLAIM_COMPLETE",
+  ]
+>>;
+type _AccessRequestOperationsAreAnExactTuple = Assert<Equal<
+  AccessRequestCompletion["allowedOperations"],
+  readonly ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"]
+>>;
 
 const REQUEST_ID = "00000000-0000-4000-8000-000000000011";
 
