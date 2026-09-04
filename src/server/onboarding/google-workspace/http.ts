@@ -177,9 +177,11 @@ function approvedAuthorizationUrl(value: URL): boolean {
     value.hash === "";
 }
 
-function exactCsrf(headers: Headers, onboardingCredential: string, pepper: Uint8Array): boolean {
-  if (headers.get("sec-fetch-site") !== "same-origin") return false;
-  const supplied = headers.get("x-csrf-token");
+export function exactCsrfCredential(
+  supplied: string | null,
+  onboardingCredential: string,
+  pepper: Uint8Array,
+): boolean {
   if (supplied === null || !isCanonicalProof(supplied)) return false;
   try {
     const expected = deriveCsrfCredential(onboardingCredential, pepper);
@@ -187,6 +189,11 @@ function exactCsrf(headers: Headers, onboardingCredential: string, pepper: Uint8
   } catch {
     return false;
   }
+}
+
+function exactCsrf(headers: Headers, onboardingCredential: string, pepper: Uint8Array): boolean {
+  return headers.get("sec-fetch-site") === "same-origin" &&
+    exactCsrfCredential(headers.get("x-csrf-token"), onboardingCredential, pepper);
 }
 
 function validCallbackSearch(search: string): boolean {

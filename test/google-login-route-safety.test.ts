@@ -10,6 +10,8 @@ const requestId = "00000000-0000-4000-8000-000000000092";
 const appOrigin = "https://tenant-a.example";
 
 let initiateResult: unknown = { outcome: "DENIED" };
+let initiateCalls = 0;
+let onboardingSessionResult: unknown = null;
 let callbackResult: unknown = { outcome: "DENIED" };
 let runtimeCreationError: Error | null = null;
 let webSessionResult: unknown = new WebSessionAuthenticationError("stale");
@@ -117,9 +119,44 @@ mock.module("@/server/auth/google/runtime", {
     createGoogleLoginRuntime() {
       if (runtimeCreationError !== null) throw runtimeCreationError;
       return {
-        config: { appOrigin, databaseUrl: "postgresql://runtime@unknown.example/test" },
+        config: {
+          appOrigin,
+          databaseUrl: "postgresql://runtime@unknown.example/test",
+          sessionPepper: bootstrapPepper,
+        },
+        pool: {
+          async query() {
+            const onboarding = onboardingSessionResult as {
+              readonly allowedOperations?: readonly string[];
+              readonly contextExpiresAt?: Date;
+            } | null;
+            if (onboarding?.allowedOperations === undefined || onboarding.contextExpiresAt === undefined) {
+              return { rows: [], rowCount: 0 };
+            }
+            return {
+              rows: [{
+                context_kind: "ONBOARDING",
+                workspace_id: null,
+                membership_id: null,
+                session_id: null,
+                client_type: null,
+                workspace_role: null,
+                workspace_security_version: null,
+                membership_authz_version: null,
+                session_security_version: null,
+                csrf_token_hash: null,
+                identity_id: "identity",
+                user_id: "actor",
+                allowed_operations: onboarding.allowedOperations,
+                context_expires_at: onboarding.contextExpiresAt,
+              }],
+              rowCount: 1,
+            };
+          },
+        },
         service: {
           async initiate() {
+            initiateCalls += 1;
             if (initiateResult instanceof Error) throw initiateResult;
             return initiateResult;
           },
@@ -200,6 +237,206 @@ function hasCookieClear(response: Response, name: string): boolean {
 
 test.before(() => {
   process.env.VERCEL = "1";
+});
+
+test("transaction rejects an unapproved form field before initiating OIDC", async () => {
+  initiateCalls = 0;
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+
+  const response = await transactionRoute.POST(new Request(
+    `${appOrigin}/api/v1/auth/google/transactions`,
+    {
+      method: "POST",
+      headers: {
+        ...trustedHeaders,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "intent=LOGIN&returnUrl=https%3A%2F%2Fattacker.example",
+    },
+  ));
+
+  loginLocation(response, "login_failed");
+  assert.equal(initiateCalls, 0);
+  assert.equal(response.headers.getSetCookie().length, 0);
+});
+
+test("transaction accepts the empty, LOGIN, and SWITCH_ACCOUNT intents without browser authority", async () => {
+  initiateCalls = 0;
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+
+  for (const init of [
+    {} as RequestInit,
+    { headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN" },
+    { headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" }, body: "intent=SWITCH_ACCOUNT" },
+  ]) {
+    const response = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      { method: "POST", headers: trustedHeaders, ...init },
+    ));
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
+    assert.match(response.headers.getSetCookie().at(-1) ?? "", /^__Host-uptech_login_tx=/u);
+  }
+  assert.equal(initiateCalls, 3);
+});
+
+test("transaction preserves an active Web session and denies every login intent", async () => {
+  initiateCalls = 0;
+  webSessionResult = {};
+  const session = issueSessionCredential().raw_token;
+  try {
+    for (const body of ["intent=LOGIN", "intent=SWITCH_ACCOUNT"]) {
+      const response = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            cookie: `__Host-uptech_session=${session}`,
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body,
+        },
+      ));
+      loginLocation(response, "active_authority");
+      assert.equal(response.headers.getSetCookie().length, 0);
+    }
+    assert.equal(initiateCalls, 0);
+  } finally {
+    webSessionResult = new WebSessionAuthenticationError("stale");
+  }
+});
+
+test("transaction preserves active onboarding for LOGIN and only switches with exact same-origin CSRF", async () => {
+  initiateCalls = 0;
+  const onboarding = issueOpaqueProof();
+  onboardingSessionResult = {
+    kind: "onboarding",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    contextExpiresAt: new Date(Date.now() + 60_000),
+  };
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+  try {
+    const login = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      {
+        method: "POST",
+        headers: {
+          ...trustedHeaders,
+          cookie: `__Host-uptech_onboarding=${onboarding}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "intent=LOGIN",
+      },
+    ));
+    loginLocation(login, "access_required");
+    assert.equal(login.headers.getSetCookie().length, 0);
+
+    const response = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      {
+        method: "POST",
+        headers: {
+          ...trustedHeaders,
+          cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
+          origin: appOrigin,
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`,
+      },
+    ));
+    assert.equal(response.status, 303);
+    assert.deepEqual(response.headers.getSetCookie().map((cookie) => cookie.split("=", 1)[0]), [
+      "__Host-uptech_onboarding",
+      "__Host-uptech_workspace_setup_tx",
+      "__Host-uptech_login_tx",
+    ]);
+    assert.equal(initiateCalls, 1);
+  } finally {
+    onboardingSessionResult = null;
+  }
+});
+
+test("transaction rejects malformed SWITCH_ACCOUNT authority requests before initiating", async () => {
+  const onboarding = issueOpaqueProof();
+  onboardingSessionResult = {
+    kind: "onboarding",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    contextExpiresAt: new Date(Date.now() + 60_000),
+  };
+  try {
+    for (const input of [
+      { body: "intent=SWITCH_ACCOUNT", headers: {} },
+      { body: "intent=SWITCH_ACCOUNT&csrf_token=wrong", headers: {} },
+      { body: `csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&intent=SWITCH_ACCOUNT`, headers: {} },
+      { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: {} },
+      { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { origin: "https://attacker.example" } },
+      { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { "sec-fetch-site": "same-site" } },
+    ]) {
+      initiateCalls = 0;
+      const response = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            cookie: `__Host-uptech_onboarding=${onboarding}`,
+            origin: appOrigin,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+            ...input.headers,
+          },
+          body: input.body,
+        },
+      ));
+      loginLocation(response, "login_failed");
+      assert.equal(response.headers.getSetCookie().length, 0);
+      assert.equal(initiateCalls, 0);
+    }
+  } finally {
+    onboardingSessionResult = null;
+  }
+});
+
+test("transaction clears inspected stale authority before setup and login transaction cookies", async () => {
+  initiateCalls = 0;
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+  const response = await transactionRoute.POST(new Request(
+    `${appOrigin}/api/v1/auth/google/transactions`,
+    {
+      method: "POST",
+      headers: {
+        ...trustedHeaders,
+        cookie: "__Host-uptech_session=malformed; __Host-uptech_onboarding=malformed; __Host-uptech_workspace_setup_tx=stale",
+      },
+    },
+  ));
+
+  assert.equal(response.status, 303);
+  assert.deepEqual(response.headers.getSetCookie().map((cookie) => cookie.split("=", 1)[0]), [
+    "__Host-uptech_session",
+    "__Host-uptech_onboarding",
+    "__Host-uptech_workspace_setup_tx",
+    "__Host-uptech_login_tx",
+  ]);
+  assert.equal(initiateCalls, 1);
 });
 
 for (const scenario of [
@@ -504,6 +741,7 @@ test("session bootstrap treats an integrity failure as stale authority instead o
     code: "UNAUTHENTICATED",
     detail: "Authentication is required.",
     request_id: requestId,
+    recovery_actions: ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"],
   });
 });
 
