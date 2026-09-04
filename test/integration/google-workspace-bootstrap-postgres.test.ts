@@ -3041,3 +3041,228 @@ test("Mobile Directory V2 rejects a verified hosted-domain claim with no normali
     success_audits: 0, transaction_status: "REJECTED",
   });
 });
+
+test("Mobile Directory V2 classifies revoked Directory authority without tenant authority", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const connectorId = "97400000-0000-4000-8000-000000000010";
+  const transactionId = "97900000-0000-4000-8000-000000000030";
+  const subject = "mobile-v2-member-sub";
+  const digest = (label: string) => createHash("sha256").update(`mobile-denial:${label}`).digest();
+  const handle = digest("handle");
+  const nonce = digest("nonce");
+  const handoff = digest("handoff");
+  const install = digest("install");
+  const challenge = digest("challenge");
+  const environment = await ensureActiveGoogleEnvironment();
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.workspaces SET status='ACTIVE',
+      provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1`, [workspaceId]);
+    await client.query(`UPDATE uptech.connectors SET status='REVOKED'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, connectorId]);
+    await client.query(`INSERT INTO uptech.mobile_google_transactions(
+      id,environment_name,platform,configuration_key,state_hash,nonce_hash,installation_binding_hash,
+      app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at
+    ) VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,
+      ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('mobile-denial','UTF8'),'EXCHANGE_RESERVED',$10,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [transactionId, environment, digest("state"), nonce, install, challenge,
+      Buffer.alloc(12, 0xa1), Buffer.alloc(48, 0xa2), Buffer.alloc(16, 0xa3), handle]);
+  });
+
+  try {
+    const row = (await asApi((client) => client.query(`SELECT outcome::text,app_return_uri::text,
+        denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2(
+          $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+            statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+            'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+    [handle, subject, `${subject}@mapping-a.example`, nonce, handoff, transactionId]))).rows[0];
+    assert.deepEqual(row, {
+      outcome: "DENIED",
+      app_return_uri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+      denial_category: "POLICY_OR_DEVICE_BLOCKED",
+    });
+    assert.deepEqual((await pool.query(`SELECT identity_id,user_id,workspace_id,membership_id,
+        denial_category::text,extract(epoch FROM expires_at-created_at)::int AS lifetime_seconds
+      FROM uptech.mobile_handoffs WHERE handoff_hash=$1`, [handoff])).rows[0], {
+      identity_id: null, user_id: null, workspace_id: null, membership_id: null,
+      denial_category: "POLICY_OR_DEVICE_BLOCKED", lifetime_seconds: 60,
+    });
+    const exchanged = (await asApi((client) => client.query(`SELECT outcome::text,
+        denial_category::text FROM uptech.exchange_mobile_handoff_v2($1,$2,$3,$4,$5,$6,$7)`,
+    [digest("network"), handoff, challenge, install, digest("access"), digest("refresh"),
+      "97900000-0000-4000-8000-000000000031"]))).rows[0];
+    assert.deepEqual(exchanged, {
+      outcome: "ACCESS_DENIED", denial_category: "POLICY_OR_DEVICE_BLOCKED",
+    });
+    assert.deepEqual((await pool.query(`SELECT count(*)::int AS count,
+        bool_and(metadata->>'denial_category'='POLICY_OR_DEVICE_BLOCKED') AS exact_category,
+        bool_and(metadata::text !~* '(token|credential|secret|hash)') AS redacted
+      FROM uptech.platform_audit_events WHERE request_id=$1
+        AND action='MOBILE_GOOGLE_CALLBACK_REJECTED'`, [transactionId])).rows[0], {
+      count: 1, exact_category: true, redacted: true,
+    });
+  } finally {
+    await asMigrationOwner((client) => client.query(`UPDATE uptech.connectors SET status='ACTIVE'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, connectorId]));
+  }
+});
+
+test("Mobile Directory V2 denial categories roll back every core authority source", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97800000-0000-4000-8000-000000000002";
+  const priorGenerationId = "97400000-0000-4000-8000-000000000021";
+  const environment = await ensureActiveGoogleEnvironment();
+  const digest = (label: string) => createHash("sha256").update(`mobile-matrix:${label}`).digest();
+  const subjects = {
+    mapped: "mobile-matrix-mapped", unmapped: "mobile-matrix-unmapped",
+    conflict: "mobile-matrix-conflict", suspended: "mobile-matrix-suspended",
+    deleted: "mobile-matrix-deleted", prior: "mobile-matrix-prior",
+    inactiveUser: "mobile-matrix-inactive-user", inactiveIdentity: "mobile-matrix-inactive-identity",
+    suspendedMembership: "mobile-matrix-membership-suspended",
+    deprovisionedMembership: "mobile-matrix-membership-deprovisioned",
+  } as const;
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.workspaces SET status='ACTIVE',
+      provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1`, [workspaceId]);
+    await client.query(`UPDATE uptech.people_sync_generations SET status='PUBLISHED',
+      traversal_complete=true,completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_groups(workspace_id,generation_id,google_group_id,group_name)
+      VALUES ($1,$2,'g-hr','HR') ON CONFLICT DO NOTHING`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,
+      full_name,primary_email,lifecycle_state,effective_role,effective_department_key) VALUES
+      ($1,$2,$3,'Mapped','mapped@mapping-a.example','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$4,'Unmapped','unmapped@mapping-a.example','ACTIVE',NULL,NULL),
+      ($1,$2,$5,'Conflict','conflict-matrix@mapping-a.example','ACTIVE',NULL,NULL),
+      ($1,$2,$6,'Suspended','suspended-matrix@mapping-a.example','SUSPENDED',NULL,NULL),
+      ($1,$2,$7,'Deleted','deleted-matrix@mapping-a.example','DELETED',NULL,NULL),
+      ($1,$2,$8,'Inactive User','inactive-user@mapping-a.example','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$9,'Inactive Identity','inactive-identity@mapping-a.example','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$10,'Suspended Membership','membership-suspended@mapping-a.example','ACTIVE','MEMBER','SALES'),
+      ($1,$2,$11,'Deprovisioned Membership','membership-deprovisioned@mapping-a.example','ACTIVE','MEMBER','SALES')`,
+    [workspaceId, generationId, subjects.mapped, subjects.unmapped, subjects.conflict,
+      subjects.suspended, subjects.deleted, subjects.inactiveUser, subjects.inactiveIdentity,
+      subjects.suspendedMembership, subjects.deprovisionedMembership]);
+    await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,
+      full_name,primary_email,lifecycle_state) VALUES
+      ($1,$2,$3,'Prior','prior-matrix@mapping-a.example','ACTIVE')`,
+    [workspaceId, priorGenerationId, subjects.prior]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject)
+      SELECT $1,$2,'g-sales',subject FROM unnest($3::text[]) AS subject`,
+    [workspaceId, generationId, [subjects.mapped, subjects.conflict, subjects.inactiveUser,
+      subjects.inactiveIdentity, subjects.suspendedMembership, subjects.deprovisionedMembership]]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject) VALUES ($1,$2,'g-hr',$3)`,
+    [workspaceId, generationId, subjects.conflict]);
+    await client.query(`INSERT INTO uptech.users(id) VALUES
+      ('97a00000-0000-4000-8000-000000000001'),('97a00000-0000-4000-8000-000000000002'),
+      ('97a00000-0000-4000-8000-000000000003'),('97a00000-0000-4000-8000-000000000004')`);
+    await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
+        hosted_domain_claim,claims_observed_at) VALUES
+      ('97a00000-0000-4000-8000-000000000011','97a00000-0000-4000-8000-000000000001','GOOGLE','https://accounts.google.com',$1,$1||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000012','97a00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$2,$2||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000013','97a00000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com',$3,$3||'@mapping-a.example',true,'mapping-a.example',statement_timestamp()),
+      ('97a00000-0000-4000-8000-000000000014','97a00000-0000-4000-8000-000000000004','GOOGLE','https://accounts.google.com',$4,$4||'@mapping-a.example',true,'mapping-a.example',statement_timestamp())`,
+    [subjects.inactiveUser, subjects.inactiveIdentity, subjects.suspendedMembership,
+      subjects.deprovisionedMembership]);
+    await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status) VALUES
+      ($1,'97a00000-0000-4000-8000-000000000021','97a00000-0000-4000-8000-000000000001','MEMBER','ACTIVE'),
+      ($1,'97a00000-0000-4000-8000-000000000022','97a00000-0000-4000-8000-000000000002','MEMBER','ACTIVE'),
+      ($1,'97a00000-0000-4000-8000-000000000023','97a00000-0000-4000-8000-000000000003','MEMBER','ACTIVE'),
+      ($1,'97a00000-0000-4000-8000-000000000024','97a00000-0000-4000-8000-000000000004','MEMBER','ACTIVE')`,
+    [workspaceId]);
+  });
+
+  const cases: Array<{ label: string; subject: string; category: string;
+    mutate: string; restore: string }> = [
+    { label: "no-generation", subject: subjects.mapped, category: "POLICY_OR_DEVICE_BLOCKED",
+      mutate: `UPDATE uptech.people_sync_generations SET status='SUPERSEDED' WHERE workspace_id='${workspaceId}' AND id='${generationId}'`,
+      restore: `UPDATE uptech.people_sync_generations SET status='PUBLISHED',fresh_until=statement_timestamp()+interval '5 minutes' WHERE workspace_id='${workspaceId}' AND id='${generationId}'` },
+    { label: "stale", subject: subjects.mapped, category: "POLICY_OR_DEVICE_BLOCKED",
+      mutate: `UPDATE uptech.people_sync_generations SET completed_at=statement_timestamp()-interval '2 minutes',fresh_until=statement_timestamp()-interval '1 minute' WHERE workspace_id='${workspaceId}' AND id='${generationId}'`,
+      restore: `UPDATE uptech.people_sync_generations SET completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '5 minutes' WHERE workspace_id='${workspaceId}' AND id='${generationId}'` },
+    { label: "unmapped", subject: subjects.unmapped, category: "USER_NOT_PROVISIONED", mutate: "SELECT 1", restore: "SELECT 1" },
+    { label: "conflict", subject: subjects.conflict, category: "USER_NOT_PROVISIONED", mutate: "SELECT 1", restore: "SELECT 1" },
+    { label: "profile-suspended", subject: subjects.suspended, category: "USER_SUSPENDED", mutate: "SELECT 1", restore: "SELECT 1" },
+    { label: "profile-deleted", subject: subjects.deleted, category: "USER_SUSPENDED", mutate: "SELECT 1", restore: "SELECT 1" },
+    { label: "prior-absent", subject: subjects.prior, category: "USER_SUSPENDED", mutate: "SELECT 1", restore: "SELECT 1" },
+    { label: "user-inactive", subject: subjects.inactiveUser, category: "USER_SUSPENDED",
+      mutate: "UPDATE uptech.users SET status='SUSPENDED' WHERE id='97a00000-0000-4000-8000-000000000001'",
+      restore: "UPDATE uptech.users SET status='ACTIVE' WHERE id='97a00000-0000-4000-8000-000000000001'" },
+    { label: "identity-inactive", subject: subjects.inactiveIdentity, category: "USER_SUSPENDED",
+      mutate: "UPDATE uptech.identities SET status='REVOKED' WHERE id='97a00000-0000-4000-8000-000000000012'",
+      restore: "UPDATE uptech.identities SET status='ACTIVE' WHERE id='97a00000-0000-4000-8000-000000000012'" },
+    { label: "membership-suspended", subject: subjects.suspendedMembership, category: "USER_SUSPENDED",
+      mutate: "UPDATE uptech.workspace_memberships SET status='SUSPENDED' WHERE id='97a00000-0000-4000-8000-000000000023'",
+      restore: "UPDATE uptech.workspace_memberships SET status='ACTIVE' WHERE id='97a00000-0000-4000-8000-000000000023'" },
+    { label: "membership-deprovisioned", subject: subjects.deprovisionedMembership, category: "USER_SUSPENDED",
+      mutate: "UPDATE uptech.workspace_memberships SET status='DEPROVISIONED' WHERE id='97a00000-0000-4000-8000-000000000024'",
+      restore: "UPDATE uptech.workspace_memberships SET status='ACTIVE' WHERE id='97a00000-0000-4000-8000-000000000024'" },
+    { label: "workspace-suspended", subject: subjects.mapped, category: "WORKSPACE_SUSPENDED",
+      mutate: `UPDATE uptech.workspaces SET status='SUSPENDED' WHERE workspace_id='${workspaceId}'`,
+      restore: `UPDATE uptech.workspaces SET status='ACTIVE' WHERE workspace_id='${workspaceId}'` },
+    { label: "workspace-deprovisioned", subject: subjects.mapped, category: "WORKSPACE_SUSPENDED",
+      mutate: `UPDATE uptech.workspaces SET status='DEPROVISIONED' WHERE workspace_id='${workspaceId}'`,
+      restore: `UPDATE uptech.workspaces SET status='ACTIVE' WHERE workspace_id='${workspaceId}'` },
+  ];
+
+  for (const [index, fixture] of cases.entries()) {
+    const transactionId = `97b00000-0000-4000-8000-${String(40 + index).padStart(12, "0")}`;
+    const handle = digest(`${fixture.label}:handle`); const nonce = digest(`${fixture.label}:nonce`);
+    const handoff = digest(`${fixture.label}:handoff`);
+    await asMigrationOwner(async (client) => {
+      await client.query(fixture.mutate);
+      await client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,
+        configuration_key,state_hash,nonce_hash,installation_binding_hash,app_exchange_challenge,
+        pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,request_id,
+        created_at,expires_at,reserved_at,completion_expires_at)
+      VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,
+        ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,'mobile-v2-kms',
+        convert_to('mobile-matrix','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',
+        statement_timestamp()+interval '4 minutes',statement_timestamp()-interval '1 second',
+        statement_timestamp()+interval '119 seconds')`, [transactionId, environment,digest(`${fixture.label}:state`),
+        nonce,digest(`${fixture.label}:install`),digest(`${fixture.label}:challenge`),
+        Buffer.alloc(12,0x40+index),Buffer.alloc(48,0x50+index),Buffer.alloc(16,0x60+index),handle]);
+    });
+    const beforeMembership = await pool.query(`SELECT m.role,m.status,m.authz_version FROM uptech.identities i
+      JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$1
+      WHERE i.provider_subject=$2`, [workspaceId, fixture.subject]);
+    try {
+      const row = (await asApi((client) => client.query(`SELECT outcome::text,denial_category::text
+        FROM uptech.complete_mobile_google_callback_directory_v2($1,
+          ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+            statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)
+            ::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+      [handle,fixture.subject,`${fixture.subject}@mapping-a.example`,nonce,handoff,transactionId]))).rows[0];
+      assert.deepEqual(row,{ outcome:"DENIED",denial_category:fixture.category },fixture.label);
+      assert.deepEqual((await pool.query(`SELECT identity_id,user_id,workspace_id,membership_id,
+          denial_category::text,extract(epoch FROM expires_at-created_at)::int AS lifetime_seconds
+        FROM uptech.mobile_handoffs WHERE handoff_hash=$1`,[handoff])).rows[0],{
+        identity_id:null,user_id:null,workspace_id:null,membership_id:null,
+        denial_category:fixture.category,lifetime_seconds:60,
+      },fixture.label);
+      assert.deepEqual((await pool.query(`SELECT m.role,m.status,m.authz_version FROM uptech.identities i
+        JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$1
+        WHERE i.provider_subject=$2`,[workspaceId,fixture.subject])).rows,beforeMembership.rows,fixture.label);
+      assert.deepEqual((await pool.query(`SELECT
+          (SELECT count(*)::int FROM uptech.sessions s JOIN uptech.identities i ON i.id=s.identity_id
+            WHERE i.provider_subject=$1) AS sessions,
+          (SELECT count(*)::int FROM uptech.session_tokens t JOIN uptech.sessions s
+            ON s.workspace_id=t.workspace_id AND s.id=t.session_id JOIN uptech.identities i
+            ON i.id=s.identity_id WHERE i.provider_subject=$1) AS tokens,
+          (SELECT count(*)::int FROM uptech.onboarding_sessions o JOIN uptech.identities i
+            ON i.id=o.identity_id WHERE i.provider_subject=$1) AS capabilities,
+          (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$2
+            AND metadata::text~*'(token|credential|secret|hash)') AS secret_metadata`,
+      [fixture.subject,transactionId])).rows[0],{ sessions:0,tokens:0,capabilities:0,secret_metadata:0 },fixture.label);
+    } finally {
+      await asMigrationOwner((client)=>client.query(fixture.restore));
+    }
+  }
+});

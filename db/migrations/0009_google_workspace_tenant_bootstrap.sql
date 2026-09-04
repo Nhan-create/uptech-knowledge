@@ -3711,6 +3711,8 @@ DECLARE
   selected_workspace_id uuid;
   selected_workspace uptech.workspaces%ROWTYPE;
   selected_generation_id uuid;
+  classification_generation_id uuid;
+  classification_lifecycle text;
   selected_identity uptech.identities%ROWTYPE;
   selected_user uptech.users%ROWTYPE;
   selected_membership uptech.workspace_memberships%ROWTYPE;
@@ -3719,6 +3721,7 @@ DECLARE
   target_department text;
   transitioned_rows integer := 0;
   controlled_denied boolean := false;
+  controlled_denial_category uptech.mobile_auth_ui_category_v1 := 'AUTH_ERROR';
 BEGIN
   SELECT candidate.* INTO transaction_row
   FROM uptech.mobile_google_transactions AS candidate
@@ -3789,6 +3792,9 @@ BEGIN
   BEGIN
     IF selected_workspace.status<>'ACTIVE'
        OR selected_workspace.provisioning_policy<>'GOOGLE_GROUP_CONTROLLED' THEN
+      controlled_denial_category:=CASE WHEN selected_workspace.status IN ('SUSPENDED','DEPROVISIONED')
+        THEN 'WORKSPACE_SUSPENDED'::uptech.mobile_auth_ui_category_v1
+        ELSE 'AUTH_ERROR'::uptech.mobile_auth_ui_category_v1 END;
       RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='workspace unavailable';
     END IF;
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
@@ -3802,6 +3808,7 @@ BEGIN
     IF selected_identity.id IS NOT NULL THEN
       SELECT * INTO selected_user FROM uptech.users WHERE id=selected_identity.user_id FOR UPDATE;
       IF selected_identity.status<>'ACTIVE' OR selected_user.status<>'ACTIVE' THEN
+        controlled_denial_category:='USER_SUSPENDED';
         RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='identity unavailable';
       END IF;
       SELECT * INTO selected_membership FROM uptech.workspace_memberships
@@ -3811,8 +3818,54 @@ BEGIN
         WHERE other_membership.user_id=selected_user.id
           AND other_membership.workspace_id<>selected_workspace_id
       ) THEN RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='cross tenant identity'; END IF;
+      IF selected_membership.status IN ('SUSPENDED','DEPROVISIONED') THEN
+        controlled_denial_category:='USER_SUSPENDED';
+        RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='membership unavailable';
+      END IF;
     END IF;
 
+    SELECT generation.id INTO classification_generation_id
+    FROM uptech.people_sync_generations AS generation
+    WHERE generation.workspace_id=selected_workspace_id
+      AND generation.google_customer_id=selected_workspace.google_customer_id
+      AND generation.status='PUBLISHED' AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL
+    ORDER BY generation.completed_at DESC,generation.id DESC LIMIT 1;
+    IF classification_generation_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM uptech.people_sync_generations AS generation
+      WHERE generation.workspace_id=selected_workspace_id
+        AND generation.id=classification_generation_id
+        AND generation.fresh_until>pg_catalog.clock_timestamp()
+    ) THEN
+      controlled_denial_category:='POLICY_OR_DEVICE_BLOCKED';
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory generation unavailable';
+    END IF;
+    SELECT profile.lifecycle_state INTO classification_lifecycle
+    FROM uptech.people_profiles AS profile
+    WHERE profile.workspace_id=selected_workspace_id
+      AND profile.generation_id=classification_generation_id
+      AND profile.google_subject=(canonical_claims).provider_subject::text;
+    IF classification_lifecycle IN ('SUSPENDED','DELETED') THEN
+      controlled_denial_category:='USER_SUSPENDED';
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory profile unavailable';
+    ELSIF classification_lifecycle IS NULL THEN
+      controlled_denial_category:=CASE WHEN EXISTS (
+        SELECT 1 FROM uptech.people_profiles AS prior_profile
+        JOIN uptech.people_sync_generations AS prior_generation
+          ON prior_generation.workspace_id=prior_profile.workspace_id
+         AND prior_generation.id=prior_profile.generation_id
+        WHERE prior_profile.workspace_id=selected_workspace_id
+          AND prior_profile.google_subject=(canonical_claims).provider_subject::text
+          AND prior_generation.id<>classification_generation_id
+          AND prior_generation.status IN ('PUBLISHED','SUPERSEDED')
+          AND prior_generation.traversal_complete
+          AND prior_generation.completed_at IS NOT NULL)
+        THEN 'USER_SUSPENDED'::uptech.mobile_auth_ui_category_v1
+        ELSE 'USER_NOT_PROVISIONED'::uptech.mobile_auth_ui_category_v1 END;
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory profile unavailable';
+    END IF;
+
+    controlled_denial_category:='POLICY_OR_DEVICE_BLOCKED';
     SELECT generation.id INTO selected_generation_id
     FROM uptech.people_sync_generations AS generation
     JOIN uptech.connectors AS connector
@@ -3837,6 +3890,7 @@ BEGIN
      AND profile.lifecycle_state='ACTIVE'
     WHERE generation.workspace_id=selected_workspace_id
       AND generation.google_customer_id=selected_workspace.google_customer_id
+      AND generation.id=classification_generation_id
       AND generation.status='PUBLISHED' AND generation.traversal_complete
       AND generation.completed_at IS NOT NULL AND generation.fresh_until>pg_catalog.clock_timestamp()
     ORDER BY generation.completed_at DESC,generation.id DESC LIMIT 1
@@ -3852,11 +3906,17 @@ BEGIN
       mapping:=uptech.evaluate_google_directory_mapping_v1(
         selected_workspace_id,selected_generation_id,(canonical_claims).provider_subject::text);
       IF (mapping).outcome NOT IN ('ADMIN','MEMBER') THEN
+        controlled_denial_category:=CASE WHEN (mapping).outcome IN ('USER_SUSPENDED','USER_REMOVED')
+          THEN 'USER_SUSPENDED'::uptech.mobile_auth_ui_category_v1
+          ELSE 'USER_NOT_PROVISIONED'::uptech.mobile_auth_ui_category_v1 END;
         RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory mapping unavailable';
       END IF;
       target_role:=(mapping).target_role; target_department:=(mapping).target_department_key;
     END IF;
 
+    -- Any uniqueness/collision/internal failure after a successful authority
+    -- classification is a protocol failure, not a Directory policy denial.
+    controlled_denial_category:='AUTH_ERROR';
     observed_at:=pg_catalog.clock_timestamp();
     IF selected_identity.id IS NULL THEN
       selected_user.id:=pg_catalog.gen_random_uuid(); selected_user.security_version:=1;
@@ -3881,7 +3941,7 @@ BEGIN
         selected_user.id,target_role,'ACTIVE',1,observed_at,observed_at);
     ELSIF selected_membership.role='OWNER' AND selected_membership.status='ACTIVE' THEN
       NULL;
-    ELSIF selected_membership.role<>'OWNER' AND selected_membership.status IN ('ACTIVE','PENDING','DEPROVISIONED') THEN
+    ELSIF selected_membership.role<>'OWNER' AND selected_membership.status IN ('ACTIVE','PENDING') THEN
       UPDATE uptech.workspace_memberships SET role=target_role,status='ACTIVE',
         authz_version=authz_version+CASE WHEN role IS DISTINCT FROM target_role OR status<>'ACTIVE' THEN 1 ELSE 0 END,
         updated_at=observed_at WHERE workspace_id=selected_workspace_id AND id=selected_membership.id
@@ -3942,7 +4002,7 @@ BEGIN
   IF controlled_denied THEN
     RETURN uptech.complete_mobile_google_denial_v1(
       p_completion_handle_hash,p_handoff_hash,'IDENTITY_INELIGIBLE',
-      'USER_NOT_PROVISIONED',p_request_id);
+      controlled_denial_category,p_request_id);
   END IF;
   RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
 END
