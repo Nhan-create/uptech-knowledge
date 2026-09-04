@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { DatabasePool, NormalSessionContext } from "../db/core.ts";
-import { requireCurrentDirectoryAuthority } from "./directory-authority.ts";
+import {
+  inspectCurrentDirectoryAuthority,
+  requireCurrentDirectoryAuthority,
+} from "./directory-authority.ts";
 
 function context(workspaceRole: NormalSessionContext["workspaceRole"]): NormalSessionContext {
   return {
@@ -101,4 +104,11 @@ test("a malformed or cross-tenant Directory context fails closed", async () => {
       false,
     );
   }
+});
+
+test("detailed Directory authority separates definite denial from infrastructure uncertainty", async () => {
+  const session = { context: context("OWNER"), credentialHash: new Uint8Array(32) };
+  assert.equal(await inspectCurrentDirectoryAuthority(session, pool([], [])), "NOT_CURRENT");
+  const unavailable = { connect: async () => { throw new Error("database unavailable"); } } as never;
+  assert.equal(await inspectCurrentDirectoryAuthority(session, unavailable), "UNAVAILABLE");
 });

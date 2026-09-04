@@ -75,12 +75,27 @@ export async function requireCurrentDirectoryAuthority(
   },
   pool: Pick<DatabasePool, "connect">,
 ): Promise<boolean> {
+  return await inspectCurrentDirectoryAuthority(session, pool) === "CURRENT";
+}
+
+export type CurrentDirectoryAuthorityInspection =
+  | "CURRENT"
+  | "NOT_CURRENT"
+  | "UNAVAILABLE";
+
+export async function inspectCurrentDirectoryAuthority(
+  session: {
+    readonly context: NormalSessionContext;
+    readonly credentialHash: Uint8Array;
+  },
+  pool: Pick<DatabasePool, "connect">,
+): Promise<CurrentDirectoryAuthorityInspection> {
   const workspaceRole = session.context.workspaceRole;
   if (!isDirectoryRole(workspaceRole)) {
-    return false;
+    return "NOT_CURRENT";
   }
   try {
-    return await withRequestTransaction(
+    const current = await withRequestTransaction(
       requestTransactionContextFromSession(
         session.context,
         session.credentialHash,
@@ -100,7 +115,8 @@ export async function requireCurrentDirectoryAuthority(
       },
       pool,
     );
+    return current ? "CURRENT" : "NOT_CURRENT";
   } catch {
-    return false;
+    return "UNAVAILABLE";
   }
 }

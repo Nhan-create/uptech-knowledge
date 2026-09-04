@@ -20,9 +20,10 @@ import {
   type RecoveryState,
 } from "./recovery-actions.ts";
 import {
-  resolveWebRouteAuthority,
-  type WebRouteAuthorityDecision,
+  resolveWebRouteAuthorityDetailed,
+  type DetailedWebRouteAuthorityDecision,
 } from "./web-route-authority.ts";
+import { clearedWebSessionCookie } from "./web-session.ts";
 
 export type LoginPageAuthorityDecision = "HOME" | "LOGIN" | "UNAVAILABLE";
 
@@ -51,14 +52,14 @@ export interface LoginPageModelDependencies {
   ) => Promise<BrowserAuthorityInspection>;
   readonly resolveWebRoute: (
     headers: Headers,
-  ) => Promise<WebRouteAuthorityDecision>;
+  ) => Promise<DetailedWebRouteAuthorityDecision>;
 }
 
 const modelProductionDependencies: LoginPageModelDependencies = Object.freeze({
   loadConfig: loadWebSessionRuntimeConfig,
   getPool: getRuntimeDatabasePool,
   inspectAuthority: inspectBrowserAuthority,
-  resolveWebRoute: (headers: Headers) => resolveWebRouteAuthority(headers, "HOME"),
+  resolveWebRoute: (headers: Headers) => resolveWebRouteAuthorityDetailed(headers, "HOME"),
 });
 
 const LEGACY_RECOVERY_STATES: Readonly<Record<string, RecoveryState>> = Object.freeze({
@@ -80,8 +81,12 @@ const LEGACY_RECOVERY_STATES: Readonly<Record<string, RecoveryState>> = Object.f
   rate_limited: "RATE_LIMITED",
   temporarily_unavailable: "PROVIDER_UNAVAILABLE",
   login_failed: "INTERNAL_ERROR",
-  provider_rejected: "GOOGLE_CONSENT_CANCELLED",
-  active_authority: "FORBIDDEN",
+  // Normal OIDC access_denied has no Directory-consent meaning; keep its
+  // legacy callback key on the generic, non-privileged recovery path.
+  provider_rejected: "INTERNAL_ERROR",
+  // The login transaction emits this for an existing browser authority. A
+  // truly current Web authority redirects before this display fallback.
+  active_authority: "SESSION_REVOKED",
 });
 
 function publicRecoveryState(input: unknown): RecoveryState | null {
@@ -106,7 +111,7 @@ function hasExactOperations(actual: readonly string[], expected: readonly string
     actual.every((operation, index) => operation === expected[index]);
 }
 
-function stateForAuthority(authority: RecoveryAuthority): RecoveryState {
+function stateForAuthority(authority: RecoveryAuthority): RecoveryState | null {
   const operations = authority.operations;
   if (hasExactOperations(operations, RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN)) {
     return "UNKNOWN_WORKSPACE";
@@ -114,7 +119,10 @@ function stateForAuthority(authority: RecoveryAuthority): RecoveryState {
   if (hasExactOperations(operations, RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST)) {
     return "USER_NOT_PROVISIONED";
   }
-  return "DIRECTORY_BOOTSTRAP_SYNC_PENDING";
+  if (hasExactOperations(operations, RECOVERY_OPERATION_FAMILIES.BOOTSTRAP_STATUS)) {
+    return "DIRECTORY_BOOTSTRAP_SYNC_PENDING";
+  }
+  return null;
 }
 
 function render(
@@ -148,17 +156,29 @@ export async function resolveLoginPageModel(
     });
     if (inspected.activeKind === "WEB_SESSION") {
       const route = await dependencies.resolveWebRoute(headers);
-      if (route === "ADMIN") return Object.freeze({ kind: "REDIRECT", destination: "/admin" });
-      if (route === "ALLOW" || route === "HOME") return Object.freeze({ kind: "REDIRECT", destination: "/home" });
-      return render(null, null, null, inspected.staleCookieHeaders);
+      if (route.kind === "UNAVAILABLE") {
+        return render("PROVIDER_UNAVAILABLE", null, null, []);
+      }
+      if (route.kind === "NOT_CURRENT") {
+        const clears = [...inspected.staleCookieHeaders, clearedWebSessionCookie()];
+        return render("SESSION_REVOKED", null, null, [...new Set(clears)]);
+      }
+      if (route.decision === "ADMIN") return Object.freeze({ kind: "REDIRECT", destination: "/admin" });
+      return Object.freeze({ kind: "REDIRECT", destination: "/home" });
     }
 
     const rawCredential = inspected.activeKind === "ONBOARDING"
       ? exactCookie(headers, ONBOARDING_COOKIE_NAME)
       : null;
-    const authority = rawCredential === null ? null : inspected.onboardingAuthority;
+    const candidateAuthority = inspected.active && rawCredential !== null
+      ? inspected.onboardingAuthority
+      : null;
+    const authorityState = candidateAuthority === null
+      ? null
+      : stateForAuthority(candidateAuthority);
+    const authority = authorityState === null ? null : candidateAuthority;
     const state = publicRecoveryState(requestedError) ??
-      (authority === null ? null : stateForAuthority(authority));
+      authorityState;
     const csrfToken = authority === null || rawCredential === null
       ? null
       : deriveCsrfCredential(rawCredential, config.sessionPepper);

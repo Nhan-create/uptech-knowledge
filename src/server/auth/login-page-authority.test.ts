@@ -5,6 +5,8 @@ import { resolveLoginPageModel, type LoginPageModelDependencies } from "./login-
 import { RECOVERY_OPERATION_FAMILIES, RECOVERY_STATES, type RecoveryAuthority, type RecoveryState } from "./recovery-actions.ts";
 import { deriveCsrfCredential, ONBOARDING_COOKIE_NAME } from "./google/crypto.ts";
 import { WEB_SESSION_COOKIE_NAME } from "../sessions/session-security.ts";
+import { clearedWebSessionCookie } from "./web-session.ts";
+import { inspectBrowserAuthority } from "./browser-authority.ts";
 
 const PEPPER = new Uint8Array(32).fill(0x41);
 const RAW = "A".repeat(43);
@@ -20,7 +22,7 @@ function deps(overrides: Partial<LoginPageModelDependencies> = {}): LoginPageMod
     loadConfig: () => ({ databaseUrl: "postgres://runtime@example.invalid/db", sessionPepper: PEPPER }),
     getPool: () => pool,
     inspectAuthority: async () => inspection(),
-    resolveWebRoute: async () => "LOGIN",
+    resolveWebRoute: async () => ({ kind: "NOT_CURRENT" }),
     ...overrides,
   };
 }
@@ -47,7 +49,7 @@ const legacyMappings: Readonly<Record<string, RecoveryState>> = {
   directory_stale: "DIRECTORY_STALE", directory_stale_access_request_available: "DIRECTORY_STALE_ACCESS_REQUEST_AVAILABLE",
   workspace_suspended: "WORKSPACE_SUSPENDED", session_expired: "SESSION_EXPIRED", rate_limited: "RATE_LIMITED",
   temporarily_unavailable: "PROVIDER_UNAVAILABLE", login_failed: "INTERNAL_ERROR",
-  provider_rejected: "GOOGLE_CONSENT_CANCELLED", active_authority: "FORBIDDEN",
+  provider_rejected: "INTERNAL_ERROR", active_authority: "SESSION_REVOKED",
 };
 
 test("all uppercase states and legacy callback keys map through the closed registry", async () => {
@@ -70,10 +72,11 @@ test("all uppercase states and legacy callback keys map through the closed regis
   }
 });
 
-test("current Web roles redirect only to fixed destinations and stale route authority renders login", async () => {
+test("current Web roles redirect only to fixed destinations and non-current authority clears without a login loop", async () => {
   for (const [route, destination] of [["ADMIN", "/admin"], ["ALLOW", "/home"]] as const) {
     const model = await resolveLoginPageModel(new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${RAW}` }), undefined, deps({
-      inspectAuthority: async () => ({ ...inspection(), active: true, activeKind: "WEB_SESSION" }), resolveWebRoute: async () => route,
+      inspectAuthority: async () => ({ ...inspection(), active: true, activeKind: "WEB_SESSION" }),
+      resolveWebRoute: async () => ({ kind: "ROUTE", decision: route }),
     }));
     assert.deepEqual(model, { kind: "REDIRECT", destination });
   }
@@ -81,7 +84,12 @@ test("current Web roles redirect only to fixed destinations and stale route auth
     inspectAuthority: async () => ({ ...inspection(), active: true, activeKind: "WEB_SESSION" }),
   }));
   assert.equal(stale.kind, "RENDER");
-  assert.deepEqual(actionIds(stale), ["START_NORMAL_LOGIN"]);
+  assert.equal(stale.state, "SESSION_REVOKED");
+  assert.deepEqual(stale.staleCookieHeaders, [clearedWebSessionCookie()]);
+  assert.deepEqual(actionIds(stale), ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"]);
+  const afterClear = await resolveLoginPageModel(new Headers(), undefined, deps());
+  assert.equal(afterClear.kind, "RENDER");
+  assert.deepEqual(actionIds(afterClear), ["START_NORMAL_LOGIN"]);
 });
 
 test("each authenticated onboarding family derives CSRF and selects executable actions", async () => {
@@ -107,13 +115,36 @@ test("wrong-family state cannot unlock its capability action", async () => {
   assert.deepEqual(actionIds(model), ["SWITCH_GOOGLE_ACCOUNT"]);
 });
 
-test("malformed duplicate simultaneous expired revoked or failed authority never derives capability", async () => {
-  for (const clears of [["malformed"], ["duplicate"], ["web", "onboarding"], ["expired"], ["revoked"]]) {
-    const model = await resolveLoginPageModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }), "UNKNOWN_WORKSPACE", deps({
-      inspectAuthority: async () => ({ ...inspection(), staleCookieHeaders: clears }),
+test("unrecognized onboarding family removes authority and CSRF", async () => {
+  const invalid = authority(["FUTURE_OPERATION"]);
+  const model = await resolveLoginPageModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }), undefined, deps({
+    inspectAuthority: async () => inspection(invalid),
+  }));
+  assert.equal(model.kind, "RENDER");
+  assert.equal(model.state, null);
+  assert.equal(model.csrfToken, null);
+  assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN"]);
+});
+
+test("real duplicate values and canonical authenticator failure never derive capability", async () => {
+  const clear = `${ONBOARDING_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+  for (const [cookie, authenticatedContext] of [
+    [`${ONBOARDING_COOKIE_NAME}=${RAW}; ${ONBOARDING_COOKIE_NAME}=${"B".repeat(43)}`, null],
+    [`${ONBOARDING_COOKIE_NAME}=${RAW}`, null],
+    [`${ONBOARDING_COOKIE_NAME}=${RAW}`, {
+      kind: "onboarding", contextExpiresAt: new Date("2099-01-01T00:00:00.000Z"),
+      allowedOperations: ["FUTURE_OPERATION"],
+    }],
+  ] as const) {
+    const model = await resolveLoginPageModel(new Headers({ cookie }), "UNKNOWN_WORKSPACE", deps({
+      inspectAuthority: (headers, actualPool, options) => inspectBrowserAuthority(headers, actualPool, {
+        ...options,
+        authenticateSession: async () => authenticatedContext as never,
+      }),
     }));
     assert.equal(model.kind, "RENDER");
     assert.equal(model.csrfToken, null);
+    assert.deepEqual(model.staleCookieHeaders, [clear]);
     assert.deepEqual(actionIds(model), ["SWITCH_GOOGLE_ACCOUNT"]);
   }
 });
@@ -122,6 +153,10 @@ test("runtime or database uncertainty returns unavailable without capability", a
   for (const failure of [
     deps({ loadConfig: () => { throw new Error("config secret"); } }),
     deps({ inspectAuthority: async () => { throw new Error("db credential"); } }),
+    deps({
+      inspectAuthority: async () => ({ ...inspection(), active: true, activeKind: "WEB_SESSION" }),
+      resolveWebRoute: async () => ({ kind: "UNAVAILABLE" }),
+    }),
   ]) {
     const model = await resolveLoginPageModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }), "UNKNOWN_WORKSPACE", failure);
     assert.equal(model.kind, "RENDER");

@@ -4,6 +4,7 @@ import test from "node:test";
 import type { DatabasePool } from "../db/core.ts";
 import {
   resolveWebRouteAuthority,
+  resolveWebRouteAuthorityDetailed,
   type WebRouteAuthorityDependencies,
 } from "./web-route-authority.ts";
 import { WebSessionAuthenticationError } from "./web-session.ts";
@@ -295,5 +296,23 @@ test("unrecognized session roles fail closed to login", async () => {
       malformedSessionDependencies,
     ),
     "LOGIN",
+  );
+});
+
+test("detailed Web route authority keeps non-current separate from unavailable", async () => {
+  assert.deepEqual(
+    await resolveWebRouteAuthorityDetailed(new Headers(), "HOME", {
+      ...dependencies("OWNER"), getPool: () => directoryPool([], []),
+    }),
+    { kind: "NOT_CURRENT" },
+  );
+  assert.deepEqual(
+    await resolveWebRouteAuthorityDetailed(new Headers(), "HOME", {
+      ...dependencies("OWNER"), getPool: () => ({
+        query: async () => { throw new Error("database unavailable"); },
+        connect: async () => { throw new Error("database unavailable"); },
+      }) as never,
+    }),
+    { kind: "UNAVAILABLE" },
   );
 });
