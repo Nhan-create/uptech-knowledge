@@ -371,6 +371,7 @@ function recoveryCredential(
   requestId: string,
   mutating: boolean,
   allowSetupCookie = false,
+  selectedCsrfToken?: string,
 ): { readonly credential: string } | { readonly response: Response } {
   let url: URL;
   try { url = new URL(request.url); } catch { return { response: problem("VALIDATION_FAILED", requestId) }; }
@@ -385,8 +386,10 @@ function recoveryCredential(
       request.headers.has("authorization")) {
     return { response: problem("FORBIDDEN", requestId) };
   }
+  const csrfToken = selectedCsrfToken ?? request.headers.get("x-csrf-token");
   if (mutating && (request.headers.get("origin") !== runtime.appOrigin ||
-      !exactCsrf(request.headers, credential, runtime.sessionPepper))) {
+      request.headers.get("sec-fetch-site") !== "same-origin" ||
+      !exactCsrfCredential(csrfToken, credential, runtime.sessionPepper))) {
     return { response: problem("FORBIDDEN", requestId) };
   }
   return { credential };
@@ -472,12 +475,12 @@ export function createBootstrapSyncRetryPost(dependencies: BootstrapStatusDepend
 export function createBootstrapFinishPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
-    if (invalidEnvelope !== null) return invalidEnvelope;
+    const envelope = await mutatingPostEnvelope(request, requestId);
+    if ("response" in envelope) return envelope.response;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
-    const authority = recoveryCredential(request, runtime, requestId, true);
+    const authority = recoveryCredential(request, runtime, requestId, true, false, envelope.csrfToken);
     if ("response" in authority) return authority.response;
     if (runtime.normalLoginService === undefined || dependencies.canonicalClientIp === undefined) {
       return problem("PROVIDER_UNAVAILABLE", requestId);
@@ -523,12 +526,12 @@ export function createBootstrapFinishPost(dependencies: BootstrapStatusDependenc
 export function createOnboardingLogoutPost(dependencies: BootstrapStatusDependencies) {
   return async function POST(request: Request): Promise<Response> {
     const requestId = dependencies.requestId(request.headers);
-    const invalidEnvelope = bodylessEnvelope(request, "POST", requestId);
-    if (invalidEnvelope !== null) return invalidEnvelope;
+    const envelope = await mutatingPostEnvelope(request, requestId);
+    if ("response" in envelope) return envelope.response;
     let runtime: BootstrapStatusRuntime;
     try { runtime = dependencies.loadRuntime(); }
     catch { return problem("PROVIDER_UNAVAILABLE", requestId); }
-    const authority = recoveryCredential(request, runtime, requestId, true, true);
+    const authority = recoveryCredential(request, runtime, requestId, true, true, envelope.csrfToken);
     if ("response" in authority) return authority.response;
     try {
       const result = await runtime.repository.revokeCapability({

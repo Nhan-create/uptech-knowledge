@@ -499,6 +499,37 @@ function recoveryRequest(path: "status" | "sync-retry" | "finish", options: {
   });
 }
 
+function recoveryFormRequest(path: "finish" | "logout", options: {
+  readonly body?: BodyInit;
+  readonly contentLength?: string | null;
+  readonly cookie?: string;
+  readonly headers?: Record<string, string>;
+  readonly suffix?: string;
+} = {}) {
+  const body = options.body ?? `csrf_token=${deriveCsrfCredential(STATUS, PEPPER)}`;
+  const headers: Record<string, string> = {
+    cookie: options.cookie ?? `__Host-uptech_onboarding=${STATUS}`,
+    origin: APP_ORIGIN,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/x-www-form-urlencoded",
+    ...options.headers,
+  };
+  if (options.contentLength !== null) {
+    headers["content-length"] = options.contentLength ?? String(
+      typeof body === "string" ? Buffer.byteLength(body) : (body as Uint8Array).byteLength,
+    );
+  }
+  const pathname = path === "finish"
+    ? "/api/v1/onboarding/google-workspace/finish"
+    : "/api/v1/onboarding/logout";
+  return new Request(`${APP_ORIGIN}${pathname}${options.suffix ?? ""}`, {
+    method: "POST",
+    headers,
+    body,
+    duplex: "half",
+  } as RequestInit & { readonly duplex: "half" });
+}
+
 test("status GET returns only the repository allowlisted public state", async () => {
   const f = recoveryFixture();
   const response = await createBootstrapStatusGet(f.dependencies)(recoveryRequest("status"));
@@ -589,6 +620,31 @@ test("finish consumes READY status before starting a fresh normal login and clea
   assertSafe(response);
 });
 
+test("finish accepts an exact native form and issues only the approved login authority in deterministic order", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapFinishPost(f.dependencies)(recoveryFormRequest("finish"));
+
+  assert.deepEqual(f.calls.map((call) => call.operation), ["finish", "initiate"]);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), AUTHORIZATION.href);
+  const cookies = response.headers.getSetCookie();
+  assert.match(cookies[0] ?? "", /^__Host-uptech_login_tx=/u);
+  assert.match(cookies[1] ?? "", /^__Host-uptech_onboarding=;/u);
+  assert.match(cookies[2] ?? "", new RegExp(`^${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`));
+  assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
+  assertSafe(response);
+});
+
+test("finish accepts the exact bounded native form without Content-Length", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapFinishPost(f.dependencies)(recoveryFormRequest("finish", {
+    contentLength: null,
+  }));
+
+  assert.equal(response.status, 303);
+  assert.deepEqual(f.calls.map((call) => call.operation), ["finish", "initiate"]);
+});
+
 test("finish never starts login when atomic READY consumption denies or request authority is caller-controlled", async () => {
   const denied = recoveryFixture();
   denied.setFinish("DENIED");
@@ -603,6 +659,33 @@ test("finish never starts login when atomic READY consumption denies or request 
     }));
     assert.equal(response.status, 400);
     assert.equal(f.calls.length, 0);
+  }
+});
+
+test("native-form finish retains denial and downstream login failure semantics", async () => {
+  const denied = recoveryFixture();
+  denied.setFinish("DENIED");
+  const deniedResponse = await createBootstrapFinishPost(denied.dependencies)(recoveryFormRequest("finish"));
+  assert.equal(deniedResponse.status, 401);
+  assert.deepEqual(denied.calls.map((call) => call.operation), ["finish"]);
+  assert.deepEqual(deniedResponse.headers.getSetCookie(), []);
+
+  for (const [loginOutcome, error] of [
+    [{ outcome: "RATE_LIMITED" }, "rate_limited"],
+    [new Error("provider unavailable secret-token"), "temporarily_unavailable"],
+  ] as const) {
+    const f = recoveryFixture();
+    f.setLogin(loginOutcome);
+    const response = await createBootstrapFinishPost(f.dependencies)(recoveryFormRequest("finish"));
+    assert.equal(response.status, 303);
+    const location = new URL(response.headers.get("location")!);
+    assert.equal(location.pathname, "/login");
+    assert.equal(location.searchParams.get("error"), error);
+    assert.equal(location.href.includes("secret-token"), false);
+    assert.deepEqual(f.calls.map((call) => call.operation), ["finish", "initiate"]);
+    assert.equal(response.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_login_tx=")), false);
+    assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-uptech_onboarding=;")));
+    assertSafe(response);
   }
 });
 
@@ -649,6 +732,69 @@ test("onboarding logout revokes only the presented capability hash then clears o
   assert.ok(cookies.some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`) && cookie.includes("Max-Age=0")));
   assert.equal(cookies.some((cookie) => cookie.includes("uptech_session")), false);
   assertSafe(response);
+});
+
+test("onboarding logout accepts an exact native form, revokes once, and redirects with fixed clears", async () => {
+  const f = recoveryFixture();
+  const response = await createOnboardingLogoutPost(f.dependencies)(recoveryFormRequest("logout", {
+    cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`,
+  }));
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/login`);
+  assert.deepEqual(f.calls, [{
+    operation: "revokeCapability",
+    input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID },
+  }]);
+  const cookies = response.headers.getSetCookie();
+  assert.match(cookies[0] ?? "", /^__Host-uptech_onboarding=;/u);
+  assert.match(cookies[1] ?? "", new RegExp(`^${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`));
+  assertSafe(response);
+});
+
+test("finish and logout reject wrong-CSRF and hostile native forms before repository or login work", async () => {
+  const proof = deriveCsrfCredential(STATUS, PEPPER);
+  const hostile: ReadonlyArray<NonNullable<Parameters<typeof recoveryFormRequest>[1]>> = [
+    { body: `csrf_token=${issueOpaqueProof()}` },
+    { headers: { "x-csrf-token": proof } },
+    { suffix: "?workspace_id=caller" },
+    { suffix: "#fragment" },
+    { headers: { origin: "https://evil.example" } },
+    { headers: { "sec-fetch-site": "same-site" } },
+    { headers: { authorization: "Bearer caller" } },
+    { headers: { "content-type": "text/plain" } },
+    { body: `csrf_token=${proof}&role=OWNER` },
+    { body: `csrf_token=${proof}&csrf_token=${proof}` },
+    { body: `csrf_token=%41${proof.slice(1)}` },
+    { contentLength: "95" },
+    { body: `csrf_token=${proof}${"A".repeat(97)}`, contentLength: null },
+    { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_onboarding=${STATUS}` },
+    { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` },
+  ];
+
+  for (const path of ["finish", "logout"] as const) {
+    for (const options of hostile) {
+      const f = recoveryFixture();
+      const response = path === "finish"
+        ? await createBootstrapFinishPost(f.dependencies)(recoveryFormRequest(path, options))
+        : await createOnboardingLogoutPost(f.dependencies)(recoveryFormRequest(path, options));
+      assert.ok([400, 401, 403].includes(response.status));
+      assert.deepEqual(f.calls, []);
+      assert.deepEqual(response.headers.getSetCookie(), []);
+      assertSafe(response);
+    }
+  }
+});
+
+test("native-form finish rejects setup-cookie coexistence before consuming READY", async () => {
+  const f = recoveryFixture();
+  const response = await createBootstrapFinishPost(f.dependencies)(recoveryFormRequest("finish", {
+    cookie: `__Host-uptech_onboarding=${STATUS}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`,
+  }));
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(response.headers.getSetCookie(), []);
 });
 
 test("onboarding logout does not claim an unrecognized copied capability was revoked", async () => {
