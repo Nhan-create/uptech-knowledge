@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PROVISIONING_PUBLIC_STATES,
   RECOVERY_ACTION_DESCRIPTORS,
   RECOVERY_OPERATION_FAMILIES,
   RECOVERY_STATES,
+  resolveProvisioningActions,
   resolveRecoveryActions,
+  type ProvisioningPublicState,
   type RecoveryAuthority,
   type RecoveryOperation,
   type RecoveryState,
@@ -48,6 +51,10 @@ function invalidAuthorityVectors(family: keyof typeof RECOVERY_OPERATION_FAMILIE
     Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: ["UNKNOWN_OPERATION"] }),
     Object.freeze({ authenticated: true, operations: expected }),
   ];
+}
+
+function resolveProvisioning(state: ProvisioningPublicState, authenticatedAuthority: unknown) {
+  return resolveProvisioningActions({ state, authority: authenticatedAuthority as RecoveryAuthority | null });
 }
 
 const CASES = [
@@ -164,5 +171,76 @@ test("descriptors have fixed exact transport values and are deeply immutable", (
   for (const descriptor of Object.values(RECOVERY_ACTION_DESCRIPTORS)) {
     assert.ok(Object.isFrozen(descriptor));
     assert.ok(Object.isFrozen(descriptor.label));
+  }
+});
+
+const PROVISIONING_CASES = [
+  ["DIRECTORY_BOOTSTRAP_SYNC_PENDING", ["CHECK_BOOTSTRAP_STATUS", "EXIT_ONBOARDING"]],
+  ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE", ["RETRY_DIRECTORY_SYNC", "CONTACT_UPTECH"]],
+  ["DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", ["CONTACT_UPTECH", "EXIT_ONBOARDING"]],
+  ["READY", ["FINISH_BOOTSTRAP", "EXIT_ONBOARDING"]],
+] as const satisfies readonly (readonly [ProvisioningPublicState, readonly string[]])[];
+
+test("provisioning exposes exactly four closed states with their ordered BOOTSTRAP_STATUS actions", () => {
+  assert.deepEqual(PROVISIONING_PUBLIC_STATES, PROVISIONING_CASES.map(([state]) => state));
+
+  for (const [state, expected] of PROVISIONING_CASES) {
+    const actions = resolveProvisioning(state, BOOTSTRAP_STATUS);
+    assert.deepEqual(actions.map((action) => action.id), expected, state);
+    assert.ok(Object.isFrozen(actions), state);
+    for (const action of actions) {
+      assert.strictEqual(action, RECOVERY_ACTION_DESCRIPTORS[action.id as keyof typeof RECOVERY_ACTION_DESCRIPTORS], state);
+      assert.ok(Object.isFrozen(action), state);
+      assert.ok(Object.isFrozen(action.label), state);
+    }
+    assert.doesNotThrow(() => JSON.stringify(actions), state);
+  }
+});
+
+test("every provisioning state fails closed for every malformed or non-BOOTSTRAP_STATUS authority", () => {
+  const expected = RECOVERY_OPERATION_FAMILIES.BOOTSTRAP_STATUS;
+  const invalid = [
+    null,
+    Object.freeze({}),
+    Object.freeze({ operations: expected }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING" }),
+    Object.freeze({ kind: "OTHER", operations: expected }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: null }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: {} }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: expected.slice(0, 1) }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [expected[0], expected[0]] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected].reverse() }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected, "ACCESS_REQUEST_READ"] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [expected[0], "UNKNOWN_OPERATION"] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST }),
+    Object.freeze({ authenticated: true, operations: expected }),
+  ] as const;
+
+  for (const [state] of PROVISIONING_CASES) {
+    for (const authority of invalid) {
+      const actions = resolveProvisioning(state, authority);
+      assert.deepEqual(actions.map((action) => action.id), ["CONTACT_UPTECH"], `${state}: ${JSON.stringify(authority)}`);
+      assert.strictEqual(actions[0], RECOVERY_ACTION_DESCRIPTORS.CONTACT_UPTECH, state);
+      for (const privileged of ["CHECK_BOOTSTRAP_STATUS", "RETRY_DIRECTORY_SYNC", "FINISH_BOOTSTRAP", "EXIT_ONBOARDING"]) {
+        assert.equal(actions.some((action) => action.id === privileged), false, `${state}: ${privileged}`);
+      }
+    }
+  }
+});
+
+test("provisioning pins finish, logout, status, and retry transports", () => {
+  const expected = {
+    CHECK_BOOTSTRAP_STATUS: ["GET", "/api/v1/onboarding/google-workspace/status"],
+    RETRY_DIRECTORY_SYNC: ["POST", "/api/v1/onboarding/google-workspace/sync-retry"],
+    FINISH_BOOTSTRAP: ["POST", "/api/v1/onboarding/google-workspace/finish"],
+    EXIT_ONBOARDING: ["POST", "/api/v1/onboarding/logout"],
+  } as const;
+
+  for (const [id, transport] of Object.entries(expected)) {
+    const descriptor = RECOVERY_ACTION_DESCRIPTORS[id as keyof typeof RECOVERY_ACTION_DESCRIPTORS];
+    assert.equal(descriptor.kind, "REQUEST", id);
+    if (descriptor.kind === "REQUEST") assert.deepEqual([descriptor.method, descriptor.path], transport, id);
   }
 });

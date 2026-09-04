@@ -9,6 +9,14 @@ export const RECOVERY_STATES = Object.freeze([
 ] as const);
 export type RecoveryState = (typeof RECOVERY_STATES)[number];
 
+export const PROVISIONING_PUBLIC_STATES = Object.freeze([
+  "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+  "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE",
+  "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+  "READY",
+] as const);
+export type ProvisioningPublicState = (typeof PROVISIONING_PUBLIC_STATES)[number];
+
 export const RECOVERY_ACTION_IDS = Object.freeze([
   "START_NORMAL_LOGIN", "START_NORMAL_LOGIN_AFTER_COOLDOWN", "SWITCH_GOOGLE_ACCOUNT", "START_ORGANIZATION_SETUP",
   "RESTART_DIRECTORY_CONSENT", "CHECK_BOOTSTRAP_STATUS", "RETRY_DIRECTORY_SYNC", "FINISH_BOOTSTRAP", "EXIT_ONBOARDING",
@@ -77,6 +85,13 @@ const STATE_ACTIONS: Readonly<Record<RecoveryState, readonly RecoveryActionId[]>
   ONBOARDING_EXPIRED: ["START_NORMAL_LOGIN", "CONTACT_UPTECH"], PROVIDER_UNAVAILABLE: ["START_NORMAL_LOGIN", "CONTACT_UPTECH"], RATE_LIMITED: ["START_NORMAL_LOGIN_AFTER_COOLDOWN", "CONTACT_UPTECH"], FORBIDDEN: ["SWITCH_GOOGLE_ACCOUNT", "CONTACT_UPTECH"], INTERNAL_ERROR: ["START_NORMAL_LOGIN", "COPY_REQUEST_ID"],
 });
 
+const PROVISIONING_STATE_ACTIONS: Readonly<Record<ProvisioningPublicState, readonly RecoveryActionId[]>> = frozen({
+  DIRECTORY_BOOTSTRAP_SYNC_PENDING: ["CHECK_BOOTSTRAP_STATUS", "EXIT_ONBOARDING"],
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE: ["RETRY_DIRECTORY_SYNC", "CONTACT_UPTECH"],
+  DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED: ["CONTACT_UPTECH", "EXIT_ONBOARDING"],
+  READY: ["FINISH_BOOTSTRAP", "EXIT_ONBOARDING"],
+});
+
 const REQUIRED_FAMILY: Readonly<Partial<Record<RecoveryActionId, keyof typeof RECOVERY_OPERATION_FAMILIES | "ONBOARDING">>> = Object.freeze({
   START_ORGANIZATION_SETUP: "FIRST_DOMAIN", RESTART_DIRECTORY_CONSENT: "FIRST_DOMAIN", SUBMIT_ACCESS_REQUEST: "ACCESS_REQUEST",
   CHECK_BOOTSTRAP_STATUS: "BOOTSTRAP_STATUS", RETRY_DIRECTORY_SYNC: "BOOTSTRAP_STATUS", FINISH_BOOTSTRAP: "BOOTSTRAP_STATUS", EXIT_ONBOARDING: "ONBOARDING",
@@ -108,5 +123,16 @@ function isExecutable(id: RecoveryActionId, authority: RecoveryAuthority | null)
 export function resolveRecoveryActions(input: Readonly<{ state: RecoveryState; authority: RecoveryAuthority | null }>): readonly RecoveryActionDescriptor[] {
   const actions = STATE_ACTIONS[input.state].filter((id) => isExecutable(id, input.authority));
   const resolved = actions.length === 0 ? ["START_NORMAL_LOGIN", "COPY_REQUEST_ID"] as const : actions;
+  return Object.freeze(resolved.map((id) => RECOVERY_ACTION_DESCRIPTORS[id]));
+}
+
+export function resolveProvisioningActions(input: Readonly<{
+  state: ProvisioningPublicState;
+  authority: RecoveryAuthority | null;
+}>): readonly RecoveryActionDescriptor[] {
+  const actions = hasExactFamily(input.authority, "BOOTSTRAP_STATUS")
+    ? PROVISIONING_STATE_ACTIONS[input.state]
+    : PROVISIONING_STATE_ACTIONS[input.state].filter((id) => id === "CONTACT_UPTECH");
+  const resolved = actions.length === 0 ? ["CONTACT_UPTECH"] as const : actions;
   return Object.freeze(resolved.map((id) => RECOVERY_ACTION_DESCRIPTORS[id]));
 }
