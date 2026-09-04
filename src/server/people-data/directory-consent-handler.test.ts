@@ -134,7 +134,7 @@ test("consent initiation rejects an untrusted provider redirect and emits no coo
   ));
   assert.equal(response.status, 503);
   assert.equal(response.headers.has("set-cookie"), false);
-  assert.equal(JSON.stringify(await response.json()).includes("attacker"), false);
+  assert.equal(JSON.stringify(await response.json()).includes("tenant-b.example"), false);
 });
 
 test("callback requires one consent cookie, keeps the same active session, clears cookie, and redirects only locally", async () => {
