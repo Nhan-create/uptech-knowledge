@@ -99,7 +99,11 @@ export function createMobileRouteHandlers(dependencies: {
         const result = await dependencies.sessionService.exchangeHandoff({ ...body, canonicalClientIp, requestId });
         if (result.outcome === "RATE_LIMITED") return mobileProblem("RATE_LIMITED", requestId);
         if (result.outcome === "ACCESS_DENIED") {
-          return mobileAuthenticatedDenialProblem(result.category, requestId);
+          return mobileAuthenticatedDenialProblem(
+            result.category,
+            requestId,
+            dependencies.appReturnUri,
+          );
         }
         if (result.outcome !== "ISSUED") return mobileProblem("UNAUTHENTICATED", requestId);
         return mobileJson({ access_token: result.accessToken, refresh_token: result.refreshToken,

@@ -1,10 +1,70 @@
 import {
   createSafeProblem,
-  problemResponse,
+  PROBLEM_CONTENT_TYPE,
   type ProblemCode,
 } from "../../http/problem.ts";
 import type { MobileAuthUiCategory } from "./google-service.ts";
 import { MobileSessionServiceError } from "./session-service.ts";
+
+export type MobileRecoveryActionId =
+  | "OPEN_WORKSPACE_SETUP_IN_BROWSER"
+  | "SWITCH_GOOGLE_ACCOUNT"
+  | "OPEN_ENTERPRISE_LOGIN_HELP"
+  | "CONTACT_WORKSPACE_ADMIN"
+  | "CONTACT_UPTECH"
+  | "RETRY_GOOGLE_LOGIN";
+
+const MOBILE_RECOVERY_ACTIONS = Object.freeze({
+  PERSONAL_GOOGLE_ACCOUNT: ["SWITCH_GOOGLE_ACCOUNT", "OPEN_ENTERPRISE_LOGIN_HELP"],
+  UNKNOWN_WORKSPACE: ["OPEN_WORKSPACE_SETUP_IN_BROWSER", "SWITCH_GOOGLE_ACCOUNT"],
+  USER_NOT_PROVISIONED: ["CONTACT_WORKSPACE_ADMIN", "SWITCH_GOOGLE_ACCOUNT"],
+  USER_SUSPENDED: ["SWITCH_GOOGLE_ACCOUNT", "CONTACT_WORKSPACE_ADMIN"],
+  WORKSPACE_SUSPENDED: ["CONTACT_UPTECH", "SWITCH_GOOGLE_ACCOUNT"],
+  SESSION_REVOKED: ["RETRY_GOOGLE_LOGIN", "SWITCH_GOOGLE_ACCOUNT"],
+  SESSION_EXPIRED: ["RETRY_GOOGLE_LOGIN", "SWITCH_GOOGLE_ACCOUNT"],
+  POLICY_OR_DEVICE_BLOCKED: ["SWITCH_GOOGLE_ACCOUNT", "CONTACT_WORKSPACE_ADMIN"],
+  GOOGLE_CANCELLED: ["RETRY_GOOGLE_LOGIN", "SWITCH_GOOGLE_ACCOUNT"],
+  PROVIDER_UNAVAILABLE: ["RETRY_GOOGLE_LOGIN", "CONTACT_UPTECH"],
+  OFFLINE: ["RETRY_GOOGLE_LOGIN", "CONTACT_UPTECH"],
+  AUTH_ERROR: ["RETRY_GOOGLE_LOGIN", "CONTACT_UPTECH"],
+} as const satisfies Readonly<Record<MobileAuthUiCategory, readonly MobileRecoveryActionId[]>>);
+
+function mobileProblemDocument(code: ProblemCode, requestId: string) {
+  const problem = createSafeProblem(code, requestId);
+  return Object.freeze({
+    type: problem.type,
+    title: problem.title,
+    status: problem.status,
+    code: problem.code,
+    detail: problem.detail,
+    request_id: problem.request_id,
+  });
+}
+
+function mobileProblemResponse(document: ReturnType<typeof mobileProblemDocument> & {
+  readonly recovery_actions?: readonly MobileRecoveryActionId[];
+  readonly web_setup_url?: string;
+}): Response {
+  return new Response(JSON.stringify(document), {
+    status: document.status,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": PROBLEM_CONTENT_TYPE,
+      "X-Request-Id": document.request_id,
+    },
+  });
+}
+
+function trustedWorkspaceSetupUrl(appReturnUri: string): string {
+  const configured = new URL(appReturnUri);
+  if (configured.protocol !== "https:" || configured.username !== "" ||
+      configured.password !== "" || configured.port !== "" ||
+      configured.hash !== "" || configured.search !== "" ||
+      configured.pathname !== "/auth/mobile/callback") {
+    throw new TypeError("Invalid configured Mobile application origin");
+  }
+  return new URL("/login?intent=workspace_setup", configured.origin).href;
+}
 
 export async function boundedJson(request: Request): Promise<unknown> {
   const type = request.headers.get("content-type")?.split(";", 1)[0].trim();
@@ -27,7 +87,7 @@ export function mobileJson(value: unknown, requestId: string, status = 200) {
 }
 
 export function mobileProblem(code: ProblemCode, requestId: string) {
-  return problemResponse(createSafeProblem(code, requestId));
+  return mobileProblemResponse(mobileProblemDocument(code, requestId));
 }
 
 export function mobileAuthProblem(
@@ -43,8 +103,23 @@ export function mobileAuthProblem(
 export function mobileAuthenticatedDenialProblem(
   category: MobileAuthUiCategory,
   requestId: string,
+  appReturnUri: string,
 ): Response {
-  const response = mobileAuthProblem(category, requestId);
+  const actions = MOBILE_RECOVERY_ACTIONS[category];
+  if (actions === undefined) {
+    throw new TypeError("Invalid Mobile recovery category");
+  }
+  const code: ProblemCode = category === "OFFLINE"
+    ? "PROVIDER_UNAVAILABLE"
+    : category;
+  const document = {
+    ...mobileProblemDocument(code, requestId),
+    recovery_actions: actions,
+    ...(category === "UNKNOWN_WORKSPACE"
+      ? { web_setup_url: trustedWorkspaceSetupUrl(appReturnUri) }
+      : {}),
+  };
+  const response = mobileProblemResponse(document);
   response.headers.set("X-Uptech-Mobile-Handoff-Outcome", "ACCESS_DENIED");
   return response;
 }

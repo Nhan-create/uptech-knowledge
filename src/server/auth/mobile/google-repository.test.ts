@@ -41,7 +41,8 @@ test("mobile Google repository preserves only an approved callback denial catego
     appReturnUri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
     category: "USER_NOT_PROVISIONED",
   });
-  assert.match(sql, /complete_mobile_google_callback_directory_v1/u);
+  assert.match(sql, /complete_mobile_google_callback_directory_v2/u);
+  assert.doesNotMatch(sql, /complete_mobile_google_callback_directory_v1/u);
   assert.doesNotMatch(sql, /FROM uptech\.complete_mobile_google_callback_v1\(/u);
 });
 

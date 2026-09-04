@@ -19,7 +19,8 @@ const jsonRequest = (path: string, body: unknown) => new Request(`https://tenant
 
 function handlers(overrides: Record<string, unknown> = {}) {
   return createMobileRouteHandlers({
-    appReturnUri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+    appReturnUri: (overrides.appReturnUri as string | undefined) ??
+      "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
     clientIp() { return "203.0.113.1"; },
     googleService: {
       async rejectMalformedIngress() { return "RECORDED" as const; },
@@ -187,8 +188,74 @@ test("authenticated denial handoff returns its canonical safe problem and reques
     code: "UNKNOWN_WORKSPACE",
     detail: "The organization is not registered.",
     request_id: requestId,
+    recovery_actions: [
+      "OPEN_WORKSPACE_SETUP_IN_BROWSER",
+      "SWITCH_GOOGLE_ACCOUNT",
+    ],
+    web_setup_url:
+      "https://uptech-knowledge-sigma.vercel.app/login?intent=workspace_setup",
   });
 });
+
+test("mobile setup handoff ignores a hostile request origin and exposes no tenant or credential authority", async () => {
+  const response = await handlers({ sessionService: {
+    async exchangeHandoff() {
+      return { outcome: "ACCESS_DENIED", category: "UNKNOWN_WORKSPACE" } as const;
+    },
+  } }).handoffExchange(jsonRequest("/handoffs/exchange?web_setup_url=https://attacker.example", {
+    handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+  }));
+  const body = await response.json() as Record<string, unknown>;
+
+  assert.equal(body.web_setup_url,
+    "https://uptech-knowledge-sigma.vercel.app/login?intent=workspace_setup");
+  assert.deepEqual(Object.keys(body).sort(), [
+    "code", "detail", "recovery_actions", "request_id", "status", "title", "type", "web_setup_url",
+  ]);
+  for (const forbidden of [
+    "workspace_id", "tenant_id", "customer_id", "role", "department", "domains",
+    "access_token", "refresh_token", "handoff", "onboarding_credential", "secret_reference",
+  ]) assert.equal(forbidden in body, false);
+});
+
+test("invalid configured setup origin and unknown category fail closed without recovery authority", async () => {
+  for (const scenario of [
+    { appReturnUri: "http://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+      category: "UNKNOWN_WORKSPACE" },
+    { appReturnUri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+      category: "START_ORGANIZATION_SETUP" },
+  ]) {
+    const response = await handlers({ appReturnUri: scenario.appReturnUri, sessionService: {
+      async exchangeHandoff() {
+        return { outcome: "ACCESS_DENIED", category: scenario.category } as never;
+      },
+    } }).handoffExchange(jsonRequest("/handoffs/exchange", {
+      handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+    }));
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("x-uptech-mobile-handoff-outcome"), null);
+    assert.equal("recovery_actions" in body, false);
+    assert.equal("web_setup_url" in body, false);
+  }
+});
+
+for (const category of [
+  "PERSONAL_GOOGLE_ACCOUNT", "USER_NOT_PROVISIONED", "USER_SUSPENDED",
+  "WORKSPACE_SUSPENDED", "POLICY_OR_DEVICE_BLOCKED", "PROVIDER_UNAVAILABLE",
+] as const) {
+  test(`authenticated ${category} denial has closed mobile actions and no setup URL`, async () => {
+    const response = await handlers({ sessionService: {
+      async exchangeHandoff() { return { outcome: "ACCESS_DENIED", category } as const; },
+    } }).handoffExchange(jsonRequest("/handoffs/exchange", {
+      handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
+    }));
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal("web_setup_url" in body, false);
+    assert.ok(Array.isArray(body.recovery_actions));
+    assert.equal((body.recovery_actions as string[]).includes("START_ORGANIZATION_SETUP"), false);
+  });
+}
 
 test("consumed provider-unavailable denial is marked but an ordinary 503 is not", async () => {
   const authenticated = await handlers({ sessionService: {
