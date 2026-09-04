@@ -175,7 +175,13 @@ test("keeps Git pushes detached from production-domain promotion", async () => {
 });
 
 test("requires an exact production Google Directory cron and a strong cron secret", async () => {
-  for (const cronSecretOverride of ["", "too-short", "contains whitespace despite length 1234567890"]) {
+  for (const cronSecretOverride of [
+    "",
+    "too-short",
+    "contains whitespace despite length 1234567890",
+    "x".repeat(257),
+    `${"x".repeat(31)}é`,
+  ]) {
     const fixtureRoot = await createValidProductionFixture();
     const result = runGuard(fixtureRoot, { CRON_SECRET: cronSecretOverride });
 
@@ -190,6 +196,9 @@ test("requires an exact production Google Directory cron and a strong cron secre
     {},
     { crons: [{ ...directoryCron, schedule: "0 0 * * *" }] },
     { crons: [{ ...directoryCron, path: `${directoryCron.path}/` }] },
+    { crons: [directoryCron, directoryCron] },
+    { crons: [directoryCron, { path: "/api/internal/cron/other", schedule: "* * * * *" }] },
+    { crons: [{ ...directoryCron, timezone: "UTC" }] },
   ]) {
     const fixtureRoot = await createValidProductionFixture();
     await writeFixtureFile(fixtureRoot, "vercel.json", JSON.stringify(configuration));
@@ -201,13 +210,32 @@ test("requires an exact production Google Directory cron and a strong cron secre
       /Directory cron deployment contract is incomplete/,
     );
   }
+
+  const missingRouteRoot = await createValidProductionFixture();
+  await writeFixtureFile(
+    missingRouteRoot,
+    "src/app/api/internal/cron/google-directory/route.ts",
+    "",
+  );
+  const missingRoute = runGuard(missingRouteRoot);
+  assert.notEqual(missingRoute.status, 0);
+  assert.match(
+    `${missingRoute.stdout}\n${missingRoute.stderr}`,
+    /Directory cron deployment contract is incomplete/,
+  );
 });
 
 test("requires exact Google Cloud Directory workload identity metadata", async () => {
   for (const overrides of [
     { UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: "" },
+    { UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: "../service-account.json" },
+    { UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: '{"project_id":"uptech-secrets-prod"}' },
     { UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/vercel/providers/vercel" },
+    { UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "C:\\service-account.json" },
+    { UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: '{"type":"service_account"}' },
     { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "service-account-key.json" },
+    { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "../service-account.json" },
+    { UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: '{"client_email":"directory@example.com"}' },
   ]) {
     const fixtureRoot = await createValidProductionFixture();
     const result = runGuard(fixtureRoot, overrides);

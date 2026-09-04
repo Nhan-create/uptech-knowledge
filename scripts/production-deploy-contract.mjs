@@ -61,6 +61,27 @@ async function readJson(relativePath) {
 
 const androidFingerprintPattern = /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/;
 const iosTeamIdPattern = /^[A-Z0-9]{10}$/;
+const cronSecretPattern = /^[\x21-\x7e]{32,256}$/;
+const gcpProjectIdPattern = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const workloadIdentityProviderPattern =
+  /^https:\/\/iam\.googleapis\.com\/projects\/\d{6,20}\/locations\/global\/workloadIdentityPools\/[a-z0-9-]{4,63}\/providers\/[a-z0-9-]{4,63}$/;
+const serviceAccountEmailPattern =
+  /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
+const directoryCron = Object.freeze({
+  path: "/api/internal/cron/google-directory",
+  schedule: "* * * * *",
+});
+
+function hasExactDirectoryCron(configuration) {
+  if (!configuration || !Array.isArray(configuration.crons) || configuration.crons.length !== 1) {
+    return false;
+  }
+  const [cron] = configuration.crons;
+  return cron && typeof cron === "object" &&
+    Object.keys(cron).length === 2 &&
+    cron.path === directoryCron.path &&
+    cron.schedule === directoryCron.schedule;
+}
 
 function configuredAndroidFingerprint() {
   const fingerprint = process.env.UPTECH_ANDROID_APP_LINKS_SHA256?.trim() ?? "";
@@ -114,6 +135,28 @@ const [publicNav, homePage, loginPage] = await Promise.all([
   readSource("src/app/page.tsx"),
   readSource("src/components/auth/GoogleWorkspaceLogin.tsx"),
 ]);
+
+const vercelConfiguration = await readJson("vercel.json");
+if (
+  !hasExactDirectoryCron(vercelConfiguration) ||
+  !(await hasNonEmptyFile("src/app/api/internal/cron/google-directory/route.ts"))
+) {
+  errors.push("Directory cron deployment contract is incomplete");
+}
+
+if (!cronSecretPattern.test(process.env.CRON_SECRET ?? "")) {
+  errors.push("Directory cron secret is missing or invalid");
+}
+
+if (
+  !gcpProjectIdPattern.test(process.env.UPTECH_GCP_SECRET_MANAGER_PROJECT_ID ?? "") ||
+  !workloadIdentityProviderPattern.test(process.env.UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER ?? "") ||
+  !serviceAccountEmailPattern.test(
+    process.env.UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL ?? "",
+  )
+) {
+  errors.push("Google Cloud Directory workload identity metadata is missing or invalid");
+}
 
 const hasEveryPublicRoute = publicRoutes.every(
   (route) =>
