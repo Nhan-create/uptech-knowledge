@@ -1,7 +1,45 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const baseUrl = process.env.LOGIN_TEST_BASE_URL;
+const provisioningPagePath = new URL("../src/app/setup/provisioning/page.tsx", import.meta.url);
+
+test("provisioning page presents every bounded setup state in Vietnamese and English", () => {
+  assert.equal(existsSync(provisioningPagePath), true, "the provisioning-only page must exist");
+  if (!existsSync(provisioningPagePath)) return;
+
+  const source = readFileSync(provisioningPagePath, "utf8");
+  for (const marker of [
+    "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+    "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE",
+    "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+    "READY",
+    "UNAVAILABLE",
+    "Tổ chức đã được thiết lập",
+    "Danh bạ Google Workspace đang được đồng bộ.",
+    "Lần đồng bộ danh bạ chưa hoàn tất và có thể thử lại an toàn.",
+    "Đồng bộ danh bạ đã hết số lần thử an toàn và cần UPTECH kiểm tra.",
+    "Danh bạ đã được đồng bộ. Hãy hoàn tất thiết lập để quay lại đăng nhập an toàn.",
+    "UPTECH chưa thể xác minh trạng thái thiết lập lúc này. Chưa có quyền truy cập nào được cấp.",
+    "Organization setup is complete",
+    "Google Workspace Directory is synchronizing.",
+    "Directory synchronization did not finish and can be safely retried.",
+    "Safe synchronization retries are exhausted and UPTECH needs to inspect the setup.",
+    "Directory is synchronized. Finish setup to return to secure sign-in.",
+    "UPTECH cannot verify setup status right now. No access has been granted.",
+  ]) {
+    assert.equal(source.includes(marker), true, `missing provisioning copy: ${marker}`);
+  }
+
+  assert.match(source, /<main\b/);
+  assert.match(source, /<section\b[^>]*aria-labelledby="provisioning-title"/);
+  assert.match(source, /id="provisioning-title"/);
+  assert.match(source, /role=\{isProblem \? "alert" : "status"\}/);
+  assert.match(source, /aria-live=\{isProblem \? "assertive" : "polite"\}/);
+  assert.match(source, /data-testid="provisioning-request-id"/);
+  assert.match(source, /max-w-(?:lg|xl)/);
+});
 
 test("login page renders the approved Uptech branding and readable Google action", async (context) => {
   if (baseUrl === undefined) {

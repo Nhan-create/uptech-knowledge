@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const baseUrl = process.env.LOGIN_TEST_BASE_URL;
+const provisioningPagePath = new URL("../src/app/setup/provisioning/page.tsx", import.meta.url);
 const appOrigin = expectedAppOrigin();
 const requestId = "00000000-0000-4000-8000-000000000091";
 
@@ -20,6 +22,28 @@ function expectedAppOrigin() {
   assert.equal(parsed.hash, "", "LOGIN_TEST_APP_ORIGIN must be an origin");
   return parsed.origin;
 }
+
+test("provisioning page is a headers-only fail-closed surface with server-selected actions", () => {
+  assert.equal(existsSync(provisioningPagePath), true, "the provisioning-only page must exist");
+  if (!existsSync(provisioningPagePath)) return;
+
+  const source = readFileSync(provisioningPagePath, "utf8");
+  assert.match(source, /export const dynamic = "force-dynamic"/);
+  assert.match(source, /robots:\s*\{[\s\S]*?index:\s*false[\s\S]*?follow:\s*false[\s\S]*?googleBot:\s*\{[\s\S]*?index:\s*false[\s\S]*?follow:\s*false[\s\S]*?noimageindex:\s*true/);
+  assert.match(source, /export default async function ProvisioningPage\(\)/);
+  assert.match(source, /resolveProvisioningPageModel\(new Headers\(await headers\(\)\)\)/);
+  assert.match(source, /if \(model\.kind === "REDIRECT"\)\s*\{\s*redirect\(model\.destination\);\s*\}/);
+  assert.equal((source.match(/<LoginRecoveryActions\b/gu) ?? []).length, 1);
+  assert.match(source, /state=\{model\.kind === "RENDER" && model\.state !== "READY" \? model\.state : null\}/);
+  assert.match(source, /actions=\{model\.actions\}/);
+  assert.match(source, /csrfToken=\{model\.kind === "RENDER" \? model\.csrfToken : null\}/);
+  assert.match(source, /requestId=\{model\.requestId\}/);
+  assert.match(source, /retryAfterSeconds=\{null\}/);
+
+  assert.doesNotMatch(source, /searchParams|useSearchParams|URLSearchParams|dangerouslySetInnerHTML|\bwindow\b|\bfetch\s*\(/);
+  assert.doesNotMatch(source, /href=|<form\b|action=|\/admin\b|\/home\b/);
+  assert.doesNotMatch(source, /customerId|workspaceId|tenantId|providerError|generationId|groupName|departmentName|orgUnit/);
+});
 
 async function loginHtml(path, context) {
   if (baseUrl === undefined) {
