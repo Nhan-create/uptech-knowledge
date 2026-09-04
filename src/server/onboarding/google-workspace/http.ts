@@ -273,9 +273,8 @@ function bodylessEnvelope(
   const contentLength = request.headers.get("content-length");
   if (request.headers.has("transfer-encoding") ||
       BODY_METADATA_HEADERS.some((name) => request.headers.has(name)) ||
-      (expectedMethod === "POST"
-        ? contentLength !== EMPTY_BODY_BYTES
-        : contentLength !== null && contentLength !== EMPTY_BODY_BYTES)) {
+      (contentLength !== null && contentLength !== EMPTY_BODY_BYTES) ||
+      (expectedMethod === "POST" && request.body !== null)) {
     return problem("VALIDATION_FAILED", requestId);
   }
   return null;

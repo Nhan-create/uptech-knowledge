@@ -499,6 +499,23 @@ function recoveryRequest(path: "status" | "sync-retry" | "finish", options: {
   });
 }
 
+function browserBodylessPost(path: "sync-retry" | "access-requests", body?: ReadableStream<Uint8Array>) {
+  const pathname = path === "sync-retry"
+    ? "/api/v1/onboarding/google-workspace/sync-retry"
+    : "/api/v1/onboarding/access-requests";
+  return new Request(`${APP_ORIGIN}${pathname}`, {
+    method: "POST",
+    headers: {
+      cookie: `__Host-uptech_onboarding=${STATUS}`,
+      origin: APP_ORIGIN,
+      "sec-fetch-site": "same-origin",
+      "x-csrf-token": deriveCsrfCredential(STATUS, PEPPER),
+    },
+    body,
+    duplex: "half",
+  } as RequestInit & { readonly duplex: "half" });
+}
+
 function recoveryFormRequest(path: "finish" | "logout", options: {
   readonly body?: BodyInit;
   readonly contentLength?: string | null;
@@ -583,6 +600,42 @@ test("sync retry accepts only bodyless same-origin status authority and maps req
     assert.ok([400, 403].includes(deniedResponse.status));
     assert.equal(denied.calls.length, 0);
     assertSafe(deniedResponse);
+  }
+});
+
+test("browser sync retry accepts a null body when Content-Length is omitted", async () => {
+  const f = recoveryFixture();
+  const request = browserBodylessPost("sync-retry");
+
+  assert.equal(request.body, null);
+  assert.equal(request.headers.get("content-length"), null);
+  const response = await createBootstrapSyncRetryPost(f.dependencies)(request);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { state: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.deepEqual(f.calls, [{
+    operation: "retrySync",
+    input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID },
+  }]);
+  assertSafe(response);
+});
+
+test("bodyless recovery POSTs reject a non-null zero-byte stream when Content-Length is omitted", async () => {
+  for (const path of ["sync-retry", "access-requests"] as const) {
+    const f = recoveryFixture();
+    const request = browserBodylessPost(path, new ReadableStream<Uint8Array>({
+      start(controller) { controller.close(); },
+    }));
+
+    assert.notEqual(request.body, null);
+    assert.equal(request.headers.get("content-length"), null);
+    const response = path === "sync-retry"
+      ? await createBootstrapSyncRetryPost(f.dependencies)(request)
+      : await createAccessRequestPost(f.accessDependencies)(request);
+
+    assert.equal(response.status, 400);
+    assert.equal(f.calls.length, 0);
+    assertSafe(response);
   }
 });
 
@@ -896,6 +949,26 @@ test("access request submit/read use only the bound capability hash and return o
     { operation: "submitAccessRequest", input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID } },
     { operation: "readAccessRequest", input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID } },
   ]);
+});
+
+test("browser access request accepts a null body when Content-Length is omitted", async () => {
+  const f = recoveryFixture();
+  const request = browserBodylessPost("access-requests");
+
+  assert.equal(request.body, null);
+  assert.equal(request.headers.get("content-length"), null);
+  const response = await createAccessRequestPost(f.accessDependencies)(request);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    request_id: "10000000-0000-4000-8000-000000000006",
+    status: "PENDING",
+  });
+  assert.deepEqual(f.calls, [{
+    operation: "submitAccessRequest",
+    input: { statusTokenHash: hashProof(STATUS), requestId: REQUEST_ID },
+  }]);
+  assertSafe(response);
 });
 
 test("access request routes reject client selectors, conflicting authorities, and closed capability denials before leaking tenant data", async () => {
