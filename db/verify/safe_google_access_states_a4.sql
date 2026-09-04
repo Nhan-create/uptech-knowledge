@@ -1,7 +1,10 @@
 \set ON_ERROR_STOP on
 
--- Run against a disposable database after migrations 0001 through 0006.
-BEGIN;
+-- Production-safe post-migration verification of the A4 login authority boundary.
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '45s';
+SET LOCAL lock_timeout = '8s';
+SET LOCAL idle_in_transaction_session_timeout = '60s';
 
 DO $verify$
 DECLARE
@@ -165,15 +168,15 @@ BEGIN
 
   source_text := pg_get_functiondef(web_routine);
   IF source_text !~ 'workspace_domain_locators'
-     OR source_text !~ 'normalized_domain = \(canonical_claims\)\.normalized_hosted_domain'
+     OR source_text !~ 'normalized_domain[[:space:]]*=[[:space:]]*\(canonical_claims\)\.normalized_hosted_domain'
      OR source_text ~ 'tenant-a\.example|tenant-b\.example|unknown\.example'
      OR source_text !~ '''https://accounts.google.com'''
-     OR source_text !~ 'complete_web_google_login_a2_internal_v1\([[:space:]]*p_completion_handle_hash, canonical_claims'
+     OR source_text !~ 'complete_web_google_login_a2_internal_v1\([[:space:]]*p_completion_handle_hash[[:space:]]*,[[:space:]]*canonical_claims'
      OR source_text !~ 'UNKNOWN_WORKSPACE'
      OR source_text !~ 'USER_NOT_PROVISIONED'
      OR source_text !~ 'USER_SUSPENDED'
      OR source_text !~ 'WORKSPACE_SUSPENDED'
-     OR source_text !~ 'selected_membership_role = ''MEMBER'''
+     OR source_text !~ 'selected_membership_role[[:space:]]*=[[:space:]]*''MEMBER'''
      OR source_text !~ 'complete_web_google_login_a2_internal_v1' THEN
     RAISE EXCEPTION 'A4 exact-locator, safe-state, JIT-member, or bootstrap contract is missing';
   END IF;
@@ -181,19 +184,19 @@ BEGIN
   source_text := pg_get_functiondef(
     'uptech.complete_web_google_login_a1_internal_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure
   );
-  IF source_text !~ 'resolved_membership_status = ''PENDING'''
-     OR source_text ~ 'resolved_membership_status IN \([[:space:]]*''PENDING'', ''DEPROVISIONED'''
-     OR source_text !~ 'IF resolved_workspace_status = ''ACTIVE'' THEN' THEN
+  IF source_text !~ 'resolved_membership_status[[:space:]]*=[[:space:]]*''PENDING'''
+     OR source_text ~ 'resolved_membership_status[[:space:]]*IN[[:space:]]*\([[:space:]]*''PENDING''[[:space:]]*,[[:space:]]*''DEPROVISIONED'''
+     OR source_text !~ 'IF[[:space:]]+resolved_workspace_status[[:space:]]*=[[:space:]]*''ACTIVE''[[:space:]]+THEN' THEN
     RAISE EXCEPTION 'A4 web group-controlled or deprovisioned-member guard is missing';
   END IF;
 
   source_text := pg_get_functiondef(mobile_routine);
   IF source_text !~ 'workspace_domain_locators'
-     OR source_text !~ 'normalized_domain = \(canonical_claims\)\.normalized_hosted_domain'
+     OR source_text !~ 'normalized_domain[[:space:]]*=[[:space:]]*\(canonical_claims\)\.normalized_hosted_domain'
      OR source_text !~ 'WORKSPACE_SUSPENDED'
      OR source_text !~ 'complete_mobile_google_denial_v1'
      OR source_text !~ 'final_denial_category'
-     OR source_text !~ 'complete_mobile_google_callback_a3_internal_v1\([[:space:]]*p_completion_handle_hash, canonical_claims'
+     OR source_text !~ 'complete_mobile_google_callback_a3_internal_v1\([[:space:]]*p_completion_handle_hash[[:space:]]*,[[:space:]]*canonical_claims'
      OR source_text !~ 'complete_mobile_google_callback_a3_internal_v1' THEN
     RAISE EXCEPTION 'A4 mobile denial-handoff callback boundary is missing';
   END IF;
@@ -204,14 +207,14 @@ BEGIN
   END IF;
 
   source_text := pg_get_functiondef(mobile_denial_routine);
-  IF source_text !~ 'status = ''EXCHANGE_RESERVED'''
-     OR source_text !~ 'completion_expires_at <= observed_at'
+  IF source_text !~ 'status[[:space:]]*=[[:space:]]*''EXCHANGE_RESERVED'''
+     OR source_text !~ 'completion_expires_at[[:space:]]*<=[[:space:]]*observed_at'
      OR source_text !~ 'mobile_google_configuration_registry'
-     OR source_text !~ 'configuration_row\.is_enabled'
-     OR source_text !~ 'INSERT INTO uptech\.mobile_handoffs'
-     OR source_text !~ 'NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL'
-     OR source_text !~ 'observed_at \+ interval ''60 seconds'''
-     OR source_text !~ 'status = ''REJECTED'''
+     OR source_text !~ '(configuration_row|candidate)\.is_enabled'
+     OR source_text !~ 'INSERT[[:space:]]+INTO[[:space:]]+uptech\.mobile_handoffs'
+     OR source_text !~ 'NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL[[:space:]]*,[[:space:]]*NULL'
+     OR source_text !~ 'observed_at[[:space:]]*\+[[:space:]]*interval[[:space:]]+''60 seconds'''
+     OR source_text !~ 'status[[:space:]]*=[[:space:]]*''REJECTED'''
      OR source_text !~ 'MOBILE_GOOGLE_CALLBACK_REJECTED'
      OR source_text !~ 'denial_handoff_created' THEN
     RAISE EXCEPTION 'A4 authenticated denial completion contract is incomplete';
@@ -222,7 +225,7 @@ BEGIN
      OR source_text !~ 'mobile_google_auth_admit_internal_v1'
      OR source_text !~ '''ACCESS_DENIED'''
      OR source_text !~ 'selected_handoff\.denial_category'
-     OR source_text !~ 'status = ''CONSUMED'''
+     OR source_text !~ 'status[[:space:]]*=[[:space:]]*''CONSUMED'''
      OR source_text !~ 'p_app_exchange_challenge'
      OR source_text !~ 'p_installation_binding_hash'
      OR (
@@ -235,10 +238,10 @@ BEGIN
   END IF;
 
   source_text := pg_get_functiondef(mobile_internal);
-  IF source_text !~ 'mem\.status=''PENDING'''
-     OR source_text ~ 'mem\.status IN \(''PENDING'',''DEPROVISIONED''\)'
-     OR source_text !~ 'other_membership\.workspace_id <> ws\.workspace_id'
-     OR source_text !~ 'target_membership\.status IN \(''SUSPENDED'', ''DEPROVISIONED''\)' THEN
+  IF source_text !~ 'mem\.status[[:space:]]*=[[:space:]]*''PENDING'''
+     OR source_text ~ 'mem\.status[[:space:]]*IN[[:space:]]*\([[:space:]]*''PENDING''[[:space:]]*,[[:space:]]*''DEPROVISIONED''[[:space:]]*\)'
+     OR source_text !~ 'other_membership\.workspace_id[[:space:]]*<>[[:space:]]*ws\.workspace_id'
+     OR source_text !~ 'target_membership\.status[[:space:]]*IN[[:space:]]*\([[:space:]]*''SUSPENDED''[[:space:]]*,[[:space:]]*''DEPROVISIONED''[[:space:]]*\)' THEN
     RAISE EXCEPTION 'A4 mobile cross-tenant or deprovisioned-member guard is missing';
   END IF;
 

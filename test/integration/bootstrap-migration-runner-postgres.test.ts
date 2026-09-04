@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -33,18 +33,29 @@ test("production runner applies 0009 once and verifies the same database on reru
   const adminUrl = new URL(sourceUrl);
   adminUrl.pathname = "/postgres";
   const childDatabase = `${disposablePrefix}_runner_${randomUUID().replaceAll("-", "")}`;
+  const migrationLogin = `uptech_runner_${randomUUID().replaceAll("-", "")}`;
+  const migrationPassword = randomBytes(32).toString("base64url");
+  assert.match(childDatabase, /^uptech_phase1_test_runner_[a-f0-9]{32}$/u);
+  assert.match(migrationLogin, /^uptech_runner_[a-f0-9]{32}$/u);
+  assert.match(migrationPassword, /^[A-Za-z0-9_-]{43}$/u);
   const childUrl = new URL(sourceUrl);
   childUrl.pathname = `/${childDatabase}`;
+  childUrl.username = migrationLogin;
+  childUrl.password = migrationPassword;
   const admin = new pg.Client({ connectionString: adminUrl.href });
   let child: pg.Client | undefined;
+  let databaseCreated = false;
+  let loginCreated = false;
 
   await admin.connect();
   try {
-    await admin.query(`CREATE DATABASE ${childDatabase}`);
+    await admin.query(`CREATE ROLE ${migrationLogin} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${migrationPassword}' IN ROLE uptech_migration_owner`);
+    loginCreated = true;
+    await admin.query(`CREATE DATABASE ${childDatabase} OWNER uptech_migration_owner`);
+    databaseCreated = true;
     child = new pg.Client({ connectionString: childUrl.href });
     await child.connect();
-    await child.query("CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner");
-    await child.query("SET ROLE uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime, uptech_worker_runtime; RESET ROLE");
+    await child.query("SET ROLE uptech_migration_owner; CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime, uptech_worker_runtime; RESET ROLE");
 
     const migrationNames = [
       "0001_phase1_foundation.sql",
@@ -85,6 +96,21 @@ test("production runner applies 0009 once and verifies the same database on reru
     delete runnerEnvironment.UPTECH_MIGRATION_POSTGRES_URL_NON_POOLING;
 
     for (let run = 0; run < 2; run += 1) {
+      const caller: {
+        exact_login: boolean;
+        restricted: boolean;
+        migration_member: boolean;
+      } = (await child.query(`SELECT
+        current_user = $1 AS exact_login,
+        NOT rolcreatedb AND NOT rolcreaterole AND NOT rolsuper
+          AND NOT rolreplication AND NOT rolbypassrls AS restricted,
+        pg_has_role(current_user, 'uptech_migration_owner', 'MEMBER') AS migration_member
+        FROM pg_roles WHERE rolname = current_user`, [migrationLogin])).rows[0];
+      assert.deepEqual(caller, {
+        exact_login: true,
+        restricted: true,
+        migration_member: true,
+      });
       const result = spawnSync(process.execPath, ["scripts/apply-safe-google-access-states.mjs"], {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -95,6 +121,21 @@ test("production runner applies 0009 once and verifies the same database on reru
       assert.equal(result.stdout.trim(), "Multi-tenant login database migration and mobile registry: PASS");
       assert.equal(result.stderr.trim(), "");
     }
+
+    const a4Source = executableSql(
+      await readFile("db/verify/safe_google_access_states_a4.sql", "utf8"),
+    );
+    await child.query("SET ROLE uptech_migration_owner; GRANT SELECT ON uptech.mobile_handoffs TO uptech_api_runtime; RESET ROLE");
+    try {
+      await assert.rejects(
+        child.query(a4Source),
+        /A4 runtime role has direct pre-tenant authority-table access/u,
+      );
+    } finally {
+      await child.query("ROLLBACK");
+      await child.query("SET ROLE uptech_migration_owner; REVOKE SELECT ON uptech.mobile_handoffs FROM uptech_api_runtime; RESET ROLE");
+    }
+    await child.query(a4Source);
 
     const verified = (await child.query(`SELECT
       to_regprocedure('uptech.complete_google_workspace_bootstrap_v1(uuid,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,text,text,text,text,uptech.google_workspace_verified_domain_v1[],text,text[],uuid)') IS NOT NULL AS bootstrap,
@@ -112,8 +153,16 @@ test("production runner applies 0009 once and verifies the same database on reru
     });
   } finally {
     await child?.end().catch(() => undefined);
-    await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [childDatabase]).catch(() => undefined);
-    await admin.query(`DROP DATABASE IF EXISTS ${childDatabase}`).catch(() => undefined);
-    await admin.end().catch(() => undefined);
+    if (databaseCreated) {
+      await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [childDatabase]);
+      await admin.query(`DROP DATABASE ${childDatabase}`);
+    }
+    if (loginCreated) await admin.query(`DROP ROLE ${migrationLogin}`);
+    const residue = (await admin.query(`SELECT
+      EXISTS(SELECT 1 FROM pg_database WHERE datname=$1) AS database_exists,
+      EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$2) AS login_exists`,
+    [childDatabase, migrationLogin])).rows[0];
+    assert.deepEqual(residue, { database_exists: false, login_exists: false });
+    await admin.end();
   }
 });

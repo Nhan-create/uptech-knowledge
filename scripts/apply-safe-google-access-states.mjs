@@ -289,12 +289,14 @@ const [
   enterpriseLoginBaselineMigrationSource,
   googleDirectoryMigrationSource,
   googleWorkspaceBootstrapMigrationSource,
+  safeGoogleAccessStatesVerificationSource,
   enterpriseLoginVerificationSource,
   googleWorkspaceBootstrapVerificationSource,
 ] = await Promise.all([
   readFile("db/migrations/0007_enterprise_login.sql", "utf8"),
   readFile("db/migrations/0008_google_directory_production.sql", "utf8"),
   readFile("db/migrations/0009_google_workspace_tenant_bootstrap.sql", "utf8"),
+  readFile("db/verify/safe_google_access_states_a4.sql", "utf8"),
   readFile("db/verify/enterprise_login.sql", "utf8"),
   readFile("db/verify/google_workspace_tenant_bootstrap.sql", "utf8"),
 ]);
@@ -390,6 +392,7 @@ try {
     ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
     COMMIT;
   `);
+  await client.query(executableSql(safeGoogleAccessStatesVerificationSource));
   await client.query(executableSql(enterpriseLoginVerificationSource));
   await client.query(executableSql(googleWorkspaceBootstrapVerificationSource));
   await reconcileMobileRegistry(client);

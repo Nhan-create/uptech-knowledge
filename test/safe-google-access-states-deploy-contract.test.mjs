@@ -33,6 +33,7 @@ test("production release requires an explicit one-shot flag before prebuild migr
   assert.match(script, /0008_google_directory_production\.sql/u);
   assert.match(script, /0009_google_workspace_tenant_bootstrap\.sql/u);
   assert.match(script, /verify\/enterprise_login\.sql/u);
+  assert.match(script, /verify\/safe_google_access_states_a4\.sql/u);
   assert.match(script, /verify\/google_workspace_tenant_bootstrap\.sql/u);
   assert.match(script, /complete_google_workspace_bootstrap_v1/u);
   assert.match(script, /complete_web_google_login_directory_v2/u);
@@ -64,6 +65,27 @@ test("bootstrap migration has a dedicated disposable PostgreSQL gate", () => {
     packageJson.scripts["test:postgres:bootstrap"],
     "node --experimental-strip-types --test test/integration/google-workspace-bootstrap-postgres.test.ts test/integration/bootstrap-migration-runner-postgres.test.ts",
   );
+});
+
+test("the A4 verifier is production-safe, read-only, and whitespace portable", async () => {
+  const source = await readFile(
+    new URL("../db/verify/safe_google_access_states_a4.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;/u);
+  assert.match(source, /SET LOCAL statement_timeout/u);
+  assert.match(source, /SET LOCAL lock_timeout/u);
+  assert.match(source, /SET LOCAL idle_in_transaction_session_timeout/u);
+  assert.match(source, /NULL\[\[:space:\]\]\*,\[\[:space:\]\]\*NULL/u);
+  assert.match(source, /status\[\[:space:\]\]\*=\[\[:space:\]\]\*''EXCHANGE_RESERVED''/u);
+  assert.match(source, /completion_expires_at\[\[:space:\]\]\*<=\[\[:space:\]\]\*observed_at/u);
+  assert.match(source, /observed_at\[\[:space:\]\]\*\\\+\[\[:space:\]\]\*interval/u);
+  assert.match(source, /mem\\\.status\[\[:space:\]\]\*=\[\[:space:\]\]\*''PENDING''/u);
+  assert.match(source, /status\[\[:space:\]\]\*IN\[\[:space:\]\]\*\\\(/u);
+  assert.doesNotMatch(source, /source_text !~ 'status =/u);
+  assert.doesNotMatch(source, /source_text !~ 'completion_expires_at <=/u);
+  assert.doesNotMatch(source, /source_text !~ 'observed_at \\\+ interval/u);
+  assert.match(source, /ROLLBACK;/u);
 });
 
 test("ordinary production app builds skip migration without privileged database configuration", () => {
