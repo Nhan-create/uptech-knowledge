@@ -113,6 +113,121 @@ async function sql(path: string): Promise<string> {
   return (await readFile(path, "utf8")).replace(/^\\(?:set|echo) .*$/gm, "");
 }
 
+type ExecutableSqlToken = {
+  readonly kind: "word" | "quoted-identifier" | "symbol";
+  readonly value: string;
+};
+
+const VERIFIER_PROHIBITED_ROUTINES = new Set([
+  "read_google_workspace_bootstrap_status_v1",
+  "retry_google_workspace_bootstrap_sync_v1",
+  "finish_google_workspace_bootstrap_v1",
+  "reissue_google_workspace_bootstrap_status_v1",
+  "revoke_onboarding_capability_v1",
+  "submit_workspace_access_request_v1",
+  "read_workspace_access_request_v1",
+]);
+
+function executableSqlTokens(source: string): ExecutableSqlToken[] {
+  const tokens: ExecutableSqlToken[] = [];
+  let awaitingDoBody = false;
+  let index = 0;
+  const pushSpaceIndependentWord = (value: string, kind: ExecutableSqlToken["kind"]): void => {
+    tokens.push({ kind, value: value.toLowerCase() });
+    if (kind === "word" && value.toLowerCase() === "do") awaitingDoBody = true;
+  };
+
+  while (index < source.length) {
+    if (source.startsWith("--", index)) {
+      index = source.indexOf("\n", index + 2);
+      if (index === -1) break;
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) { depth += 1; index += 2; }
+        else if (source.startsWith("*/", index)) { depth -= 1; index += 2; }
+        else index += 1;
+      }
+      continue;
+    }
+    if (source[index] === "'") {
+      index += 1;
+      while (index < source.length) {
+        if (source[index] !== "'") { index += 1; continue; }
+        if (source[index + 1] === "'") { index += 2; continue; }
+        index += 1;
+        break;
+      }
+      continue;
+    }
+    if (source[index] === "$") {
+      const delimiter = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u.exec(source.slice(index))?.[0];
+      if (delimiter) {
+        const bodyStart = index + delimiter.length;
+        const bodyEnd = source.indexOf(delimiter, bodyStart);
+        if (bodyEnd === -1) {
+          tokens.push({ kind: "symbol", value: "$" });
+          index += 1;
+          continue;
+        }
+        if (awaitingDoBody) tokens.push(...executableSqlTokens(source.slice(bodyStart, bodyEnd)));
+        awaitingDoBody = false;
+        index = bodyEnd + delimiter.length;
+        continue;
+      }
+    }
+    if (source[index] === '"') {
+      let value = "";
+      index += 1;
+      while (index < source.length) {
+        if (source[index] !== '"') { value += source[index]; index += 1; continue; }
+        if (source[index + 1] === '"') { value += '"'; index += 2; continue; }
+        index += 1;
+        break;
+      }
+      pushSpaceIndependentWord(value, "quoted-identifier");
+      continue;
+    }
+    const word = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(source.slice(index))?.[0];
+    if (word) {
+      pushSpaceIndependentWord(word, "word");
+      index += word.length;
+      continue;
+    }
+    if (!/\s/u.test(source[index] ?? "")) {
+      tokens.push({ kind: "symbol", value: source[index] ?? "" });
+      if (source[index] === ";") awaitingDoBody = false;
+    }
+    index += 1;
+  }
+  return tokens;
+}
+
+function verifierSafetyViolations(source: string): string[] {
+  const tokens = executableSqlTokens(source);
+  const violations = new Set<string>();
+  const prohibitedWords = new Set(["insert", "update", "delete", "merge", "truncate"]);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token) continue;
+    if (token.kind === "word" && prohibitedWords.has(token.value)) {
+      violations.add(`executable ${token.value.toUpperCase()}`);
+    }
+    if (token.kind === "word" && (token.value === "execute" || token.value === "call")) {
+      violations.add(`executable ${token.value.toUpperCase()}`);
+    }
+    if ((token.kind === "word" || token.kind === "quoted-identifier")
+      && VERIFIER_PROHIBITED_ROUTINES.has(token.value)
+      && tokens[index + 1]?.value === "(") {
+      violations.add(`prohibited routine ${token.value}`);
+    }
+  }
+  return [...violations];
+}
+
 before(async () => {
   pool = new Pool({ connectionString: databaseUrl(), max: 8 });
   await pool.query("SET ROLE uptech_migration_owner; DROP SCHEMA IF EXISTS uptech CASCADE; RESET ROLE; CREATE SCHEMA uptech AUTHORIZATION uptech_migration_owner; SET ROLE uptech_migration_owner; GRANT USAGE ON SCHEMA uptech TO uptech_api_runtime,uptech_worker_runtime; RESET ROLE");
@@ -611,10 +726,34 @@ test("bootstrap verifier is a bounded production-safe read-only catalog contract
   assert.match(verifier, /SET LOCAL statement_timeout\s*=/u);
   assert.match(verifier, /SET LOCAL lock_timeout\s*=/u);
   assert.match(verifier, /SET LOCAL idle_in_transaction_session_timeout\s*=/u);
-  assert.doesNotMatch(verifier, /^\s*(?:INSERT\s+INTO|UPDATE\s+uptech\.|DELETE\s+FROM)\b/imu);
   assert.doesNotMatch(verifier, /^\s*SET LOCAL ROLE\b/imu);
-  assert.doesNotMatch(verifier, /^\s*(?:status_result|retry_result|finish_result|reissue_result|revoke_result|submit_result|read_result)\s*:=\s*uptech\./imu);
+  assert.deepEqual(verifierSafetyViolations(verifier), []);
   assert.match(verifier, /ROLLBACK;\s*$/u);
+});
+
+test("bootstrap verifier safety scanner rejects executable mutations without catalog-literal false positives", () => {
+  const unsafeSpecimens = [
+    "DO $$ BEGIN PERFORM uptech.finish_google_workspace_bootstrap_v1(NULL, NULL); END $$;",
+    "SELECT uptech.retry_google_workspace_bootstrap_sync_v1(NULL, NULL);",
+    "DO $$ DECLARE result record; BEGIN result := uptech.reissue_google_workspace_bootstrap_status_v1(NULL, NULL, NULL, NULL); END $$;",
+    "CALL uptech.some_dynamic_mutator();",
+    "DO $$ BEGIN EXECUTE 'SELECT 1'; END $$;",
+    "UPDATE uptech.workspaces SET status = 'SUSPENDED';",
+    "WITH erased AS (DELETE FROM uptech.sessions RETURNING id) SELECT * FROM erased;",
+  ];
+  for (const specimen of unsafeSpecimens) {
+    assert.notDeepEqual(verifierSafetyViolations(specimen), [], specimen);
+  }
+
+  const safeSpecimens = [
+    "-- DELETE FROM uptech.sessions; PERFORM uptech.finish_google_workspace_bootstrap_v1(NULL,NULL);\nSELECT 1;",
+    "DO $body$ BEGIN IF pg_catalog.strpos(definition, 'INSERT INTO uptech.sessions') <> 0 THEN NULL; END IF; END $body$;",
+    "DO $body$ BEGIN IF pg_catalog.strpos(definition, $needle$DELETE FROM uptech.sessions$needle$) <> 0 THEN NULL; END IF; END $body$;",
+    "DO $$ BEGIN PERFORM uptech.normalize_google_workspace_verified_domains_v1(NULL, NULL); END $$;",
+  ];
+  for (const specimen of safeSpecimens) {
+    assert.deepEqual(verifierSafetyViolations(specimen), [], specimen);
+  }
 });
 
 test("bootstrap verifier passes on a clean 0001-0009 database with zero application rows", async () => {
