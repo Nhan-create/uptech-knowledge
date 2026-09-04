@@ -22,4 +22,4 @@
 
 ## Commit
 
-- Pending at report creation; populated by the task commit recorded in Git history.
+- Implementation commit: `20f0040` (`feat(auth): accept bounded directory consent forms`).
