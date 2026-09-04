@@ -31,6 +31,9 @@ BEGIN
     ('workspace_access_request_submit_outcome_v1', ARRAY['PENDING','DENIED']::text[]),
     ('workspace_access_request_read_outcome_v1', ARRAY['FOUND','DENIED']::text[]),
     ('google_workspace_bootstrap_start_admission_outcome_v1', ARRAY['ADMITTED','RATE_LIMITED','DENIED']::text[]),
+    ('google_directory_mapping_outcome_v1', ARRAY[
+      'ADMIN','MEMBER','ACCESS_MAPPING_CONFLICT','USER_NOT_PROVISIONED',
+      'USER_SUSPENDED','USER_REMOVED']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
       'UNKNOWN_WORKSPACE','USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT',
@@ -85,7 +88,9 @@ BEGIN
     ('workspace_access_request_submit_result_v1', ARRAY['outcome','request_id','status']::text[],
       ARRAY['uptech.workspace_access_request_submit_outcome_v1','uuid','uptech.workspace_access_request_status_v1']::text[]),
     ('workspace_access_request_read_result_v1', ARRAY['outcome','request_id','status']::text[],
-      ARRAY['uptech.workspace_access_request_read_outcome_v1','uuid','uptech.workspace_access_request_status_v1']::text[])
+      ARRAY['uptech.workspace_access_request_read_outcome_v1','uuid','uptech.workspace_access_request_status_v1']::text[]),
+    ('google_directory_mapping_result_v1', ARRAY['outcome','target_role','target_department_key']::text[],
+      ARRAY['uptech.google_directory_mapping_outcome_v1','text','text']::text[])
   ) AS required(type_name, attribute_names, attribute_types)
   WHERE required.attribute_names IS DISTINCT FROM (
     SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum)
@@ -109,6 +114,41 @@ BEGIN
   END IF;
 END
 $verify$;
+
+DO $verify_mapping_evaluator$
+DECLARE
+  evaluator_oid oid := 'uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)'::regprocedure::oid;
+  evaluator_definition text;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid = evaluator_oid
+      AND procedure_row.prorettype = 'uptech.google_directory_mapping_result_v1'::regtype
+      AND procedure_row.prosecdef
+      AND procedure_row.provolatile = 's'
+      AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND NOT pg_catalog.has_function_privilege('public',procedure_row.oid,'EXECUTE')
+      AND NOT pg_catalog.has_function_privilege('uptech_api_runtime',procedure_row.oid,'EXECUTE')
+      AND NOT pg_catalog.has_function_privilege('uptech_worker_runtime',procedure_row.oid,'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'Directory mapping evaluator has wrong result, safety, or runtime grants';
+  END IF;
+
+  evaluator_definition := pg_catalog.pg_get_functiondef(evaluator_oid);
+  IF pg_catalog.strpos(evaluator_definition, 'google_is_admin') <> 0
+     OR pg_catalog.strpos(evaluator_definition, 'google_is_delegated_admin') <> 0
+     OR pg_catalog.strpos(evaluator_definition, '''OWNER''') <> 0
+     OR pg_catalog.strpos(evaluator_definition, 'people_group_memberships') = 0
+     OR pg_catalog.strpos(evaluator_definition, 'people_org_units') = 0
+     OR pg_catalog.strpos(evaluator_definition, 'lower(') = 0
+     OR pg_catalog.strpos(evaluator_definition, 'p_generation_id') = 0
+     OR pg_catalog.strpos(evaluator_definition, 'provider_customer_id') = 0
+     OR pg_catalog.strpos(evaluator_definition, 'fresh_until') = 0
+  THEN
+    RAISE EXCEPTION 'Directory mapping evaluator lacks required generation-bound signals or uses Google admin authority';
+  END IF;
+END
+$verify_mapping_evaluator$;
 
 DO $verify$
 DECLARE

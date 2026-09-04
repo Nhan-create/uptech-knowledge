@@ -1499,3 +1499,97 @@ test("access-request routines expose only closed results to API runtime", async 
     to_regtype('uptech.workspace_access_request_read_result_v1') IS NOT NULL AS read_result`)).rows[0],
   { submit_result: true, read_result: true });
 });
+
+test("Directory mapping evaluator is generation-bound, converges member signals, and fails closed", async () => {
+  const rows = await asMigrationOwner(async (client) => {
+    await client.query(`
+      INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,google_customer_id) VALUES
+        ('97400000-0000-4000-8000-000000000001','ACTIVE','GOOGLE_GROUP_CONTROLLED','mapping-customer-a'),
+        ('97400000-0000-4000-8000-000000000002','ACTIVE','GOOGLE_GROUP_CONTROLLED','mapping-customer-b');
+      INSERT INTO uptech.users(id) VALUES ('97400000-0000-4000-8000-000000000003');
+      INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
+        VALUES ('97400000-0000-4000-8000-000000000004','97400000-0000-4000-8000-000000000003','GOOGLE','https://accounts.google.com','mapping-authorizer','admin@mapping-a.example',true,'mapping-a.example',statement_timestamp());
+      INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at,google_customer_id,domain_kind)
+        VALUES ('mapping-a.example','97400000-0000-4000-8000-000000000001','VERIFIED',statement_timestamp(),'mapping-customer-a','PRIMARY');
+      INSERT INTO uptech.connectors(workspace_id,id,purpose,status,provider_customer_id,credential_reference,directory_authorized_by_identity_id,directory_authorized_scopes) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000010','DIRECTORY','ACTIVE','mapping-customer-a','secret://mapping-a','97400000-0000-4000-8000-000000000004',ARRAY[
+          'https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly',
+          'https://www.googleapis.com/auth/admin.directory.group.readonly','https://www.googleapis.com/auth/admin.directory.orgunit.readonly']);
+      INSERT INTO uptech.service_actors(workspace_id,id,actor_kind,status)
+        VALUES ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000011','SYNC_WORKER','ACTIVE');
+      INSERT INTO uptech.sync_jobs(workspace_id,id,service_actor_id,connector_id,job_kind,status,dedupe_key,completed_at)
+        VALUES ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000011','97400000-0000-4000-8000-000000000010','DIRECTORY_SYNC','SUCCEEDED','mapping-evaluator',statement_timestamp());
+      INSERT INTO uptech.people_sync_generations(workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,started_at,completed_at,fresh_until,google_customer_id,primary_domain) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000013','SUPERSEDED',true,statement_timestamp()-interval '3 minutes',statement_timestamp()-interval '2 minutes',statement_timestamp()-interval '1 minute','mapping-customer-a','mapping-a.example'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','97400000-0000-4000-8000-000000000010','97400000-0000-4000-8000-000000000012','97400000-0000-4000-8000-000000000014','PUBLISHED',true,statement_timestamp()-interval '1 minute',statement_timestamp()-interval '30 seconds',statement_timestamp()+interval '4 minutes','mapping-customer-a','mapping-a.example');
+      INSERT INTO uptech.people_org_units(workspace_id,generation_id,google_org_unit_id,org_unit_path) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','ou-sales','/Sales');
+      INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,primary_email,department,lifecycle_state,org_unit_path) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','prior-absent','Prior','prior@mapping-a.example',NULL,'ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','admin-sub','Admin','admin2@mapping-a.example','other','ACTIVE','/Sales'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','member-sub','Member','member@mapping-a.example',' Engineering ','ACTIVE','/Sales'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','conflict-sub','Conflict','conflict@mapping-a.example','engineering','ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','none-sub','None','none@mapping-a.example',NULL,'ACTIVE',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','suspended-sub','Suspended','suspended@mapping-a.example','engineering','SUSPENDED',NULL),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','deleted-sub','Deleted','deleted@mapping-a.example','engineering','DELETED',NULL);
+      INSERT INTO uptech.people_groups(workspace_id,generation_id,google_group_id,group_name) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-admin','Admins'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-sales','Sales'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','HR');
+      INSERT INTO uptech.people_group_memberships(workspace_id,generation_id,google_group_id,google_subject) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-admin','admin-sub'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','admin-sub'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-sales','member-sub'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','conflict-sub');
+      INSERT INTO uptech.people_permission_mappings(workspace_id,id,source_kind,source_value,target_role,target_department_key,status) VALUES
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000030','ADMIN_GROUP','g-admin','ADMIN',NULL,'ACTIVE'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000031','GROUP','g-sales','MEMBER','SALES','ACTIVE'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000032','GROUP','g-hr','MEMBER','HR','ACTIVE'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000033','DEPARTMENT','engineering','MEMBER','SALES','ACTIVE'),
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000034','ORG_UNIT','ou-sales','MEMBER','SALES','ACTIVE');
+      UPDATE uptech.people_profiles SET google_is_admin=true,google_is_delegated_admin=true
+        WHERE workspace_id='97400000-0000-4000-8000-000000000001' AND google_subject='none-sub';
+    `);
+    const evaluated = (await client.query(`
+      SELECT subject,(evaluation).outcome::text AS outcome,(evaluation).target_role,(evaluation).target_department_key
+      FROM (VALUES ('admin-sub'),('member-sub'),('conflict-sub'),('none-sub'),('suspended-sub'),
+        ('deleted-sub'),('prior-absent'),('never-sub')) AS subject_row(subject)
+      CROSS JOIN LATERAL uptech.evaluate_google_directory_mapping_v1(
+        '97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021',subject_row.subject
+      ) AS evaluation ORDER BY subject`)).rows;
+    const crossTenant = (await client.query(`SELECT (evaluation).*
+      FROM uptech.evaluate_google_directory_mapping_v1(
+        '97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000021','admin-sub'
+      ) AS evaluation`)).rows[0];
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET fresh_until=statement_timestamp()-interval '1 second'
+      WHERE workspace_id='97400000-0000-4000-8000-000000000001'
+        AND id='97400000-0000-4000-8000-000000000021'`);
+    const stale = (await client.query(`SELECT (evaluation).*
+      FROM uptech.evaluate_google_directory_mapping_v1(
+        '97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','admin-sub'
+      ) AS evaluation`)).rows[0];
+    return { evaluated, crossTenant, stale };
+  });
+  assert.deepEqual(rows.evaluated, [
+    { subject: "admin-sub", outcome: "ADMIN", target_role: "ADMIN", target_department_key: null },
+    { subject: "conflict-sub", outcome: "ACCESS_MAPPING_CONFLICT", target_role: null, target_department_key: null },
+    { subject: "deleted-sub", outcome: "USER_REMOVED", target_role: null, target_department_key: null },
+    { subject: "member-sub", outcome: "MEMBER", target_role: "MEMBER", target_department_key: "SALES" },
+    { subject: "never-sub", outcome: "USER_NOT_PROVISIONED", target_role: null, target_department_key: null },
+    { subject: "none-sub", outcome: "USER_NOT_PROVISIONED", target_role: null, target_department_key: null },
+    { subject: "prior-absent", outcome: "USER_REMOVED", target_role: null, target_department_key: null },
+    { subject: "suspended-sub", outcome: "USER_SUSPENDED", target_role: null, target_department_key: null },
+  ]);
+  assert.deepEqual(rows.crossTenant, {
+    outcome: "USER_NOT_PROVISIONED", target_role: null, target_department_key: null,
+  });
+  assert.deepEqual(rows.stale, {
+    outcome: "USER_NOT_PROVISIONED", target_role: null, target_department_key: null,
+  });
+  const grants = (await pool.query(`SELECT
+    has_function_privilege('public','uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)','EXECUTE') AS public_execute,
+    has_function_privilege('uptech_api_runtime','uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)','EXECUTE') AS api_execute,
+    has_function_privilege('uptech_worker_runtime','uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)','EXECUTE') AS worker_execute`)).rows[0];
+  assert.deepEqual(grants, { public_execute: false, api_execute: false, worker_execute: false });
+});

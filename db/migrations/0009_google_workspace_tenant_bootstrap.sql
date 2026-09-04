@@ -2533,4 +2533,211 @@ GRANT EXECUTE ON FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
   uptech.google_auth_hash32_v1, uuid
 ) TO uptech_api_runtime;
 
+-- Internal, versioned Directory mapping decision used by login completion.
+-- The caller supplies the workspace and exact generation it selected; this
+-- routine revalidates that snapshot and never searches for an alternative.
+CREATE TYPE uptech.google_directory_mapping_outcome_v1 AS ENUM (
+  'ADMIN',
+  'MEMBER',
+  'ACCESS_MAPPING_CONFLICT',
+  'USER_NOT_PROVISIONED',
+  'USER_SUSPENDED',
+  'USER_REMOVED'
+);
+
+CREATE TYPE uptech.google_directory_mapping_result_v1 AS (
+  outcome uptech.google_directory_mapping_outcome_v1,
+  target_role text,
+  target_department_key text
+);
+
+CREATE FUNCTION uptech.evaluate_google_directory_mapping_v1(
+  p_workspace_id uuid,
+  p_generation_id uuid,
+  p_google_subject text
+)
+RETURNS uptech.google_directory_mapping_result_v1
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_profile uptech.people_profiles%ROWTYPE;
+  generation_is_fresh boolean;
+  has_admin_mapping boolean;
+  member_department_count integer;
+  selected_department_key text;
+BEGIN
+  IF p_workspace_id IS NULL OR p_generation_id IS NULL
+     OR p_google_subject IS NULL
+     OR pg_catalog.length(pg_catalog.btrim(p_google_subject)) NOT BETWEEN 1 AND 512
+     OR p_google_subject <> pg_catalog.btrim(p_google_subject) THEN
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  SELECT generation.fresh_until > pg_catalog.statement_timestamp()
+  INTO generation_is_fresh
+  FROM uptech.workspaces AS workspace
+  JOIN uptech.people_sync_generations AS generation
+    ON generation.workspace_id = workspace.workspace_id
+   AND generation.id = p_generation_id
+   AND generation.status = 'PUBLISHED'
+   AND generation.traversal_complete
+   AND generation.completed_at IS NOT NULL
+   AND generation.fresh_until IS NOT NULL
+   AND generation.google_customer_id = workspace.google_customer_id
+  JOIN uptech.connectors AS connector
+    ON connector.workspace_id = generation.workspace_id
+   AND connector.id = generation.connector_id
+   AND connector.purpose = 'DIRECTORY'
+   AND connector.status IN ('ACTIVE','DEGRADED')
+   AND connector.provider_customer_id = workspace.google_customer_id
+   AND connector.credential_reference IS NOT NULL
+   AND connector.directory_authorized_by_identity_id IS NOT NULL
+   AND uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)
+  JOIN uptech.identities AS authorized_identity
+    ON authorized_identity.id = connector.directory_authorized_by_identity_id
+   AND authorized_identity.provider = 'GOOGLE'
+   AND authorized_identity.issuer = 'https://accounts.google.com'
+   AND authorized_identity.status = 'ACTIVE'
+   AND authorized_identity.email_verified
+  JOIN uptech.workspace_domain_locators AS authorized_locator
+    ON authorized_locator.workspace_id = workspace.workspace_id
+   AND authorized_locator.google_customer_id = workspace.google_customer_id
+   AND authorized_locator.normalized_domain::text =
+       pg_catalog.lower(authorized_identity.hosted_domain_claim)
+   AND authorized_locator.status = 'VERIFIED'
+  WHERE workspace.workspace_id = p_workspace_id
+    AND workspace.status = 'ACTIVE'
+    AND workspace.provisioning_policy = 'GOOGLE_GROUP_CONTROLLED';
+
+  IF NOT FOUND THEN
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  IF NOT generation_is_fresh THEN
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  SELECT profile.* INTO selected_profile
+  FROM uptech.people_profiles AS profile
+  WHERE profile.workspace_id = p_workspace_id
+    AND profile.generation_id = p_generation_id
+    AND profile.google_subject = p_google_subject;
+
+  IF NOT FOUND THEN
+    IF EXISTS (
+      SELECT 1
+      FROM uptech.people_profiles AS prior_profile
+      JOIN uptech.people_sync_generations AS prior_generation
+        ON prior_generation.workspace_id = prior_profile.workspace_id
+       AND prior_generation.id = prior_profile.generation_id
+      JOIN uptech.workspaces AS prior_workspace
+        ON prior_workspace.workspace_id = prior_generation.workspace_id
+       AND prior_generation.google_customer_id = prior_workspace.google_customer_id
+      WHERE prior_profile.workspace_id = p_workspace_id
+        AND prior_profile.google_subject = p_google_subject
+        AND prior_generation.id <> p_generation_id
+        AND prior_generation.status IN ('PUBLISHED','SUPERSEDED')
+        AND prior_generation.traversal_complete
+        AND prior_generation.completed_at IS NOT NULL
+    ) THEN
+      RETURN ROW('USER_REMOVED',NULL,NULL)
+        ::uptech.google_directory_mapping_result_v1;
+    END IF;
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  IF selected_profile.lifecycle_state = 'SUSPENDED' THEN
+    RETURN ROW('USER_SUSPENDED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  ELSIF selected_profile.lifecycle_state = 'DELETED' THEN
+    RETURN ROW('USER_REMOVED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  ELSIF selected_profile.lifecycle_state <> 'ACTIVE' THEN
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM uptech.people_group_memberships AS membership
+    JOIN uptech.people_permission_mappings AS mapping
+      ON mapping.workspace_id = membership.workspace_id
+     AND mapping.source_kind = 'ADMIN_GROUP'
+     AND mapping.source_value = membership.google_group_id
+     AND mapping.status = 'ACTIVE'
+    WHERE membership.workspace_id = p_workspace_id
+      AND membership.generation_id = p_generation_id
+      AND membership.google_subject = p_google_subject
+  ) INTO has_admin_mapping;
+
+  IF has_admin_mapping THEN
+    RETURN ROW('ADMIN','ADMIN',NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  SELECT pg_catalog.count(DISTINCT signal.target_department_key),
+         pg_catalog.min(signal.target_department_key)
+  INTO member_department_count, selected_department_key
+  FROM (
+    SELECT mapping.target_department_key
+    FROM uptech.people_group_memberships AS membership
+    JOIN uptech.people_permission_mappings AS mapping
+      ON mapping.workspace_id = membership.workspace_id
+     AND mapping.source_kind = 'GROUP'
+     AND mapping.source_value = membership.google_group_id
+     AND mapping.status = 'ACTIVE'
+    WHERE membership.workspace_id = p_workspace_id
+      AND membership.generation_id = p_generation_id
+      AND membership.google_subject = p_google_subject
+
+    UNION ALL
+
+    SELECT mapping.target_department_key
+    FROM uptech.people_permission_mappings AS mapping
+    WHERE mapping.workspace_id = p_workspace_id
+      AND mapping.source_kind = 'DEPARTMENT'
+      AND mapping.source_value = pg_catalog.lower(
+        pg_catalog.btrim(selected_profile.department))
+      AND mapping.status = 'ACTIVE'
+
+    UNION ALL
+
+    SELECT mapping.target_department_key
+    FROM uptech.people_org_units AS org_unit
+    JOIN uptech.people_permission_mappings AS mapping
+      ON mapping.workspace_id = org_unit.workspace_id
+     AND mapping.source_kind = 'ORG_UNIT'
+     AND mapping.source_value = org_unit.google_org_unit_id
+     AND mapping.status = 'ACTIVE'
+    WHERE org_unit.workspace_id = p_workspace_id
+      AND org_unit.generation_id = p_generation_id
+      AND org_unit.org_unit_path = selected_profile.org_unit_path
+  ) AS signal;
+
+  IF member_department_count = 0 THEN
+    RETURN ROW('USER_NOT_PROVISIONED',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  ELSIF member_department_count > 1 THEN
+    RETURN ROW('ACCESS_MAPPING_CONFLICT',NULL,NULL)
+      ::uptech.google_directory_mapping_result_v1;
+  END IF;
+
+  RETURN ROW('MEMBER','MEMBER',selected_department_key)
+    ::uptech.google_directory_mapping_result_v1;
+END
+$function$;
+
+REVOKE ALL ON TYPE uptech.google_directory_mapping_outcome_v1,
+  uptech.google_directory_mapping_result_v1
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+REVOKE ALL ON FUNCTION uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
 COMMIT;
