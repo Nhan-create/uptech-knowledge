@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  resolveLoginPageError,
   resolveLoginPageModel,
   resolveLoginPageViewModel,
   type LoginPageModelDependencies,
@@ -238,4 +239,26 @@ test("serialized result excludes raw credentials and every hostile query field",
   for (const forbidden of ["cookie", "headers", "staleCookieHeaders", "authority", "operations", "workspaceId", "customerId", "tenantId", "destination"]) {
     assert.equal(keys.has(forbidden), false, forbidden);
   }
+});
+
+test("legacy login error compatibility returns only accepted public keys unchanged", () => {
+  assert.equal(resolveLoginPageError("unknown_workspace", "LOGIN"), "unknown_workspace");
+  assert.equal(resolveLoginPageError("UNKNOWN_WORKSPACE", "LOGIN"), "UNKNOWN_WORKSPACE");
+  assert.equal(resolveLoginPageError("provider_rejected", "HOME"), "provider_rejected");
+  assert.equal(resolveLoginPageError(undefined, "LOGIN"), undefined);
+});
+
+test("legacy login error compatibility rejects provider detail and structured hostile input", () => {
+  for (const input of [
+    "access_denied: admin@example.com",
+    "https://attacker.example/callback",
+    "javascript:alert(1)",
+    ["UNKNOWN_WORKSPACE", "INTERNAL_ERROR"],
+    { error: "UNKNOWN_WORKSPACE" },
+    401,
+    null,
+  ]) {
+    assert.equal(resolveLoginPageError(input as never, "LOGIN"), undefined);
+  }
+  assert.equal(resolveLoginPageError("https://attacker.example", "UNAVAILABLE"), "temporarily_unavailable");
 });

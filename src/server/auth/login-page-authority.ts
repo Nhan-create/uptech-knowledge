@@ -225,13 +225,15 @@ export async function resolveLoginPageModel(
 }
 
 export function resolveLoginPageError(
-  requestedError: string | undefined,
+  requestedError: unknown,
   authority: LoginPageAuthorityDecision,
 ): string | undefined {
   if (authority === "UNAVAILABLE") {
     return "temporarily_unavailable";
   }
-  return requestedError;
+  return typeof requestedError === "string" && publicRecoveryState(requestedError) !== null
+    ? requestedError
+    : undefined;
 }
 
 export async function resolveLoginPageAuthority(
