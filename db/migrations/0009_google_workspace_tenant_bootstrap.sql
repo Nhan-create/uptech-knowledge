@@ -2738,6 +2738,10 @@ DECLARE
   selected_workspace_security_version bigint;
   selected_generation_id uuid;
   selected_generation_fresh_until timestamptz;
+  revalidated_generation_id uuid;
+  revalidated_mapping_outcome text;
+  revalidated_mapping_target_role text;
+  revalidated_mapping_target_department text;
   selected_membership_id uuid;
   selected_membership_role text;
   selected_membership_status text;
@@ -2988,6 +2992,111 @@ BEGIN
         ::uptech.google_login_completion_result_v3;
     END IF;
 
+    IF p_session_token_hash IS NOT NULL AND p_csrf_token_hash IS NOT NULL THEN
+      PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+        'UPTECH_CREDENTIAL_V1' || LEAST(pg_catalog.encode(p_session_token_hash,'hex'),
+          pg_catalog.encode(p_csrf_token_hash,'hex')),0));
+      PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+        'UPTECH_CREDENTIAL_V1' || GREATEST(pg_catalog.encode(p_session_token_hash,'hex'),
+          pg_catalog.encode(p_csrf_token_hash,'hex')),0));
+    END IF;
+    IF p_session_token_hash IS NULL OR p_csrf_token_hash IS NULL
+      OR p_session_token_hash=p_csrf_token_hash OR p_session_token_hash=p_onboarding_token_hash
+      OR p_csrf_token_hash=p_onboarding_token_hash
+      OR EXISTS(SELECT 1 FROM uptech.session_tokens
+        WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)
+          OR csrf_token_hash IN(p_session_token_hash,p_csrf_token_hash))
+      OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)) THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='credential collision';
+    END IF;
+
+    -- Credential advisory locks can wait while Directory authority changes.
+    -- Re-pin the exact proof under row locks after that final wait and before
+    -- any Membership or product-session authority is written.
+    SELECT generation.id INTO revalidated_generation_id
+    FROM uptech.people_sync_generations AS generation
+    JOIN uptech.workspaces AS workspace
+      ON workspace.workspace_id=generation.workspace_id
+     AND workspace.google_customer_id=generation.google_customer_id
+    JOIN uptech.connectors AS connector
+      ON connector.workspace_id=generation.workspace_id
+     AND connector.id=generation.connector_id
+     AND connector.purpose='DIRECTORY'
+     AND connector.status IN ('ACTIVE','DEGRADED')
+     AND connector.provider_customer_id=workspace.google_customer_id
+     AND connector.credential_reference IS NOT NULL
+     AND connector.directory_authorized_by_identity_id IS NOT NULL
+     AND uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)
+    JOIN uptech.identities AS authorized_identity
+      ON authorized_identity.id=connector.directory_authorized_by_identity_id
+     AND authorized_identity.provider='GOOGLE'
+     AND authorized_identity.issuer='https://accounts.google.com'
+     AND authorized_identity.status='ACTIVE'
+     AND authorized_identity.email_verified
+    JOIN uptech.workspace_domain_locators AS authorized_locator
+      ON authorized_locator.workspace_id=workspace.workspace_id
+     AND authorized_locator.google_customer_id=workspace.google_customer_id
+     AND authorized_locator.normalized_domain::text=
+         pg_catalog.lower(authorized_identity.hosted_domain_claim)
+     AND authorized_locator.status='VERIFIED'
+    JOIN uptech.workspace_domain_locators AS login_locator
+      ON login_locator.workspace_id=workspace.workspace_id
+     AND login_locator.google_customer_id=workspace.google_customer_id
+     AND login_locator.normalized_domain=(canonical_claims).normalized_hosted_domain
+     AND login_locator.status='VERIFIED'
+    JOIN uptech.people_profiles AS profile
+      ON profile.workspace_id=generation.workspace_id
+     AND profile.generation_id=generation.id
+     AND profile.google_subject=(canonical_claims).provider_subject::text
+     AND profile.lifecycle_state='ACTIVE'
+    WHERE generation.workspace_id=selected_workspace_id
+      AND generation.id=selected_generation_id
+      AND generation.status='PUBLISHED'
+      AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL
+      AND generation.fresh_until>pg_catalog.clock_timestamp()
+      AND workspace.status='ACTIVE'
+      AND workspace.provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+      AND NOT EXISTS (
+        SELECT 1 FROM uptech.people_sync_generations AS newer_generation
+        WHERE newer_generation.workspace_id=generation.workspace_id
+          AND newer_generation.status='PUBLISHED'
+          AND newer_generation.traversal_complete
+          AND newer_generation.completed_at IS NOT NULL
+          AND (newer_generation.completed_at,newer_generation.id)>
+              (generation.completed_at,generation.id)
+      )
+    FOR UPDATE OF generation,connector,authorized_identity,authorized_locator,login_locator,profile;
+    IF revalidated_generation_id IS NULL THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory authority changed';
+    END IF;
+
+    IF selected_membership_role='OWNER' AND selected_membership_status='ACTIVE' THEN
+      IF NOT EXISTS (
+        SELECT 1 FROM uptech.workspace_memberships AS current_membership
+        WHERE current_membership.workspace_id=selected_workspace_id
+          AND current_membership.id=selected_membership_id
+          AND current_membership.user_id=selected_user_id
+          AND current_membership.role='OWNER'
+          AND current_membership.status='ACTIVE'
+      ) THEN
+        RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='owner authority changed';
+      END IF;
+    ELSE
+      SELECT (evaluation).outcome::text,(evaluation).target_role,
+        (evaluation).target_department_key
+      INTO revalidated_mapping_outcome,revalidated_mapping_target_role,
+        revalidated_mapping_target_department
+      FROM uptech.evaluate_google_directory_mapping_v1(selected_workspace_id,
+        selected_generation_id,(canonical_claims).provider_subject::text) AS evaluation;
+      IF revalidated_mapping_outcome NOT IN ('ADMIN','MEMBER')
+         OR revalidated_mapping_target_role IS DISTINCT FROM mapping_target_role
+         OR revalidated_mapping_target_department IS DISTINCT FROM mapping_target_department THEN
+        RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory mapping changed';
+      END IF;
+    END IF;
+    observed_at:=pg_catalog.clock_timestamp();
+
     IF selected_membership_role='OWNER' AND selected_membership_status='ACTIVE' THEN
       NULL;
     ELSE
@@ -3021,23 +3130,6 @@ BEGIN
       selected_membership_role:=mapping_target_role;
     END IF;
 
-    IF p_session_token_hash IS NOT NULL AND p_csrf_token_hash IS NOT NULL THEN
-      PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-        'UPTECH_CREDENTIAL_V1' || LEAST(pg_catalog.encode(p_session_token_hash,'hex'),
-          pg_catalog.encode(p_csrf_token_hash,'hex')),0));
-      PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-        'UPTECH_CREDENTIAL_V1' || GREATEST(pg_catalog.encode(p_session_token_hash,'hex'),
-          pg_catalog.encode(p_csrf_token_hash,'hex')),0));
-    END IF;
-    IF p_session_token_hash IS NULL OR p_csrf_token_hash IS NULL
-      OR p_session_token_hash=p_csrf_token_hash OR p_session_token_hash=p_onboarding_token_hash
-      OR p_csrf_token_hash=p_onboarding_token_hash
-      OR EXISTS(SELECT 1 FROM uptech.session_tokens
-        WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)
-          OR csrf_token_hash IN(p_session_token_hash,p_csrf_token_hash))
-      OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)) THEN
-      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='credential collision';
-    END IF;
     selected_session_id:=pg_catalog.gen_random_uuid();
     INSERT INTO uptech.sessions(workspace_id,id,identity_id,user_id,membership_id,client_type,status,
       user_security_version,identity_security_version,workspace_security_version,membership_authz_version,
