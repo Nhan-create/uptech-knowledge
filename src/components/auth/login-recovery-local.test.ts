@@ -140,12 +140,12 @@ test("contact href fixes the recipient and admits only closed state and canonica
     const decoded = decodeURIComponent(href);
     assert.ok(decoded.includes(state), state);
     assert.ok(decoded.includes(REQUEST_ID), state);
-    assert.equal(decoded.includes("evil.example"), false);
+    assert.equal(decoded.includes("tenant-b.example"), false);
   }
-  const forged = buildRecoveryContactHref({ locale: "vi", state: "<img src=evil.example>", requestId: "bad-secret" });
+  const forged = buildRecoveryContactHref({ locale: "vi", state: "<img src=tenant-b.example>", requestId: "bad-secret" });
   const decoded = decodeURIComponent(forged);
   assert.ok(forged.startsWith("mailto:contact@uptech.vn?"));
-  assert.equal(decoded.includes("evil.example"), false);
+  assert.equal(decoded.includes("tenant-b.example"), false);
   assert.equal(decoded.includes("bad-secret"), false);
 });
 

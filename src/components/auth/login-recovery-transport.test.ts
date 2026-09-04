@@ -103,7 +103,7 @@ test("cooldown login requires a positive bounded integer", () => {
 test("hostile descriptor fields and unknown IDs cannot select browser destinations", () => {
   const descriptor = {
     ...RECOVERY_ACTION_DESCRIPTORS.START_NORMAL_LOGIN,
-    method: "GET", path: "https://evil.example/steal", recipient: "evil@example.com",
+    method: "GET", path: "https://tenant-b.example/steal", recipient: "evil@tenant-b.example",
     template: "EVIL", label: { vi: "evil", en: "evil" },
   } as unknown as RecoveryActionDescriptor;
   assert.deepEqual(resolveLoginRecoveryTransport({ descriptor, csrfToken: null, requestId: null, retryAfterSeconds: null }), {
@@ -133,7 +133,7 @@ test("access-request success accepts only the exact pending receipt", () => {
 test("near-miss and hostile success payloads fail locally and retain at most a canonical request UUID", () => {
   const failures = [
     { actionId: "CHECK_BOOTSTRAP_STATUS" as const, status: 201, payload: { state: "READY" } },
-    { actionId: "CHECK_BOOTSTRAP_STATUS" as const, status: 200, payload: { state: "READY", destination: "https://evil.example" } },
+    { actionId: "CHECK_BOOTSTRAP_STATUS" as const, status: 200, payload: { state: "READY", destination: "https://tenant-b.example" } },
     { actionId: "RETRY_DIRECTORY_SYNC" as const, status: 200, payload: { state: "DENIED" } },
     { actionId: "SUBMIT_ACCESS_REQUEST" as const, status: 200, payload: { request_id: REQUEST_ID, status: "PENDING", actions: ["ADMIN"] } },
     { actionId: "SUBMIT_ACCESS_REQUEST" as const, status: 200, payload: { request_id: "not-a-uuid", status: "PENDING" } },
@@ -143,7 +143,7 @@ test("near-miss and hostile success payloads fail locally and retain at most a c
     const result = parseLoginRecoveryFetchSuccess(input);
     assert.equal(result.kind, "FAILURE");
     assert.deepEqual(Object.keys(result).sort(), ["kind", "requestId"]);
-    assert.equal(JSON.stringify(result).includes("evil.example"), false);
+    assert.equal(JSON.stringify(result).includes("tenant-b.example"), false);
     assert.equal(JSON.stringify(result).includes("provider secret"), false);
   }
   assert.deepEqual(parseLoginRecoveryFetchSuccess(failures[3]), { kind: "FAILURE", requestId: REQUEST_ID });

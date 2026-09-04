@@ -108,9 +108,9 @@ if (false) {
   createSafeProblem("NOT_FOUND", REQUEST_ID, ["CONTACT_UPTECH"]);
   const callerDirectedInput = {
     action_ids: ["CONTACT_UPTECH"],
-    url: "https://attacker.example",
+    url: "https://tenant-b.example",
     method: "POST",
-    return_to: "https://attacker.example/return",
+    return_to: "https://tenant-b.example/return",
   };
   // @ts-expect-error Caller-controlled transport and return data cannot stand in for authority.
   createSafeProblem("NOT_FOUND", REQUEST_ID, callerDirectedInput);

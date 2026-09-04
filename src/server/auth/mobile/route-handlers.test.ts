@@ -202,7 +202,7 @@ test("mobile setup handoff ignores a hostile request origin and exposes no tenan
     async exchangeHandoff() {
       return { outcome: "ACCESS_DENIED", category: "UNKNOWN_WORKSPACE" } as const;
     },
-  } }).handoffExchange(jsonRequest("/handoffs/exchange?web_setup_url=https://attacker.example", {
+  } }).handoffExchange(jsonRequest("/handoffs/exchange?web_setup_url=https://tenant-b.example", {
     handoff_code: proof(1), app_exchange_verifier: proof(2), installation_secret: proof(3),
   }));
   const body = await response.json() as Record<string, unknown>;

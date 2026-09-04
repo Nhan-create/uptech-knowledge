@@ -23,7 +23,7 @@ function authority(operations: readonly string[]): RecoveryAuthority {
 }
 function deps(overrides: Partial<LoginPageModelDependencies> = {}): LoginPageModelDependencies {
   return {
-    loadConfig: () => ({ databaseUrl: "postgres://runtime@example.invalid/db", sessionPepper: PEPPER }),
+    loadConfig: () => ({ databaseUrl: "postgres://runtime@tenant-a.example/db", sessionPepper: PEPPER }),
     getPool: () => pool,
     inspectAuthority: async () => inspection(),
     resolveWebRoute: async () => ({ kind: "NOT_CURRENT" }),
@@ -219,7 +219,7 @@ test("runtime or database uncertainty returns unavailable without capability", a
 });
 
 test("serialized result excludes raw credentials and every hostile query field", async () => {
-  const hostile = "attacker@example.com/customer/tenant/javascript:alert(1)/OWNER/FIRST_DOMAIN_CLAIM_COMPLETE";
+  const hostile = "attacker@tenant-b.example/customer/tenant/javascript:alert(1)/OWNER/FIRST_DOMAIN_CLAIM_COMPLETE";
   const model = await resolveLoginPageViewModel(new Headers({ cookie: `${ONBOARDING_COOKIE_NAME}=${RAW}` }),
     { error: "UNKNOWN_WORKSPACE", request_id: hostile, action: hostile, returnUrl: hostile, tenant: hostile, domain: hostile, email: hostile, role: hostile, method: hostile } as never,
     deps({ inspectAuthority: async () => inspection(authority(RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN)) }));
@@ -250,8 +250,8 @@ test("legacy login error compatibility returns only accepted public keys unchang
 
 test("legacy login error compatibility rejects provider detail and structured hostile input", () => {
   for (const input of [
-    "access_denied: admin@example.com",
-    "https://attacker.example/callback",
+    "access_denied: admin@tenant-b.example",
+    "https://tenant-b.example/callback",
     "javascript:alert(1)",
     ["UNKNOWN_WORKSPACE", "INTERNAL_ERROR"],
     { error: "UNKNOWN_WORKSPACE" },
@@ -260,5 +260,5 @@ test("legacy login error compatibility rejects provider detail and structured ho
   ]) {
     assert.equal(resolveLoginPageError(input as never, "LOGIN"), undefined);
   }
-  assert.equal(resolveLoginPageError("https://attacker.example", "UNAVAILABLE"), "temporarily_unavailable");
+  assert.equal(resolveLoginPageError("https://tenant-b.example", "UNAVAILABLE"), "temporarily_unavailable");
 });
