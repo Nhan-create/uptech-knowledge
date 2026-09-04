@@ -2706,6 +2706,51 @@ REVOKE ALL ON FUNCTION uptech.append_google_controlled_login_denial_audit_v1(
   uuid,uuid,text,text,uuid
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+-- Publication and controlled login both touch Workspace and Directory snapshot
+-- authority. Put an exclusive publisher and shared logins in one workspace
+-- lock namespace before either path takes the conflicting row locks. The
+-- deployed 0008 body remains intact behind a private delegate.
+ALTER FUNCTION uptech.publish_people_sync_generation_v1(
+  uuid,uuid,uuid,boolean,timestamptz,uuid
+) RENAME TO publish_people_sync_generation_internal_v2;
+
+REVOKE ALL ON FUNCTION uptech.publish_people_sync_generation_internal_v2(
+  uuid,uuid,uuid,boolean,timestamptz,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+CREATE FUNCTION uptech.publish_people_sync_generation_v1(
+  p_workspace_id uuid,
+  p_generation_id uuid,
+  p_fence uuid,
+  p_traversal_complete boolean,
+  p_fresh_until timestamptz,
+  p_request_id uuid
+)
+RETURNS TABLE (outcome text, generation_id uuid, fresh_until timestamptz)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'UPTECH_PEOPLE_DIRECTORY_WORKSPACE_V1' || p_workspace_id::text,0
+  ));
+  RETURN QUERY
+  SELECT delegated.outcome,delegated.generation_id,delegated.fresh_until
+  FROM uptech.publish_people_sync_generation_internal_v2(
+    p_workspace_id,p_generation_id,p_fence,p_traversal_complete,p_fresh_until,p_request_id
+  ) AS delegated;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.publish_people_sync_generation_v1(
+  uuid,uuid,uuid,boolean,timestamptz,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.publish_people_sync_generation_v1(
+  uuid,uuid,uuid,boolean,timestamptz,uuid
+) TO uptech_worker_runtime;
+
 -- Task 7B1 intentionally handles only an unknown verified hosted domain. All
 -- known-tenant paths fail closed here until the Directory/JIT slice lands.
 CREATE FUNCTION uptech.complete_web_google_login_directory_v2(
@@ -2791,6 +2836,9 @@ BEGIN
   END IF;
 
   IF selected_workspace_id IS NOT NULL THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(
+      'UPTECH_PEOPLE_DIRECTORY_WORKSPACE_V1' || selected_workspace_id::text,0
+    ));
     SELECT status,provisioning_policy,security_version
     INTO selected_workspace_status,selected_workspace_policy,selected_workspace_security_version
     FROM uptech.workspaces WHERE workspace_id=selected_workspace_id FOR UPDATE;

@@ -2574,3 +2574,183 @@ test("V2 controlled completion revalidates Directory authority after credential-
     assert.deepEqual(audit, { count: 1, correlated: true, redacted: true });
   }
 });
+
+test("Directory publish and controlled login serialize without a workspace-generation deadlock", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const connectorId = "97400000-0000-4000-8000-000000000010";
+  const actorId = "97400000-0000-4000-8000-000000000011";
+  const currentGenerationId = "97400000-0000-4000-8000-000000000021";
+  const jobId = "97800000-0000-4000-8000-000000000001";
+  const generationId = "97800000-0000-4000-8000-000000000002";
+  const fence = "97800000-0000-4000-8000-000000000003";
+  const transactionId = "97800000-0000-4000-8000-000000000004";
+  const subject = "publish-login-race-sub";
+  const sessionToken = Buffer.alloc(32, 0xb1);
+  const csrfToken = Buffer.alloc(32, 0xb2);
+  const onboardingToken = Buffer.alloc(32, 0xb3);
+  const handle = Buffer.alloc(32, 0xb4);
+  const nonce = Buffer.alloc(32, 0xb5);
+  const environment = await ensureActiveGoogleEnvironment();
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`UPDATE uptech.workspaces
+      SET status='ACTIVE',provisioning_policy='GOOGLE_GROUP_CONTROLLED'
+      WHERE workspace_id=$1`, [workspaceId]);
+    await client.query(`UPDATE uptech.connectors SET status='ACTIVE'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, connectorId]);
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET status='SUPERSEDED',fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND status='PUBLISHED' AND id<>$2`, [workspaceId, currentGenerationId]);
+    await client.query(`UPDATE uptech.people_sync_generations
+      SET status='PUBLISHED',fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, currentGenerationId]);
+    await client.query(`INSERT INTO uptech.people_profiles(
+      workspace_id,generation_id,google_subject,full_name,primary_email,department,
+      lifecycle_state,org_unit_path,effective_role,effective_department_key
+    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@mapping-a.example','sales',
+      'ACTIVE','/Sales','MEMBER','SALES')`, [workspaceId, currentGenerationId, subject]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject
+    ) VALUES ($1,$2,'g-sales',$3)`, [workspaceId, currentGenerationId, subject]);
+    await client.query(`INSERT INTO uptech.sync_jobs(
+      workspace_id,id,service_actor_id,connector_id,job_kind,status,dedupe_key,
+      available_at,leased_at,lease_expires_at,lease_owner,lease_fence
+    ) VALUES ($1,$2,$3,$4,'DIRECTORY_SYNC','LEASED','publish-login-race',
+      statement_timestamp(),statement_timestamp(),statement_timestamp()+interval '5 minutes',
+      session_user,$5)`, [workspaceId, jobId, actorId, connectorId, fence]);
+    await client.query(`INSERT INTO uptech.people_sync_generations(
+      workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,
+      started_at,google_customer_id,primary_domain
+    ) VALUES ($1,$2,$3,$4,$5,'RUNNING',false,statement_timestamp(),
+      'mapping-customer-a','mapping-a.example')`, [workspaceId, generationId, connectorId, jobId, fence]);
+    await client.query(`INSERT INTO uptech.people_groups(
+      workspace_id,generation_id,google_group_id,group_name
+    ) VALUES ($1,$2,'g-sales','Sales')`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_profiles(
+      workspace_id,generation_id,google_subject,full_name,primary_email,department,
+      lifecycle_state,org_unit_path
+    ) VALUES ($1,$2,$3,'Publish Login Race','publish-login-race@mapping-a.example','sales',
+      'ACTIVE','/Sales')`, [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject
+    ) VALUES ($1,$2,'g-sales',$3)`, [workspaceId, generationId, subject]);
+    await client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,web_nonce_hash,
+      web_browser_binding_hash,web_pkce_envelope_version,web_pkce_algorithm,web_pkce_nonce,
+      web_pkce_ciphertext,web_pkce_tag,web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',decode(repeat('b6',32),'hex'),
+      decode(repeat('b6',32),'hex'),$3,decode(repeat('b7',32),'hex'),1,'AES-256-GCM',
+      decode(repeat('b8',12),'hex'),decode(repeat('b9',40),'hex'),decode(repeat('ba',16),'hex'),
+      'test-key-v1',decode(repeat('bb',32),'hex'),'EXCHANGE_RESERVED',$4,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '9 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [transactionId, environment, nonce, handle]);
+  });
+
+  const blocker = await pool.connect();
+  const login = await pool.connect();
+  const publisher = await pool.connect();
+  let loginPid = 0;
+  let publisherPid = 0;
+  let loginOutcome: string | null = null;
+  try {
+    await blocker.query(`SELECT pg_advisory_lock(pg_catalog.hashtextextended(
+      'UPTECH_CREDENTIAL_V1' || pg_catalog.encode($1::bytea,'hex'),0))`, [sessionToken]);
+
+    await login.query("BEGIN");
+    await login.query("SET LOCAL statement_timeout='5s'");
+    await login.query("SET LOCAL deadlock_timeout='50ms'");
+    await login.query("SET LOCAL ROLE uptech_api_runtime");
+    loginPid = (await login.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    const loginPending = login.query(`SELECT outcome::text,access_state::text,route::text
+      FROM uptech.complete_web_google_login_directory_v2(
+        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
+        $5,$6,$7,$8)`, [handle, subject, `${subject}@mapping-a.example`, nonce,
+      sessionToken, csrfToken, onboardingToken, transactionId]);
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const activity = (await pool.query(`SELECT wait_event_type,wait_event
+        FROM pg_stat_activity WHERE pid=$1`, [loginPid])).rows[0];
+      if (activity?.wait_event_type === "Lock" && activity.wait_event === "advisory") break;
+      if (attempt === 99) assert.fail("controlled login did not reach credential contention");
+      await delay(10);
+    }
+
+    await publisher.query("BEGIN");
+    await publisher.query("SET LOCAL statement_timeout='5s'");
+    await publisher.query("SET LOCAL deadlock_timeout='50ms'");
+    await publisher.query("SET LOCAL ROLE uptech_worker_runtime");
+    publisherPid = (await publisher.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await publisher.query("SELECT set_config('app.workspace_id',$1,true),set_config('app.job_id',$2,true),set_config('app.lease_fence',$3,true)",
+      [workspaceId, jobId, fence]);
+    const publishPending = publisher.query(`SELECT outcome,generation_id::text
+      FROM uptech.publish_people_sync_generation_v1($1,$2,$3,true,
+        statement_timestamp()+interval '4 minutes',$4)`,
+    [workspaceId, generationId, fence, crypto.randomUUID()]);
+
+    let publisherWaitEvent: string | null = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const activity = (await pool.query(`SELECT wait_event_type,wait_event FROM pg_stat_activity WHERE pid=$1`,
+        [publisherPid])).rows[0];
+      if (activity?.wait_event_type === "Lock") {
+        publisherWaitEvent = activity.wait_event;
+        break;
+      }
+      if (attempt === 99) assert.fail("publisher did not reach workspace serialization contention");
+      await delay(10);
+    }
+    await blocker.query(`SELECT pg_advisory_unlock(pg_catalog.hashtextextended(
+      'UPTECH_CREDENTIAL_V1' || pg_catalog.encode($1::bytea,'hex'),0))`, [sessionToken]);
+    const [loginSettled] = await Promise.allSettled([loginPending]);
+    if (loginSettled.status === "fulfilled") await login.query("COMMIT");
+    else await login.query("ROLLBACK");
+    const [publishSettled] = await Promise.allSettled([publishPending]);
+    if (publishSettled.status === "fulfilled") await publisher.query("COMMIT");
+    else await publisher.query("ROLLBACK");
+
+    assert.equal(publisherWaitEvent, "advisory",
+      "publisher must wait on workspace serialization before taking generation rows");
+    if (loginSettled.status !== "fulfilled") {
+      assert.fail(`controlled login failed with ${loginSettled.reason?.code ?? "unknown"}`);
+    }
+    if (publishSettled.status !== "fulfilled") {
+      assert.fail(`publisher failed with ${publishSettled.reason?.code ?? "unknown"}`);
+    }
+    const loginRow = loginSettled.value.rows[0];
+    const publishRow = publishSettled.value.rows[0];
+
+    assert.equal(["NORMAL", "DENIED"].includes(loginRow.outcome), true);
+    loginOutcome = loginRow.outcome as string;
+    assert.equal(loginRow.access_state, null);
+    assert.equal(loginRow.route, loginRow.outcome === "NORMAL" ? "/home" : null);
+    assert.deepEqual(publishRow, { outcome: "PUBLISHED", generation_id: generationId });
+  } finally {
+    if (loginPid !== 0) await login.query("ROLLBACK").catch(() => undefined);
+    if (publisherPid !== 0) await publisher.query("ROLLBACK").catch(() => undefined);
+    await blocker.query("SELECT pg_advisory_unlock_all()").catch(() => undefined);
+    blocker.release();
+    login.release();
+    publisher.release();
+  }
+
+  const committedAuthority = (await pool.query(`SELECT
+      count(DISTINCT membership.id)::int AS memberships,
+      min(membership.role) AS role,min(membership.status) AS status,
+      count(DISTINCT session_row.id)::int AS sessions,count(DISTINCT token_row.id)::int AS tokens
+    FROM uptech.identities AS identity_row
+    LEFT JOIN uptech.workspace_memberships AS membership ON membership.user_id=identity_row.user_id
+      AND membership.workspace_id=$1
+    LEFT JOIN uptech.sessions AS session_row ON session_row.membership_id=membership.id
+      AND session_row.workspace_id=membership.workspace_id
+    LEFT JOIN uptech.session_tokens AS token_row ON token_row.session_id=session_row.id
+      AND token_row.workspace_id=session_row.workspace_id
+    WHERE identity_row.provider_subject=$2
+    `, [workspaceId, subject])).rows[0];
+  assert.deepEqual(committedAuthority, loginOutcome === "NORMAL"
+    ? { memberships: 1, role: "MEMBER", status: "ACTIVE", sessions: 1, tokens: 1 }
+    : { memberships: 0, role: null, status: null, sessions: 0, tokens: 0 },
+  "a denied login must retain no Membership, Session, or token authority");
+});

@@ -733,6 +733,39 @@ $verify$;
 RESET ROLE;
 SET LOCAL ROLE uptech_migration_owner;
 
+DO $verify$
+DECLARE
+  publisher_oid regprocedure :=
+    'uptech.publish_people_sync_generation_v1(uuid,uuid,uuid,boolean,timestamp with time zone,uuid)'::regprocedure;
+  delegate_oid regprocedure :=
+    'uptech.publish_people_sync_generation_internal_v2(uuid,uuid,uuid,boolean,timestamp with time zone,uuid)'::regprocedure;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=routine.proowner
+    WHERE routine.oid=publisher_oid AND routine.prosecdef AND routine.provolatile='v'
+      AND routine.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND owner_role.rolname='uptech_migration_owner'
+  ) OR NOT pg_catalog.has_function_privilege('uptech_worker_runtime',publisher_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_api_runtime',publisher_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('public',publisher_oid,'EXECUTE')
+  THEN RAISE EXCEPTION 'workspace-serialized publisher boundary is misconfigured';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=routine.proowner
+    WHERE routine.oid=delegate_oid AND routine.prosecdef AND routine.provolatile='v'
+      AND routine.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND owner_role.rolname='uptech_migration_owner'
+  ) OR pg_catalog.has_function_privilege('uptech_worker_runtime',delegate_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_api_runtime',delegate_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('public',delegate_oid,'EXECUTE')
+  THEN RAISE EXCEPTION 'publisher delegate is not private';
+  END IF;
+END
+$verify$;
+
 -- Behavioral probes for deterministic normalization and operation-family bounds.
 DO $verify$
 DECLARE
