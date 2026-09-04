@@ -639,6 +639,38 @@ test("bodyless recovery POSTs reject a non-null zero-byte stream when Content-Le
   }
 });
 
+test("bodyless recovery POSTs reject noncanonical lengths and forbidden metadata before repository work", async () => {
+  const hostileMetadata = [
+    { label: "Content-Length 00", values: [["content-length", "00"]] },
+    { label: "Content-Length +0", values: [["content-length", "+0"]] },
+    { label: "Content-Length 000", values: [["content-length", "000"]] },
+    { label: "duplicate Content-Length", values: [["content-length", "0"], ["content-length", "0"]] },
+    { label: "content-type", values: [["content-type", "application/octet-stream"]] },
+    { label: "content-encoding", values: [["content-encoding", "identity"]] },
+    { label: "content-range", values: [["content-range", "bytes 0-0/0"]] },
+    { label: "expect", values: [["expect", "100-continue"]] },
+    { label: "trailer", values: [["trailer", "x-checksum"]] },
+    { label: "transfer-encoding", values: [["transfer-encoding", "chunked"]] },
+  ] as const;
+
+  for (const path of ["sync-retry", "access-requests"] as const) {
+    for (const hostile of hostileMetadata) {
+      const f = recoveryFixture();
+      const request = browserBodylessPost(path);
+      for (const [name, value] of hostile.values) request.headers.append(name, value);
+
+      const response = path === "sync-retry"
+        ? await createBootstrapSyncRetryPost(f.dependencies)(request)
+        : await createAccessRequestPost(f.accessDependencies)(request);
+
+      assert.equal(response.status, 400, `${path} accepted ${hostile.label}`);
+      assert.equal((await response.json() as { readonly code: string }).code, "VALIDATION_FAILED");
+      assert.equal(f.calls.length, 0, `${path} reached repository for ${hostile.label}`);
+      assertSafe(response);
+    }
+  }
+});
+
 test("closed repository results expose only public expiry or generic unauthorized problems", async () => {
   const expired = recoveryFixture();
   expired.setStatus("ONBOARDING_EXPIRED");
