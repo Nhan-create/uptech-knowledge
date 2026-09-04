@@ -2864,3 +2864,123 @@ test("Directory publish and controlled login serialize without a workspace-gener
     : { memberships: 0, role: null, status: null, sessions: 0, tokens: 0 },
   "a denied login must retain no Membership, Session, or token authority");
 });
+
+test("Mobile Directory V2 exposes only the narrow API completion boundary", async () => {
+  const row = (await pool.query(`SELECT
+    to_regprocedure('uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)') IS NOT NULL AS exists,
+    COALESCE(has_function_privilege('uptech_api_runtime',
+      to_regprocedure('uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'),'EXECUTE'),false) AS api_execute,
+    COALESCE(has_function_privilege('uptech_worker_runtime',
+      to_regprocedure('uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'),'EXECUTE'),false) AS worker_execute,
+    COALESCE(has_function_privilege('public',
+      to_regprocedure('uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'),'EXECUTE'),false) AS public_execute`)).rows[0];
+  assert.deepEqual(row, {
+    exists: true, api_execute: true, worker_execute: false, public_execute: false,
+  });
+});
+
+test("Mobile Directory V2 creates only mapped handoffs and preserves an active Owner", async () => {
+  const workspaceId = "97400000-0000-4000-8000-000000000001";
+  const generationId = "97800000-0000-4000-8000-000000000002";
+  const ownerUserId = "97900000-0000-4000-8000-000000000001";
+  const ownerIdentityId = "97900000-0000-4000-8000-000000000002";
+  const ownerMembershipId = "97900000-0000-4000-8000-000000000003";
+  const environment = await ensureActiveGoogleEnvironment();
+  const digest = (label: string) => createHash("sha256").update(`mobile-v2:${label}`).digest();
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`INSERT INTO uptech.mobile_google_configuration_registry(
+      environment_name,platform,configuration_key,google_client_id,google_audience,
+      callback_uri,app_return_uri,scopes,allowed_azp_configuration_keys,pkce_kms_key_version,
+      android_application_id,android_release_cert_sha256,is_enabled
+    ) VALUES ($1,'ANDROID','GOOGLE_MOBILE_ANDROID_V1','mobile-v2.example.apps.googleusercontent.com',
+      'mobile-v2.example.apps.googleusercontent.com',
+      'https://uptech-knowledge-sigma.vercel.app/api/v1/auth/mobile/google/callback',
+      'https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback',
+      ARRAY['openid','email','profile'],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
+      'mobile-v2-kms','com.example.uptech',repeat('AA:',31)||'AA',true)
+    ON CONFLICT (environment_name,platform) DO UPDATE SET is_enabled=true`, [environment]);
+    await client.query(`UPDATE uptech.people_sync_generations SET status='PUBLISHED',
+      traversal_complete=true,completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '5 minutes'
+      WHERE workspace_id=$1 AND id=$2`, [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_groups(workspace_id,generation_id,google_group_id,group_name)
+      VALUES ($1,$2,'g-admin','Admins'),($1,$2,'g-sales','Sales') ON CONFLICT DO NOTHING`,
+    [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_profiles(
+      workspace_id,generation_id,google_subject,full_name,primary_email,department,lifecycle_state,
+      google_is_admin,google_is_delegated_admin,effective_role,effective_department_key
+    ) VALUES
+      ($1,$2,'mobile-v2-admin-sub','Mobile Admin','mobile-admin@mapping-a.example',NULL,'ACTIVE',false,false,'ADMIN',NULL),
+      ($1,$2,'mobile-v2-member-sub','Mobile Member','mobile-member@mapping-a.example','sales','ACTIVE',true,true,'MEMBER','SALES'),
+      ($1,$2,'mobile-v2-owner-sub','Mobile Owner','mobile-owner@mapping-a.example',NULL,'ACTIVE',false,false,NULL,NULL)`,
+    [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(
+      workspace_id,generation_id,google_group_id,google_subject
+    ) VALUES ($1,$2,'g-admin','mobile-v2-admin-sub'),($1,$2,'g-sales','mobile-v2-member-sub')`,
+    [workspaceId, generationId]);
+    await client.query(`INSERT INTO uptech.users(id) VALUES ($1)`, [ownerUserId]);
+    await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,
+        email_verified,hosted_domain_claim,claims_observed_at)
+      VALUES ($2,$1,'GOOGLE','https://accounts.google.com','mobile-v2-owner-sub',
+        'mobile-owner@mapping-a.example',true,'mapping-a.example',statement_timestamp())`,
+    [ownerUserId, ownerIdentityId]);
+    await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status)
+      VALUES ($2,$3,$1,'OWNER','ACTIVE')`, [ownerUserId, workspaceId, ownerMembershipId]);
+  });
+
+  const cases = [
+    { subject: "mobile-v2-admin-sub", role: "ADMIN", department: null, manual: false },
+    { subject: "mobile-v2-member-sub", role: "MEMBER", department: "SALES", manual: false },
+    { subject: "mobile-v2-owner-sub", role: "OWNER", department: null, manual: false },
+    { subject: "mobile-v2-owner-sub", role: "OWNER", department: null, manual: true },
+  ] as const;
+  for (const [index, fixture] of cases.entries()) {
+    const transactionId = `97900000-0000-4000-8000-00000000001${index}`;
+    const requestId = transactionId;
+    const handle = digest(`${fixture.subject}:handle:${index}`);
+    const nonce = digest(`${fixture.subject}:nonce:${index}`);
+    const handoff = digest(`${fixture.subject}:handoff:${index}`);
+    if (fixture.manual) await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces
+      SET provisioning_policy='INVITE_ONLY' WHERE workspace_id=$1`, [workspaceId]));
+    await asMigrationOwner((client) => client.query(`INSERT INTO uptech.mobile_google_transactions(
+      id,environment_name,platform,configuration_key,state_hash,nonce_hash,installation_binding_hash,
+      app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at
+    ) VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,
+      ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('mobile-v2','UTF8'),'EXCHANGE_RESERVED',$10,$1,
+      statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',
+      statement_timestamp()-interval '1 second',statement_timestamp()+interval '119 seconds')`,
+    [transactionId, environment, digest(`${fixture.subject}:state:${index}`), nonce,
+      digest(`${fixture.subject}:install:${index}`), digest(`${fixture.subject}:challenge:${index}`),
+      Buffer.alloc(12, 0xc0 + index), Buffer.alloc(48, 0xd0 + index),
+      Buffer.alloc(16, 0xe0 + index), handle]));
+    const row = (await asApi((client) => client.query(`SELECT outcome::text,app_return_uri::text,
+        denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2(
+          $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+            statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+            'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+    [handle, fixture.subject, `${fixture.subject}@mapping-a.example`, nonce, handoff, requestId]))).rows[0];
+    if (fixture.manual) await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces
+      SET provisioning_policy='GOOGLE_GROUP_CONTROLLED' WHERE workspace_id=$1`, [workspaceId]));
+    assert.deepEqual(row, { outcome: "NORMAL",
+      app_return_uri: "https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",
+      denial_category: null });
+    const authority = (await pool.query(`SELECT membership.role,profile.effective_department_key,
+        extract(epoch FROM handoff.expires_at-handoff.created_at)::int AS lifetime_seconds,
+        (SELECT count(*)::int FROM uptech.sessions s WHERE s.identity_id=handoff.identity_id) AS sessions,
+        (SELECT count(*)::int FROM uptech.onboarding_sessions o WHERE o.identity_id=handoff.identity_id) AS capabilities
+      FROM uptech.mobile_handoffs handoff
+      JOIN uptech.workspace_memberships membership ON membership.workspace_id=handoff.workspace_id
+        AND membership.id=handoff.membership_id
+      JOIN uptech.identities identity_row ON identity_row.id=handoff.identity_id
+      JOIN uptech.people_profiles profile ON profile.workspace_id=handoff.workspace_id
+        AND profile.generation_id=$2 AND profile.google_subject=identity_row.provider_subject
+      WHERE handoff.handoff_hash=$1`, [handoff, generationId])).rows[0];
+    assert.equal(authority.role, fixture.role);
+    assert.equal(authority.effective_department_key, fixture.department);
+    assert.equal(authority.lifetime_seconds, 60);
+    assert.equal(authority.sessions, 0);
+    assert.equal(authority.capabilities, 0);
+  }
+});

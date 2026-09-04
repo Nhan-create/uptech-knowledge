@@ -3691,4 +3691,269 @@ FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 REVOKE ALL ON FUNCTION uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)
 FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+CREATE FUNCTION uptech.complete_mobile_google_callback_directory_v2(
+  p_completion_handle_hash uptech.google_auth_hash32_v1,
+  p_claims uptech.google_verified_claims_assertion_v1,
+  p_handoff_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.mobile_callback_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz := pg_catalog.clock_timestamp();
+  transaction_row uptech.mobile_google_transactions%ROWTYPE;
+  configuration_row uptech.mobile_google_configuration_registry%ROWTYPE;
+  canonical_claims uptech.google_verified_claims_assertion_v1;
+  selected_workspace_id uuid;
+  selected_workspace uptech.workspaces%ROWTYPE;
+  selected_generation_id uuid;
+  selected_identity uptech.identities%ROWTYPE;
+  selected_user uptech.users%ROWTYPE;
+  selected_membership uptech.workspace_memberships%ROWTYPE;
+  mapping uptech.google_directory_mapping_result_v1;
+  target_role text;
+  target_department text;
+  transitioned_rows integer := 0;
+  controlled_denied boolean := false;
+BEGIN
+  SELECT candidate.* INTO transaction_row
+  FROM uptech.mobile_google_transactions AS candidate
+  WHERE candidate.completion_handle_hash=p_completion_handle_hash
+    AND candidate.status='EXCHANGE_RESERVED'
+  FOR UPDATE;
+  IF transaction_row.id IS NOT NULL THEN
+    SELECT candidate.* INTO configuration_row
+    FROM uptech.mobile_google_configuration_registry AS candidate
+    WHERE candidate.environment_name=transaction_row.environment_name
+      AND candidate.platform=transaction_row.platform
+      AND candidate.configuration_key=transaction_row.configuration_key
+      AND candidate.is_enabled;
+  END IF;
+
+  canonical_claims:=ROW(
+    'https://accounts.google.com',(p_claims).provider_subject,(p_claims).normalized_email,
+    (p_claims).email_verified,(p_claims).normalized_hosted_domain,(p_claims).issued_at,
+    (p_claims).expires_at,(p_claims).audience_configuration_key,
+    (p_claims).authorized_party_configuration_key,(p_claims).web_nonce_hash
+  )::uptech.google_verified_claims_assertion_v1;
+  IF transaction_row.id IS NULL OR configuration_row.configuration_key IS NULL
+     OR (p_claims).issuer::text NOT IN ('accounts.google.com','https://accounts.google.com')
+     OR p_handoff_hash IS NULL OR p_request_id IS NULL OR p_request_id<>transaction_row.request_id
+     OR transaction_row.completion_expires_at<=observed_at
+     OR (canonical_claims).email_verified IS NOT TRUE
+     OR (canonical_claims).normalized_hosted_domain IS NULL
+     OR (canonical_claims).web_nonce_hash IS DISTINCT FROM transaction_row.nonce_hash
+     OR (canonical_claims).audience_configuration_key<>'GOOGLE_WEB_LOGIN_V1'
+     OR ((canonical_claims).authorized_party_configuration_key IS NOT NULL AND NOT
+       (canonical_claims).authorized_party_configuration_key=ANY(configuration_row.allowed_azp_configuration_keys))
+     OR (canonical_claims).issued_at<observed_at-interval '5 minutes'
+     OR (canonical_claims).issued_at>observed_at+interval '2 minutes'
+     OR (canonical_claims).expires_at<=observed_at
+     OR (canonical_claims).expires_at<=(canonical_claims).issued_at
+     OR (canonical_claims).expires_at>(canonical_claims).issued_at+interval '2 hours' THEN
+    RETURN uptech.complete_mobile_google_denial_v1(
+      p_completion_handle_hash,p_handoff_hash,'CLAIMS_INVALID','AUTH_ERROR',
+      coalesce(p_request_id,transaction_row.request_id));
+  END IF;
+
+  SELECT locator.workspace_id INTO selected_workspace_id
+  FROM uptech.workspace_domain_locators AS locator
+  JOIN uptech.workspaces AS workspace
+    ON workspace.workspace_id=locator.workspace_id
+   AND workspace.google_customer_id=locator.google_customer_id
+  WHERE locator.normalized_domain=(canonical_claims).normalized_hosted_domain
+    AND locator.status='VERIFIED' AND locator.google_customer_id IS NOT NULL
+  FOR SHARE OF locator;
+  IF selected_workspace_id IS NULL THEN
+    RETURN uptech.complete_mobile_google_denial_v1(
+      p_completion_handle_hash,p_handoff_hash,'IDENTITY_INELIGIBLE','UNKNOWN_WORKSPACE',p_request_id);
+  END IF;
+
+  SELECT * INTO selected_workspace FROM uptech.workspaces
+  WHERE workspace_id=selected_workspace_id;
+  IF selected_workspace.provisioning_policy<>'GOOGLE_GROUP_CONTROLLED' THEN
+    RETURN uptech.complete_mobile_google_callback_v1(
+      p_completion_handle_hash,p_claims,p_handoff_hash,p_request_id);
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(
+    'UPTECH_PEOPLE_DIRECTORY_WORKSPACE_V1'||selected_workspace_id::text,0));
+  SELECT * INTO selected_workspace FROM uptech.workspaces
+  WHERE workspace_id=selected_workspace_id FOR UPDATE;
+
+  BEGIN
+    IF selected_workspace.status<>'ACTIVE'
+       OR selected_workspace.provisioning_policy<>'GOOGLE_GROUP_CONTROLLED' THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='workspace unavailable';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+      (canonical_claims).issuer::text||pg_catalog.chr(31)||
+        (canonical_claims).provider_subject::text,0));
+    SELECT identity_row.* INTO selected_identity FROM uptech.identities AS identity_row
+    WHERE identity_row.provider='GOOGLE'
+      AND identity_row.issuer=(canonical_claims).issuer::text
+      AND identity_row.provider_subject=(canonical_claims).provider_subject::text
+    FOR UPDATE;
+    IF selected_identity.id IS NOT NULL THEN
+      SELECT * INTO selected_user FROM uptech.users WHERE id=selected_identity.user_id FOR UPDATE;
+      IF selected_identity.status<>'ACTIVE' OR selected_user.status<>'ACTIVE' THEN
+        RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='identity unavailable';
+      END IF;
+      SELECT * INTO selected_membership FROM uptech.workspace_memberships
+      WHERE workspace_id=selected_workspace_id AND user_id=selected_user.id FOR UPDATE;
+      IF selected_membership.id IS NULL AND EXISTS (
+        SELECT 1 FROM uptech.workspace_memberships AS other_membership
+        WHERE other_membership.user_id=selected_user.id
+          AND other_membership.workspace_id<>selected_workspace_id
+      ) THEN RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='cross tenant identity'; END IF;
+    END IF;
+
+    SELECT generation.id INTO selected_generation_id
+    FROM uptech.people_sync_generations AS generation
+    JOIN uptech.connectors AS connector
+      ON connector.workspace_id=generation.workspace_id AND connector.id=generation.connector_id
+     AND connector.purpose='DIRECTORY' AND connector.status IN ('ACTIVE','DEGRADED')
+     AND connector.provider_customer_id=selected_workspace.google_customer_id
+     AND connector.credential_reference IS NOT NULL
+     AND connector.directory_authorized_by_identity_id IS NOT NULL
+     AND uptech.directory_scopes_are_supported_v1(connector.directory_authorized_scopes)
+    JOIN uptech.identities AS authorized_identity
+      ON authorized_identity.id=connector.directory_authorized_by_identity_id
+     AND authorized_identity.provider='GOOGLE' AND authorized_identity.issuer='https://accounts.google.com'
+     AND authorized_identity.status='ACTIVE' AND authorized_identity.email_verified
+    JOIN uptech.workspace_domain_locators AS authorized_locator
+      ON authorized_locator.workspace_id=selected_workspace_id
+     AND authorized_locator.google_customer_id=selected_workspace.google_customer_id
+     AND authorized_locator.normalized_domain::text=pg_catalog.lower(authorized_identity.hosted_domain_claim)
+     AND authorized_locator.status='VERIFIED'
+    JOIN uptech.people_profiles AS profile
+      ON profile.workspace_id=generation.workspace_id AND profile.generation_id=generation.id
+     AND profile.google_subject=(canonical_claims).provider_subject::text
+     AND profile.lifecycle_state='ACTIVE'
+    WHERE generation.workspace_id=selected_workspace_id
+      AND generation.google_customer_id=selected_workspace.google_customer_id
+      AND generation.status='PUBLISHED' AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL AND generation.fresh_until>pg_catalog.clock_timestamp()
+    ORDER BY generation.completed_at DESC,generation.id DESC LIMIT 1
+    FOR UPDATE OF generation,connector,authorized_identity,authorized_locator,profile;
+    IF selected_generation_id IS NULL THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory authority unavailable';
+    END IF;
+
+    IF selected_membership.id IS NOT NULL AND selected_membership.role='OWNER'
+       AND selected_membership.status='ACTIVE' THEN
+      target_role:='OWNER'; target_department:=NULL;
+    ELSE
+      mapping:=uptech.evaluate_google_directory_mapping_v1(
+        selected_workspace_id,selected_generation_id,(canonical_claims).provider_subject::text);
+      IF (mapping).outcome NOT IN ('ADMIN','MEMBER') THEN
+        RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='directory mapping unavailable';
+      END IF;
+      target_role:=(mapping).target_role; target_department:=(mapping).target_department_key;
+    END IF;
+
+    observed_at:=pg_catalog.clock_timestamp();
+    IF selected_identity.id IS NULL THEN
+      selected_user.id:=pg_catalog.gen_random_uuid(); selected_user.security_version:=1;
+      selected_identity.id:=pg_catalog.gen_random_uuid(); selected_identity.security_version:=1;
+      INSERT INTO uptech.users(id,status,security_version,created_at,updated_at)
+      VALUES(selected_user.id,'ACTIVE',1,observed_at,observed_at);
+      INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,security_version,
+        email_claim,email_verified,hosted_domain_claim,claims_observed_at,created_at,updated_at)
+      VALUES(selected_identity.id,selected_user.id,'GOOGLE',(canonical_claims).issuer::text,
+        (canonical_claims).provider_subject::text,'ACTIVE',1,(canonical_claims).normalized_email::text,
+        true,(canonical_claims).normalized_hosted_domain::text,observed_at,observed_at,observed_at);
+    ELSE
+      UPDATE uptech.identities SET email_claim=(canonical_claims).normalized_email::text,
+        email_verified=true,hosted_domain_claim=(canonical_claims).normalized_hosted_domain::text,
+        claims_observed_at=observed_at,updated_at=observed_at WHERE id=selected_identity.id;
+    END IF;
+
+    IF selected_membership.id IS NULL THEN
+      selected_membership.id:=pg_catalog.gen_random_uuid(); selected_membership.authz_version:=1;
+      INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status,authz_version,
+        created_at,updated_at) VALUES(selected_workspace_id,selected_membership.id,
+        selected_user.id,target_role,'ACTIVE',1,observed_at,observed_at);
+    ELSIF selected_membership.role='OWNER' AND selected_membership.status='ACTIVE' THEN
+      NULL;
+    ELSIF selected_membership.role<>'OWNER' AND selected_membership.status IN ('ACTIVE','PENDING','DEPROVISIONED') THEN
+      UPDATE uptech.workspace_memberships SET role=target_role,status='ACTIVE',
+        authz_version=authz_version+CASE WHEN role IS DISTINCT FROM target_role OR status<>'ACTIVE' THEN 1 ELSE 0 END,
+        updated_at=observed_at WHERE workspace_id=selected_workspace_id AND id=selected_membership.id
+      RETURNING * INTO selected_membership;
+    ELSE
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='membership unavailable';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+      'UPTECH_CREDENTIAL_V1'||pg_catalog.encode(p_handoff_hash,'hex'),0));
+    IF EXISTS(SELECT 1 FROM uptech.mobile_handoffs WHERE handoff_hash=p_handoff_hash)
+       OR EXISTS(SELECT 1 FROM uptech.session_tokens
+         WHERE token_hash=p_handoff_hash OR csrf_token_hash=p_handoff_hash)
+       OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_handoff_hash) THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='credential collision';
+    END IF;
+    INSERT INTO uptech.mobile_handoffs(id,transaction_id,handoff_hash,platform,
+      installation_binding_hash,app_exchange_challenge,identity_id,user_id,workspace_id,membership_id,
+      user_security_version,identity_security_version,workspace_security_version,membership_authz_version,
+      created_at,expires_at)
+    VALUES(pg_catalog.gen_random_uuid(),transaction_row.id,p_handoff_hash,transaction_row.platform,
+      transaction_row.installation_binding_hash,transaction_row.app_exchange_challenge,
+      selected_identity.id,selected_user.id,selected_workspace_id,selected_membership.id,
+      selected_user.security_version,selected_identity.security_version,selected_workspace.security_version,
+      selected_membership.authz_version,observed_at,observed_at+interval '60 seconds');
+    INSERT INTO uptech.platform_audit_events(id,identity_id,action,target_type,outcome,request_id,
+      metadata,occurred_at) VALUES(pg_catalog.gen_random_uuid(),selected_identity.id,
+      'MOBILE_GOOGLE_HANDOFF_CREATED','MOBILE_HANDOFF','SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('correlation_id',transaction_row.id,
+        'platform',transaction_row.platform::text),observed_at);
+
+    observed_at:=pg_catalog.clock_timestamp();
+    UPDATE uptech.mobile_google_transactions SET status='COMPLETED',completed_at=observed_at
+    WHERE id=transaction_row.id AND status='EXCHANGE_RESERVED'
+      AND request_id=p_request_id AND completion_expires_at>observed_at
+      AND (canonical_claims).issued_at>=observed_at-interval '5 minutes'
+      AND (canonical_claims).issued_at<=observed_at+interval '2 minutes'
+      AND (canonical_claims).expires_at>observed_at
+      AND (canonical_claims).expires_at>(canonical_claims).issued_at
+      AND (canonical_claims).expires_at<=(canonical_claims).issued_at+interval '2 hours'
+      AND EXISTS(SELECT 1 FROM uptech.people_sync_generations AS generation
+        WHERE generation.workspace_id=selected_workspace_id AND generation.id=selected_generation_id
+          AND generation.status='PUBLISHED' AND generation.traversal_complete
+          AND generation.completed_at IS NOT NULL AND generation.fresh_until>observed_at
+          AND NOT EXISTS(SELECT 1 FROM uptech.people_sync_generations AS newer
+            WHERE newer.workspace_id=generation.workspace_id AND newer.status='PUBLISHED'
+              AND newer.traversal_complete AND newer.completed_at IS NOT NULL
+              AND (newer.completed_at,newer.id)>(generation.completed_at,generation.id)));
+    GET DIAGNOSTICS transitioned_rows=ROW_COUNT;
+    IF transitioned_rows<>1 THEN
+      RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='mobile authority transition lost';
+    END IF;
+    RETURN ROW('NORMAL',configuration_row.app_return_uri,NULL)::uptech.mobile_callback_result_v1;
+  EXCEPTION WHEN SQLSTATE 'PGA01' OR unique_violation THEN
+    controlled_denied:=true;
+  END;
+
+  IF controlled_denied THEN
+    RETURN uptech.complete_mobile_google_denial_v1(
+      p_completion_handle_hash,p_handoff_hash,'IDENTITY_INELIGIBLE',
+      'USER_NOT_PROVISIONED',p_request_id);
+  END IF;
+  RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.complete_mobile_google_callback_directory_v2(
+  uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,
+  uptech.google_auth_hash32_v1,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.complete_mobile_google_callback_directory_v2(
+  uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,
+  uptech.google_auth_hash32_v1,uuid
+) TO uptech_api_runtime;
+
 COMMIT;

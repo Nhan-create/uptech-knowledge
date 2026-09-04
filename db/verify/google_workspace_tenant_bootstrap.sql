@@ -766,6 +766,26 @@ BEGIN
 END
 $verify$;
 
+DO $verify$
+DECLARE
+  mobile_v2_oid regprocedure :=
+    'uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=routine.proowner
+    WHERE routine.oid=mobile_v2_oid AND routine.prosecdef AND routine.provolatile='v'
+      AND routine.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND owner_role.rolname='uptech_migration_owner'
+      AND routine.prorettype='uptech.mobile_callback_result_v1'::regtype
+  ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime',mobile_v2_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime',mobile_v2_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('public',mobile_v2_oid,'EXECUTE')
+  THEN RAISE EXCEPTION 'Mobile Directory V2 boundary is misconfigured';
+  END IF;
+END
+$verify$;
+
 -- Behavioral probes for deterministic normalization and operation-family bounds.
 DO $verify$
 DECLARE
