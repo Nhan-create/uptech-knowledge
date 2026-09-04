@@ -106,6 +106,43 @@ test("reconcile and abort strictly accept their closed outcome sets", async () =
   }), { outcome: "ABORTED" });
 });
 
+test("status and retry call only their exact v1 capability routines", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+  const statusFake = fakePool([{ outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE" }]);
+  const statusRepository = createGoogleWorkspaceBootstrapRepository(statusFake.pool as never);
+  assert.deepEqual(await statusRepository.readStatus({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE" });
+  assert.match(statusFake.calls[0]!.text, /read_google_workspace_bootstrap_status_v1/u);
+  assert.deepEqual(statusFake.calls[0]!.values, [Buffer.from(hash(9)), requestId]);
+
+  const retryFake = fakePool([{ outcome: "REQUEUED" }]);
+  const retryRepository = createGoogleWorkspaceBootstrapRepository(retryFake.pool as never);
+  assert.deepEqual(await retryRepository.retrySync({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "REQUEUED" });
+  assert.match(retryFake.calls[0]!.text, /retry_google_workspace_bootstrap_sync_v1/u);
+  assert.deepEqual(retryFake.calls[0]!.values, [Buffer.from(hash(9)), requestId]);
+});
+
+test("status and retry reject malformed inputs and non-closed database rows", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+  for (const [method, rows] of [
+    ["readStatus", [{ outcome: "REQUEUED" }]],
+    ["readStatus", [{ outcome: "READY", workspace_id: "leak" }]],
+    ["retrySync", [{ outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE" }]],
+    ["retrySync", []],
+  ] as const) {
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool(rows).pool as never);
+    await assert.rejects(repository[method]({ statusTokenHash: hash(9), requestId }), BootstrapCommitUnknownError);
+  }
+  for (const method of ["readStatus", "retrySync"] as const) {
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool([{ outcome: "DENIED" }]).pool as never);
+    await assert.rejects(repository[method]({ statusTokenHash: new Uint8Array(31), requestId }), BootstrapCommitUnknownError);
+    await assert.rejects(repository[method]({ statusTokenHash: hash(9), requestId: "browser-value" }), BootstrapCommitUnknownError);
+  }
+});
+
 test("query and result-shape failures are secret-safe unknown errors", async () => {
   for (const rows of [new Error(`database leaked ${secret}`), [{ outcome: "DENIED", status_expires_at: new Date() }]]) {
     const fake = fakePool(rows as QueryResultRow[] | Error);

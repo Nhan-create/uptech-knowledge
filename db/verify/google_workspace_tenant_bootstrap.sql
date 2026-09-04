@@ -16,6 +16,15 @@ BEGIN
     ('google_workspace_bootstrap_complete_outcome_v1', ARRAY['PROVISIONING','DENIED']::text[]),
     ('google_workspace_bootstrap_reconcile_outcome_v1', ARRAY['COMMITTED','NOT_COMMITTED','UNKNOWN']::text[]),
     ('google_workspace_bootstrap_abort_outcome_v1', ARRAY['ABORTED','UNKNOWN']::text[]),
+    ('google_workspace_bootstrap_status_outcome_v1', ARRAY[
+      'DIRECTORY_BOOTSTRAP_SYNC_PENDING','READY',
+      'DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE',
+      'DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED',
+      'ONBOARDING_EXPIRED','DENIED']::text[]),
+    ('google_workspace_bootstrap_retry_outcome_v1', ARRAY[
+      'REQUEUED','DIRECTORY_BOOTSTRAP_SYNC_PENDING','READY',
+      'DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED',
+      'ONBOARDING_EXPIRED','DENIED']::text[]),
     ('google_workspace_bootstrap_start_admission_outcome_v1', ARRAY['ADMITTED','RATE_LIMITED','DENIED']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
@@ -56,6 +65,10 @@ BEGIN
       ARRAY['uptech.google_workspace_bootstrap_reconcile_outcome_v1']::text[]),
     ('google_workspace_bootstrap_abort_result_v1', ARRAY['outcome']::text[],
       ARRAY['uptech.google_workspace_bootstrap_abort_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_status_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_status_outcome_v1']::text[]),
+    ('google_workspace_bootstrap_retry_result_v1', ARRAY['outcome']::text[],
+      ARRAY['uptech.google_workspace_bootstrap_retry_outcome_v1']::text[]),
     ('google_workspace_bootstrap_start_admission_result_v1', ARRAY['outcome']::text[],
       ARRAY['uptech.google_workspace_bootstrap_start_admission_outcome_v1']::text[])
   ) AS required(type_name, attribute_names, attribute_types)
@@ -391,6 +404,58 @@ BEGIN
       RAISE EXCEPTION 'bootstrap entrypoint % lacks the attempt advisory-xact lock', object_oid::regprocedure;
     END IF;
   END LOOP;
+
+  FOREACH object_oid IN ARRAY ARRAY[
+    'uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
+  ] LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+      WHERE procedure_row.oid = object_oid
+        AND procedure_row.prokind = 'f'
+        AND procedure_row.provolatile = 'v'
+        AND procedure_row.prosecdef
+        AND procedure_row.proowner = 'uptech_migration_owner'::regrole::oid
+        AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, uptech']::text[]
+    ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime', object_oid, 'EXECUTE')
+      OR pg_catalog.has_function_privilege('uptech_worker_runtime', object_oid, 'EXECUTE')
+      OR pg_catalog.has_function_privilege('public', object_oid, 'EXECUTE')
+      OR EXISTS (
+        SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+        CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+          procedure_row.proacl, pg_catalog.acldefault('f', procedure_row.proowner))) AS acl
+        WHERE procedure_row.oid = object_oid
+          AND (acl.privilege_type <> 'EXECUTE'
+            OR acl.grantee NOT IN (
+              'uptech_migration_owner'::regrole::oid,
+              'uptech_api_runtime'::regrole::oid
+            ))
+      )
+    THEN
+      RAISE EXCEPTION 'bootstrap status entrypoint % has wrong signature/definer/search_path/runtime grants', object_oid::regprocedure;
+    END IF;
+  END LOOP;
+END
+$verify$;
+
+-- The API-facing routines must also fail closed behaviorally for an unknown
+-- capability, and their public response shapes must contain no tenant fields.
+RESET ROLE;
+SET LOCAL ROLE uptech_api_runtime;
+DO $verify$
+DECLARE
+  status_result uptech.google_workspace_bootstrap_status_result_v1;
+  retry_result uptech.google_workspace_bootstrap_retry_result_v1;
+BEGIN
+  status_result := uptech.read_google_workspace_bootstrap_status_v1(
+    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000fe');
+  retry_result := uptech.retry_google_workspace_bootstrap_sync_v1(
+    decode(repeat('fe',32),'hex'), '92000000-0000-4000-8000-0000000000ff');
+  IF pg_catalog.to_jsonb(status_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
+     OR pg_catalog.to_jsonb(retry_result) IS DISTINCT FROM '{"outcome":"DENIED"}'::jsonb
+  THEN
+    RAISE EXCEPTION 'bootstrap status routines do not fail closed without tenant fields';
+  END IF;
 END
 $verify$;
 

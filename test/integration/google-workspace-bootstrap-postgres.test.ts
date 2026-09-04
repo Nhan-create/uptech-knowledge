@@ -890,3 +890,176 @@ test("reconcile aborts an expired clean attempt, denies delayed complete, and ke
     requestId: "95000000-0000-0000-0000-000000000017",
   })), { outcome: "UNKNOWN" });
 });
+
+test("status and retry expose only exact API routines and closed v1 result types", async () => {
+  for (const signature of [
+    "uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)",
+    "uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)",
+  ]) {
+    const result = await pool.query(`SELECT p.prosecdef,p.provolatile,p.proconfig,
+      has_function_privilege('uptech_api_runtime',p.oid,'EXECUTE') AS api_execute,
+      has_function_privilege('uptech_worker_runtime',p.oid,'EXECUTE') AS worker_execute,
+      has_function_privilege('public',p.oid,'EXECUTE') AS public_execute
+      FROM pg_proc p WHERE p.oid=$1::regprocedure`, [signature]);
+    assert.deepEqual(result.rows[0], { prosecdef: true, provolatile: "v",
+      proconfig: ["search_path=pg_catalog, uptech"], api_execute: true,
+      worker_execute: false, public_execute: false }, signature);
+  }
+  assert.deepEqual((await pool.query(`SELECT
+    to_regtype('uptech.google_workspace_bootstrap_status_result_v1') IS NOT NULL AS status_result,
+    to_regtype('uptech.google_workspace_bootstrap_retry_result_v1') IS NOT NULL AS retry_result`)).rows[0],
+  { status_result: true, retry_result: true });
+});
+
+test("status and retry are capability-bound across job, generation, and tenant states", async () => {
+  const fixture = {
+    userId: "97000000-0000-0000-0000-000000000001",
+    identityId: "97000000-0000-0000-0000-000000000002",
+    sourceId: "97000000-0000-0000-0000-000000000003",
+    sourceByte: 0xe1,
+    subject: "bootstrap-status-sub",
+    domain: "status.example",
+  } as const;
+  const attemptId = "97000000-0000-0000-0000-000000000004";
+  const workspaceId = "97000000-0000-0000-0000-000000000005";
+  const statusTokenHash = hash32(0xe2);
+  const requestId = "99000000-0000-4000-8000-000000000001";
+  const repositoryCall = <T>(operation: (repository: ReturnType<typeof createGoogleWorkspaceBootstrapRepository>) => Promise<T>) =>
+    asApi((client) => operation(createGoogleWorkspaceBootstrapRepository(client as never)));
+  const read = () => repositoryCall((repository) => repository.readStatus({ statusTokenHash, requestId }));
+  const retry = () => repositoryCall((repository) => repository.retrySync({ statusTokenHash, requestId }));
+
+  await seedBootstrapSource(fixture);
+  assert.deepEqual(await repositoryCall((repository) => repository.prepare({
+    attemptId,
+    sourceTokenHash: hash32(fixture.sourceByte),
+    candidateWorkspaceId: workspaceId,
+    statusTokenHash,
+    requestId: "97000000-0000-0000-0000-000000000006",
+  })), { outcome: "PREPARED" });
+  assert.equal((await repositoryCall((repository) => repository.complete({
+    attemptId,
+    sourceTokenHash: hash32(fixture.sourceByte),
+    statusTokenHash,
+    customerId: "customer-status",
+    customerDomain: fixture.domain,
+    providerSubject: fixture.subject,
+    hostedDomain: fixture.domain,
+    verifiedDomains: [{ normalizedDomain: fixture.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+    credentialReference: "secretref://google-workspace/status" as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "97000000-0000-0000-0000-000000000007",
+  }))).outcome, "PROVISIONING");
+
+  const otherFixture = {
+    userId: "97100000-0000-0000-0000-000000000001",
+    identityId: "97100000-0000-0000-0000-000000000002",
+    sourceId: "97100000-0000-0000-0000-000000000003",
+    sourceByte: 0xe3,
+    subject: "bootstrap-status-other-sub",
+    domain: "status-other.example",
+  } as const;
+  const otherAttemptId = "97100000-0000-0000-0000-000000000004";
+  const otherWorkspaceId = "97100000-0000-0000-0000-000000000005";
+  const otherStatusTokenHash = hash32(0xe4);
+  await seedBootstrapSource(otherFixture);
+  assert.deepEqual(await repositoryCall((repository) => repository.prepare({
+    attemptId: otherAttemptId,
+    sourceTokenHash: hash32(otherFixture.sourceByte),
+    candidateWorkspaceId: otherWorkspaceId,
+    statusTokenHash: otherStatusTokenHash,
+    requestId: "97100000-0000-0000-0000-000000000006",
+  })), { outcome: "PREPARED" });
+  assert.equal((await repositoryCall((repository) => repository.complete({
+    attemptId: otherAttemptId,
+    sourceTokenHash: hash32(otherFixture.sourceByte),
+    statusTokenHash: otherStatusTokenHash,
+    customerId: "customer-status-other",
+    customerDomain: otherFixture.domain,
+    providerSubject: otherFixture.subject,
+    hostedDomain: otherFixture.domain,
+    verifiedDomains: [{ normalizedDomain: otherFixture.domain, domainKind: "PRIMARY", providerParentDomain: null }],
+    credentialReference: "secretref://google-workspace/status-other" as never,
+    authorizedScopes: CURRENT_DIRECTORY_SCOPES,
+    requestId: "97100000-0000-0000-0000-000000000007",
+  }))).outcome, "PROVISIONING");
+
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.deepEqual(await retry(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.deepEqual(await repositoryCall((repository) => repository.readStatus({
+    statusTokenHash: hash32(0x21), requestId,
+  })), { outcome: "DENIED" });
+
+  const bound = await pool.query(`SELECT job.id::text AS job_id,receipt.connector_id::text AS connector_id
+    FROM uptech.google_workspace_bootstrap_receipts receipt JOIN uptech.sync_jobs job
+      ON job.workspace_id=receipt.workspace_id AND job.connector_id=receipt.connector_id
+      AND job.payload->>'bootstrap_attempt_id'=receipt.attempt_id::text
+    WHERE receipt.workspace_id=$1`, [workspaceId]);
+  const { job_id: jobId, connector_id: connectorId } = bound.rows[0];
+  const otherBefore = (await pool.query(`SELECT workspace_id::text,id::text,status,attempt_count,
+    lease_fence::text,lease_expires_at FROM uptech.sync_jobs
+    WHERE workspace_id<>$1 AND job_kind='DIRECTORY_SYNC' ORDER BY workspace_id,id LIMIT 1`, [workspaceId])).rows[0];
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.sync_jobs SET
+    attempt_count=max_attempts,updated_at=statement_timestamp()
+    WHERE workspace_id=$1 AND id=$2`, [workspaceId, jobId]));
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
+  assert.deepEqual(await retry(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.sync_jobs SET status='LEASED',
+    attempt_count=1,max_attempts=3,leased_at=statement_timestamp()-interval '2 minutes',
+    lease_expires_at=statement_timestamp()+interval '2 minutes',lease_owner='test-worker',
+    lease_fence='99000000-0000-4000-8000-000000000002',updated_at=statement_timestamp()
+    WHERE workspace_id=$1 AND id=$2`, [workspaceId, jobId]));
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+  assert.deepEqual(await retry(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING" });
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.sync_jobs SET
+    leased_at=statement_timestamp()-interval '3 minutes',lease_expires_at=statement_timestamp()-interval '1 minute',
+    updated_at=statement_timestamp() WHERE workspace_id=$1 AND id=$2`, [workspaceId, jobId]));
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE" });
+  assert.deepEqual(await retry(), { outcome: "REQUEUED" });
+  assert.deepEqual((await pool.query(`SELECT status,attempt_count,leased_at,lease_expires_at,
+    lease_owner,lease_fence FROM uptech.sync_jobs WHERE workspace_id=$1 AND id=$2`, [workspaceId, jobId])).rows[0],
+  { status: "QUEUED", attempt_count: 1, leased_at: null, lease_expires_at: null,
+    lease_owner: null, lease_fence: null });
+  assert.deepEqual((await pool.query(`SELECT workspace_id::text,id::text,status,attempt_count,
+    lease_fence::text,lease_expires_at FROM uptech.sync_jobs WHERE id=$1`, [otherBefore.id])).rows[0], otherBefore);
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.sync_jobs SET status='LEASED',
+    attempt_count=max_attempts,leased_at=statement_timestamp()-interval '3 minutes',
+    lease_expires_at=statement_timestamp()-interval '1 minute',lease_owner='test-worker',
+    lease_fence='99000000-0000-4000-8000-000000000003',updated_at=statement_timestamp()
+    WHERE workspace_id=$1 AND id=$2`, [workspaceId, jobId]));
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
+  assert.deepEqual(await retry(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
+
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.people_sync_generations(
+    workspace_id,id,connector_id,job_id,lease_fence,status,traversal_complete,
+    started_at,completed_at,fresh_until,google_customer_id,primary_domain)
+    VALUES ($1,'99000000-0000-4000-8000-000000000004',$2,$3,
+      '99000000-0000-4000-8000-000000000005','PUBLISHED',true,
+      statement_timestamp()-interval '3 hours',statement_timestamp()-interval '2 hours',
+      statement_timestamp()-interval '1 hour','customer-status','status.example')`,
+  [workspaceId, connectorId, jobId]));
+  assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations SET
+    completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '4 minutes'
+    WHERE workspace_id=$1 AND id='99000000-0000-4000-8000-000000000004'`, [workspaceId]));
+  assert.deepEqual(await read(), { outcome: "READY" });
+  assert.deepEqual(await retry(), { outcome: "READY" });
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.onboarding_sessions SET
+    resource_workspace_id='90000000-0000-0000-0000-000000000001' WHERE token_hash=$1`, [statusTokenHash]));
+  assert.deepEqual(await read(), { outcome: "DENIED" });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.onboarding_sessions SET
+    resource_workspace_id=$2,created_at=statement_timestamp()-interval '23 hours',
+    expires_at=statement_timestamp()-interval '1 minute' WHERE token_hash=$1`, [statusTokenHash, workspaceId]));
+  assert.deepEqual(await read(), { outcome: "ONBOARDING_EXPIRED" });
+  assert.deepEqual(await retry(), { outcome: "ONBOARDING_EXPIRED" });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.onboarding_sessions SET status='REVOKED',
+    revoked_at=statement_timestamp(),created_at=statement_timestamp()-interval '1 hour',
+    expires_at=statement_timestamp()+interval '1 hour' WHERE token_hash=$1`, [statusTokenHash]));
+  assert.deepEqual(await read(), { outcome: "DENIED" });
+  assert.deepEqual(await retry(), { outcome: "DENIED" });
+});

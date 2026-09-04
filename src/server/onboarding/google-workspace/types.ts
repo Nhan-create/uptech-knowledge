@@ -44,6 +44,27 @@ export interface BootstrapAbortInput {
   readonly requestId: string;
 }
 
+export interface BootstrapStatusInput {
+  readonly statusTokenHash: Uint8Array;
+  readonly requestId: string;
+}
+
+export type BootstrapStatusOutcome =
+  | "DIRECTORY_BOOTSTRAP_SYNC_PENDING"
+  | "READY"
+  | "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE"
+  | "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED"
+  | "ONBOARDING_EXPIRED"
+  | "DENIED";
+
+export type BootstrapRetryOutcome =
+  | "REQUEUED"
+  | "DIRECTORY_BOOTSTRAP_SYNC_PENDING"
+  | "READY"
+  | "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED"
+  | "ONBOARDING_EXPIRED"
+  | "DENIED";
+
 export interface GoogleWorkspaceBootstrapRepository {
   prepare(input: BootstrapPrepareInput): Promise<{ readonly outcome: "PREPARED" | "DENIED" }>;
   complete(input: BootstrapCompleteInput): Promise<
@@ -54,4 +75,6 @@ export interface GoogleWorkspaceBootstrapRepository {
     readonly outcome: "COMMITTED" | "NOT_COMMITTED" | "UNKNOWN";
   }>;
   abort(input: BootstrapAbortInput): Promise<{ readonly outcome: "ABORTED" | "UNKNOWN" }>;
+  readStatus(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapStatusOutcome }>;
+  retrySync(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapRetryOutcome }>;
 }

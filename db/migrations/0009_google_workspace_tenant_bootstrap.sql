@@ -66,6 +66,32 @@ CREATE TYPE uptech.google_workspace_bootstrap_reconcile_result_v1 AS (
   outcome uptech.google_workspace_bootstrap_reconcile_outcome_v1
 );
 
+CREATE TYPE uptech.google_workspace_bootstrap_status_outcome_v1 AS ENUM (
+  'DIRECTORY_BOOTSTRAP_SYNC_PENDING',
+  'READY',
+  'DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE',
+  'DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED',
+  'ONBOARDING_EXPIRED',
+  'DENIED'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_status_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_status_outcome_v1
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_retry_outcome_v1 AS ENUM (
+  'REQUEUED',
+  'DIRECTORY_BOOTSTRAP_SYNC_PENDING',
+  'READY',
+  'DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED',
+  'ONBOARDING_EXPIRED',
+  'DENIED'
+);
+
+CREATE TYPE uptech.google_workspace_bootstrap_retry_result_v1 AS (
+  outcome uptech.google_workspace_bootstrap_retry_outcome_v1
+);
+
 CREATE FUNCTION uptech.onboarding_operations_are_unique_v1(p_values text[])
 RETURNS boolean
 LANGUAGE sql
@@ -1290,6 +1316,277 @@ REVOKE ALL ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 GRANT EXECUTE ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
   uuid, uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
+CREATE FUNCTION uptech.read_google_workspace_bootstrap_status_v1(
+  p_status_token_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_status_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_capability uptech.onboarding_sessions%ROWTYPE;
+  selected_attempt_id uuid;
+  selected_workspace_id uuid;
+  selected_connector_id uuid;
+  selected_customer_id text;
+  selected_job uptech.sync_jobs%ROWTYPE;
+  observed_at timestamptz := pg_catalog.statement_timestamp();
+BEGIN
+  IF p_status_token_hash IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  -- Credential-only lookup comes first. An expired status credential never
+  -- reaches a tenant-owned relation and therefore cannot reveal tenant state.
+  SELECT capability.* INTO selected_capability
+  FROM uptech.onboarding_sessions AS capability
+  WHERE capability.token_hash = p_status_token_hash;
+
+  IF selected_capability.id IS NULL
+    OR pg_catalog.cardinality(selected_capability.allowed_operations) <> 2
+    OR NOT selected_capability.allowed_operations @> ARRAY[
+      'DIRECTORY_BOOTSTRAP_STATUS_READ',
+      'DIRECTORY_BOOTSTRAP_SYNC_RETRY'
+    ]::text[]
+  THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  IF selected_capability.status IN ('CONSUMED', 'EXPIRED')
+    OR (selected_capability.status = 'ACTIVE'
+      AND selected_capability.expires_at <= observed_at)
+  THEN
+    RETURN ROW('ONBOARDING_EXPIRED')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  IF selected_capability.status <> 'ACTIVE' THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  SELECT receipt.attempt_id, receipt.workspace_id, receipt.connector_id,
+    workspace.google_customer_id
+  INTO selected_attempt_id, selected_workspace_id, selected_connector_id,
+    selected_customer_id
+  FROM uptech.google_workspace_bootstrap_receipts AS receipt
+  JOIN uptech.google_workspace_bootstrap_attempts AS attempt
+    ON attempt.id = receipt.attempt_id AND attempt.state = 'COMMITTED'
+  JOIN uptech.workspaces AS workspace
+    ON workspace.workspace_id = receipt.workspace_id
+   AND workspace.status = 'ACTIVE'
+   AND workspace.google_customer_id IS NOT NULL
+  JOIN uptech.connectors AS connector
+    ON connector.workspace_id = receipt.workspace_id
+   AND connector.id = receipt.connector_id
+   AND connector.purpose = 'DIRECTORY'
+   AND connector.status IN ('ACTIVE', 'DEGRADED')
+   AND connector.provider_customer_id = workspace.google_customer_id
+   AND connector.directory_authorized_by_identity_id = receipt.identity_id
+  WHERE receipt.initial_status_onboarding_session_id = selected_capability.id
+    AND receipt.identity_id = selected_capability.identity_id
+    AND receipt.workspace_id = selected_capability.resource_workspace_id;
+
+  IF selected_attempt_id IS NULL THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  SELECT job.* INTO selected_job
+  FROM uptech.sync_jobs AS job
+  WHERE job.workspace_id = selected_workspace_id
+    AND job.connector_id = selected_connector_id
+    AND job.job_kind = 'DIRECTORY_SYNC'
+    AND job.source_id IS NULL
+    AND job.payload ->> 'bootstrap_attempt_id' = selected_attempt_id::text
+  ORDER BY job.created_at, job.id
+  LIMIT 1;
+
+  IF selected_job.id IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM uptech.people_sync_generations AS generation
+    WHERE generation.workspace_id = selected_workspace_id
+      AND generation.connector_id = selected_connector_id
+      AND generation.job_id = selected_job.id
+      AND generation.google_customer_id = selected_customer_id
+      AND generation.status = 'PUBLISHED'
+      AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL
+      AND generation.fresh_until > observed_at
+  ) THEN
+    RETURN ROW('READY')::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  IF selected_job.id IS NOT NULL AND (
+    (selected_job.status = 'QUEUED'
+      AND selected_job.attempt_count < selected_job.max_attempts)
+    OR (selected_job.status = 'LEASED'
+      AND selected_job.lease_expires_at > observed_at)
+  ) THEN
+    RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_PENDING')
+      ::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  IF selected_job.id IS NOT NULL
+    AND selected_job.status = 'LEASED'
+    AND selected_job.lease_expires_at <= observed_at
+    AND selected_job.attempt_count < selected_job.max_attempts
+  THEN
+    RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE')
+      ::uptech.google_workspace_bootstrap_status_result_v1;
+  END IF;
+
+  RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED')
+    ::uptech.google_workspace_bootstrap_status_result_v1;
+END
+$function$;
+
+CREATE FUNCTION uptech.retry_google_workspace_bootstrap_sync_v1(
+  p_status_token_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_workspace_bootstrap_retry_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  selected_capability uptech.onboarding_sessions%ROWTYPE;
+  selected_attempt_id uuid;
+  selected_workspace_id uuid;
+  selected_connector_id uuid;
+  selected_customer_id text;
+  selected_job uptech.sync_jobs%ROWTYPE;
+  observed_at timestamptz := pg_catalog.statement_timestamp();
+BEGIN
+  IF p_status_token_hash IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  SELECT capability.* INTO selected_capability
+  FROM uptech.onboarding_sessions AS capability
+  WHERE capability.token_hash = p_status_token_hash;
+
+  IF selected_capability.id IS NULL
+    OR pg_catalog.cardinality(selected_capability.allowed_operations) <> 2
+    OR NOT selected_capability.allowed_operations @> ARRAY[
+      'DIRECTORY_BOOTSTRAP_STATUS_READ',
+      'DIRECTORY_BOOTSTRAP_SYNC_RETRY'
+    ]::text[]
+  THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  IF selected_capability.status IN ('CONSUMED', 'EXPIRED')
+    OR (selected_capability.status = 'ACTIVE'
+      AND selected_capability.expires_at <= observed_at)
+  THEN
+    RETURN ROW('ONBOARDING_EXPIRED')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  IF selected_capability.status <> 'ACTIVE' THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  SELECT receipt.attempt_id, receipt.workspace_id, receipt.connector_id,
+    workspace.google_customer_id
+  INTO selected_attempt_id, selected_workspace_id, selected_connector_id,
+    selected_customer_id
+  FROM uptech.google_workspace_bootstrap_receipts AS receipt
+  JOIN uptech.google_workspace_bootstrap_attempts AS attempt
+    ON attempt.id = receipt.attempt_id AND attempt.state = 'COMMITTED'
+  JOIN uptech.workspaces AS workspace
+    ON workspace.workspace_id = receipt.workspace_id
+   AND workspace.status = 'ACTIVE'
+   AND workspace.google_customer_id IS NOT NULL
+  JOIN uptech.connectors AS connector
+    ON connector.workspace_id = receipt.workspace_id
+   AND connector.id = receipt.connector_id
+   AND connector.purpose = 'DIRECTORY'
+   AND connector.status IN ('ACTIVE', 'DEGRADED')
+   AND connector.provider_customer_id = workspace.google_customer_id
+   AND connector.directory_authorized_by_identity_id = receipt.identity_id
+  WHERE receipt.initial_status_onboarding_session_id = selected_capability.id
+    AND receipt.identity_id = selected_capability.identity_id
+    AND receipt.workspace_id = selected_capability.resource_workspace_id;
+
+  IF selected_attempt_id IS NULL THEN
+    RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  SELECT job.* INTO selected_job
+  FROM uptech.sync_jobs AS job
+  WHERE job.workspace_id = selected_workspace_id
+    AND job.connector_id = selected_connector_id
+    AND job.job_kind = 'DIRECTORY_SYNC'
+    AND job.source_id IS NULL
+    AND job.payload ->> 'bootstrap_attempt_id' = selected_attempt_id::text
+  ORDER BY job.created_at, job.id
+  LIMIT 1
+  FOR UPDATE;
+
+  IF selected_job.id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM uptech.people_sync_generations AS generation
+    WHERE generation.workspace_id = selected_workspace_id
+      AND generation.connector_id = selected_connector_id
+      AND generation.job_id = selected_job.id
+      AND generation.google_customer_id = selected_customer_id
+      AND generation.status = 'PUBLISHED'
+      AND generation.traversal_complete
+      AND generation.completed_at IS NOT NULL
+      AND generation.fresh_until > observed_at
+  ) THEN
+    RETURN ROW('READY')::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  IF selected_job.id IS NOT NULL AND (
+    (selected_job.status = 'QUEUED'
+      AND selected_job.attempt_count < selected_job.max_attempts)
+    OR (selected_job.status = 'LEASED'
+      AND selected_job.lease_expires_at > observed_at)
+  ) THEN
+    RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_PENDING')
+      ::uptech.google_workspace_bootstrap_retry_result_v1;
+  END IF;
+
+  IF selected_job.id IS NOT NULL
+    AND selected_job.status = 'LEASED'
+    AND selected_job.lease_expires_at <= observed_at
+    AND selected_job.attempt_count < selected_job.max_attempts
+  THEN
+    UPDATE uptech.sync_jobs
+    SET status = 'QUEUED', available_at = observed_at,
+      leased_at = NULL, lease_expires_at = NULL, lease_owner = NULL,
+      lease_fence = NULL, completed_at = NULL, last_error_code = NULL,
+      updated_at = observed_at
+    WHERE workspace_id = selected_workspace_id AND id = selected_job.id
+      AND status = 'LEASED' AND lease_fence = selected_job.lease_fence
+      AND lease_expires_at <= observed_at AND attempt_count < max_attempts;
+    IF FOUND THEN
+      RETURN ROW('REQUEUED')::uptech.google_workspace_bootstrap_retry_result_v1;
+    END IF;
+  END IF;
+
+  RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED')
+    ::uptech.google_workspace_bootstrap_retry_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.read_google_workspace_bootstrap_status_v1(
+  uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.read_google_workspace_bootstrap_status_v1(
+  uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
+REVOKE ALL ON FUNCTION uptech.retry_google_workspace_bootstrap_sync_v1(
+  uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.retry_google_workspace_bootstrap_sync_v1(
+  uptech.google_auth_hash32_v1, uuid
 ) TO uptech_api_runtime;
 
 CREATE TABLE uptech.workspace_access_requests (

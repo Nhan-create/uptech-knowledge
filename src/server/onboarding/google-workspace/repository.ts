@@ -3,6 +3,8 @@ import type { QueryResultRow } from "pg";
 import type { DatabasePool } from "../../db/core.ts";
 import type {
   BootstrapCompleteInput,
+  BootstrapRetryOutcome,
+  BootstrapStatusOutcome,
   GoogleWorkspaceBootstrapRepository,
   VerifiedGoogleWorkspaceDomain,
 } from "./types.ts";
@@ -12,6 +14,9 @@ export type {
   BootstrapCompleteInput,
   BootstrapPrepareInput,
   BootstrapReconcileInput,
+  BootstrapRetryOutcome,
+  BootstrapStatusInput,
+  BootstrapStatusOutcome,
   GoogleWorkspaceBootstrapRepository,
   VerifiedGoogleWorkspaceDomain,
 } from "./types.ts";
@@ -59,6 +64,16 @@ FROM uptech.reconcile_google_workspace_bootstrap_v1(
 const ABORT_SQL = `SELECT result.outcome::text AS outcome
 FROM uptech.abort_google_workspace_bootstrap_v1(
   $1::uuid,$2::uptech.google_auth_hash32_v1,$3::uuid
+) AS result`;
+
+const READ_STATUS_SQL = `SELECT result.outcome::text AS outcome
+FROM uptech.read_google_workspace_bootstrap_status_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
+const RETRY_SYNC_SQL = `SELECT result.outcome::text AS outcome
+FROM uptech.retry_google_workspace_bootstrap_sync_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
 ) AS result`;
 
 function bytes(value: Uint8Array): Buffer { return Buffer.from(value); }
@@ -117,6 +132,18 @@ export function createGoogleWorkspaceBootstrapStartAdmission(
 export function createGoogleWorkspaceBootstrapRepository(
   pool: Pick<DatabasePool, "query">,
 ): GoogleWorkspaceBootstrapRepository {
+  const statusOperation = <T extends BootstrapStatusOutcome | BootstrapRetryOutcome>(
+    sql: string,
+    allowed: readonly T[],
+    input: import("./types.ts").BootstrapStatusInput,
+  ) => unknownBoundary(async () => {
+    if (!(input.statusTokenHash instanceof Uint8Array) || input.statusTokenHash.byteLength !== 32 ||
+        !CANONICAL_UUID.test(input.requestId)) {
+      throw new BootstrapCommitUnknownError();
+    }
+    const row = one((await pool.query(sql, [bytes(input.statusTokenHash), input.requestId])).rows as QueryResultRow[]);
+    return { outcome: outcomeOnly(row, allowed) as T };
+  });
   const implementation: GoogleWorkspaceBootstrapRepository = {
     prepare: (input) => unknownBoundary(async () => {
       const row = one((await pool.query(PREPARE_SQL, [
@@ -154,6 +181,17 @@ export function createGoogleWorkspaceBootstrapRepository(
       ])).rows as QueryResultRow[]);
       return { outcome: outcomeOnly(row, ["ABORTED", "UNKNOWN"]) as "ABORTED" | "UNKNOWN" };
     }),
+    readStatus: (input) => statusOperation(READ_STATUS_SQL, [
+      "DIRECTORY_BOOTSTRAP_SYNC_PENDING", "READY",
+      "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE",
+      "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+      "ONBOARDING_EXPIRED", "DENIED",
+    ] as const, input),
+    retrySync: (input) => statusOperation(RETRY_SYNC_SQL, [
+      "REQUEUED", "DIRECTORY_BOOTSTRAP_SYNC_PENDING", "READY",
+      "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED",
+      "ONBOARDING_EXPIRED", "DENIED",
+    ] as const, input),
   };
   return Object.freeze(implementation);
 }
