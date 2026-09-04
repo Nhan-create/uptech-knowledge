@@ -13,6 +13,7 @@ import {
   createBootstrapStatusGet,
   createBootstrapSyncRetryPost,
   createOnboardingLogoutPost,
+  exactCsrfCredential,
   type AccessRequestDependencies,
   type BootstrapHttpDependencies,
   type BootstrapStatusDependencies,
@@ -26,6 +27,12 @@ const SETUP = "1.AAAAAAAAAAAAAAAA.ciphertext.BBBBBBBBBBBBBBBBBBBBBB";
 const PEPPER = new Uint8Array(32).fill(9);
 const AUTHORIZATION = new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
 const NETWORK_HMAC = new Uint8Array(32).fill(4);
+
+test("exactCsrfCredential accepts only the derived canonical onboarding credential", () => {
+  assert.equal(exactCsrfCredential(deriveCsrfCredential(ONBOARDING, PEPPER), ONBOARDING, PEPPER), true);
+  assert.equal(exactCsrfCredential(issueOpaqueProof(), ONBOARDING, PEPPER), false);
+  assert.equal(exactCsrfCredential("malformed", ONBOARDING, PEPPER), false);
+});
 
 function fixture() {
   const calls: unknown[] = [];

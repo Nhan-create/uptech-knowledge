@@ -30,3 +30,10 @@ Completed and committed from base `ee6e95d`.
 ## Concerns
 
 - Focused tests emit pre-existing Node experimental/module-type warnings, but no test or typecheck failures remain.
+
+## Review round 1
+
+- RED: `transaction stops an oversized streamed form before OIDC initiation` failed because the previous `arrayBuffer()` reader consumed the complete stream without invoking cancellation.
+- GREEN: the transaction route now reads request bodies incrementally, cancels at the byte cap, and retains a content-length fast rejection without trusting it as the sole bound. It imports the shared Web-session cookie name.
+- Added table-driven hostile envelope coverage, canonical-CSRF mismatch coverage, direct `exactCsrfCredential` correct/mismatch/malformed coverage, deterministic duplicate/authenticated-stale clear ordering, and active-onboarding switch denial/rate-limit/throw preservation tests.
+- Review-round verification: `node --experimental-strip-types --test src/server/onboarding/google-workspace/http.test.ts` (24 pass); `npm run test:login-routes` (41 pass); `npm run typecheck` pass; `git diff --check` pass.

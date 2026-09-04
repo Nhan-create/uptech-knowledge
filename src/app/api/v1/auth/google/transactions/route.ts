@@ -12,6 +12,7 @@ import { createGoogleLoginRuntime } from "@/server/auth/google/runtime";
 import { logAuthOperation } from "@/server/auth/operational-log";
 import { GOOGLE_WORKSPACE_SETUP_COOKIE_NAME } from "@/server/onboarding/google-workspace/crypto";
 import { exactCsrfCredential } from "@/server/onboarding/google-workspace/http";
+import { WEB_SESSION_COOKIE_NAME } from "@/server/sessions/session-security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,13 +46,50 @@ function exactlyOneCookie(headers: Headers, name: string): string | null {
   return values.length === 1 && values[0] !== "" ? values[0]! : null;
 }
 
+async function boundedIntentBody(request: Request): Promise<Uint8Array | null> {
+  const advertisedLength = request.headers.get("content-length");
+  if (advertisedLength !== null && (!/^[0-9]+$/u.test(advertisedLength) ||
+      Number(advertisedLength) > MAX_INTENT_BODY_BYTES)) {
+    await request.body?.cancel();
+    return null;
+  }
+  if (request.body === null) return new Uint8Array();
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > MAX_INTENT_BODY_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(next.value);
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 async function loginIntent(request: Request): Promise<LoginIntent | null> {
   let url: URL;
   try { url = new URL(request.url); } catch { return null; }
   if (url.search !== "" || url.hash !== "" || request.headers.has("authorization")) return null;
 
-  let bytes: Uint8Array;
-  try { bytes = new Uint8Array(await request.arrayBuffer()); } catch { return null; }
+  const bytes = await boundedIntentBody(request);
+  if (bytes === null) return null;
   if (bytes.byteLength === 0) {
     const contentType = request.headers.get("content-type");
     return contentType === null || contentType === FORM_CONTENT_TYPE ? { kind: "LOGIN" } : null;
@@ -139,7 +177,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const runtimeContext = createGoogleLoginRuntime();
     appOrigin = runtimeContext.config.appOrigin;
-    const hasBrowserAuthority = hasCookieName(request.headers, "__Host-uptech_session") ||
+    const hasBrowserAuthority = hasCookieName(request.headers, WEB_SESSION_COOKIE_NAME) ||
       hasCookieName(request.headers, ONBOARDING_COOKIE_NAME);
     const authority = hasBrowserAuthority
       ? await inspectBrowserAuthority(

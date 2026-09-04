@@ -264,6 +264,61 @@ test("transaction rejects an unapproved form field before initiating OIDC", asyn
   assert.equal(response.headers.getSetCookie().length, 0);
 });
 
+test("transaction stops an oversized streamed form before OIDC initiation", async () => {
+  initiateCalls = 0;
+  let pulls = 0;
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      if (pulls === 1) controller.enqueue(new Uint8Array(257).fill(0x61));
+      else controller.close();
+    },
+    cancel() { cancelled = true; },
+  });
+  const response = await transactionRoute.POST(new Request(
+    `${appOrigin}/api/v1/auth/google/transactions`,
+    {
+      method: "POST",
+      headers: { ...trustedHeaders, "content-type": "application/x-www-form-urlencoded" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit & { readonly duplex: "half" },
+  ));
+
+  loginLocation(response, "login_failed");
+  assert.equal(initiateCalls, 0);
+  assert.equal(response.headers.getSetCookie().length, 0);
+  assert.equal(cancelled, true);
+});
+
+test("transaction rejects hostile request envelopes before initiating OIDC", async () => {
+  const malformedBytes = new Uint8Array([0xc3, 0x28]);
+  for (const input of [
+    { label: "query", url: `${appOrigin}/api/v1/auth/google/transactions?intent=LOGIN`, headers: {}, body: undefined },
+    { label: "hash", url: `${appOrigin}/api/v1/auth/google/transactions#intent=LOGIN`, headers: {}, body: undefined },
+    { label: "duplicate intent", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN&intent=LOGIN" },
+    { label: "unknown intent", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=ATTACK" },
+    { label: "LOGIN csrf", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: `intent=LOGIN&csrf_token=${issueOpaqueProof()}` },
+    { label: "wrong content type", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/json" }, body: "intent=LOGIN" },
+    { label: "oversized", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: `intent=LOGIN&pad=${"x".repeat(257)}` },
+    { label: "invalid UTF-8", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: malformedBytes },
+    { label: "raw NUL", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN\0" },
+    { label: "encoded NUL", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { "content-type": "application/x-www-form-urlencoded" }, body: "intent=LOGIN%00" },
+    { label: "authorization", url: `${appOrigin}/api/v1/auth/google/transactions`, headers: { authorization: "Bearer attacker" }, body: undefined },
+  ] as const) {
+    initiateCalls = 0;
+    const response = await transactionRoute.POST(new Request(input.url, {
+      method: "POST",
+      headers: new Headers({ ...trustedHeaders, ...input.headers } as unknown as Record<string, string>),
+      body: input.body,
+    }));
+    loginLocation(response, "login_failed");
+    assert.equal(initiateCalls, 0, input.label);
+    assert.equal(response.headers.getSetCookie().length, 0, input.label);
+  }
+});
+
 test("transaction accepts the empty, LOGIN, and SWITCH_ACCOUNT intents without browser authority", async () => {
   initiateCalls = 0;
   initiateResult = {
@@ -381,6 +436,7 @@ test("transaction rejects malformed SWITCH_ACCOUNT authority requests before ini
     for (const input of [
       { body: "intent=SWITCH_ACCOUNT", headers: {} },
       { body: "intent=SWITCH_ACCOUNT&csrf_token=wrong", headers: {} },
+      { body: `intent=SWITCH_ACCOUNT&csrf_token=${issueOpaqueProof()}`, headers: {} },
       { body: `csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&intent=SWITCH_ACCOUNT`, headers: {} },
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: {} },
       { body: `intent=SWITCH_ACCOUNT&csrf_token=${deriveCsrfCredential(onboarding, bootstrapPepper)}`, headers: { origin: "https://attacker.example" } },
@@ -405,6 +461,45 @@ test("transaction rejects malformed SWITCH_ACCOUNT authority requests before ini
       loginLocation(response, "login_failed");
       assert.equal(response.headers.getSetCookie().length, 0);
       assert.equal(initiateCalls, 0);
+    }
+  } finally {
+    onboardingSessionResult = null;
+  }
+});
+
+test("transaction preserves valid onboarding and setup cookies when SWITCH initiation fails", async () => {
+  const onboarding = issueOpaqueProof();
+  onboardingSessionResult = {
+    kind: "onboarding",
+    allowedOperations: ["ACCESS_REQUEST_READ", "ACCESS_REQUEST_SUBMIT"],
+    contextExpiresAt: new Date(Date.now() + 60_000),
+  };
+  const csrf = deriveCsrfCredential(onboarding, bootstrapPepper);
+  try {
+    for (const scenario of [
+      { label: "denied", result: { outcome: "DENIED" }, error: "login_failed" },
+      { label: "rate limited", result: { outcome: "RATE_LIMITED" }, error: "rate_limited" },
+      { label: "provider failure", result: new Error("provider unavailable"), error: "temporarily_unavailable" },
+    ]) {
+      initiateCalls = 0;
+      initiateResult = scenario.result;
+      const response = await transactionRoute.POST(new Request(
+        `${appOrigin}/api/v1/auth/google/transactions`,
+        {
+          method: "POST",
+          headers: {
+            ...trustedHeaders,
+            cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=stale`,
+            origin: appOrigin,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body: `intent=SWITCH_ACCOUNT&csrf_token=${csrf}`,
+        },
+      ));
+      loginLocation(response, scenario.error);
+      assert.equal(initiateCalls, 1, scenario.label);
+      assert.equal(response.headers.getSetCookie().length, 0, scenario.label);
     }
   } finally {
     onboardingSessionResult = null;
@@ -437,6 +532,35 @@ test("transaction clears inspected stale authority before setup and login transa
     "__Host-uptech_login_tx",
   ]);
   assert.equal(initiateCalls, 1);
+});
+
+test("transaction uses canonical deterministic clears for duplicate and authenticated-stale authority", async () => {
+  initiateResult = {
+    outcome: "REDIRECT",
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    loginCookie: issueOpaqueProof(),
+  };
+  const first = issueOpaqueProof();
+  const second = issueOpaqueProof();
+  for (const scenario of [
+    {
+      cookie: `__Host-uptech_session=${first}; __Host-uptech_session=${second}`,
+      expected: ["__Host-uptech_session", "__Host-uptech_login_tx"],
+    },
+    {
+      cookie: `__Host-uptech_onboarding=${first}`,
+      expected: ["__Host-uptech_onboarding", "__Host-uptech_login_tx"],
+    },
+  ]) {
+    initiateCalls = 0;
+    const response = await transactionRoute.POST(new Request(
+      `${appOrigin}/api/v1/auth/google/transactions`,
+      { method: "POST", headers: { ...trustedHeaders, cookie: scenario.cookie } },
+    ));
+    assert.equal(response.status, 303);
+    assert.deepEqual(response.headers.getSetCookie().map((cookie) => cookie.split("=", 1)[0]), scenario.expected);
+    assert.equal(initiateCalls, 1);
+  }
 });
 
 for (const scenario of [
