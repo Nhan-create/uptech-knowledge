@@ -1546,18 +1546,21 @@ test("Directory mapping evaluator is generation-bound, converges member signals,
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','conflict-sub','Conflict','conflict@mapping-a.example','engineering','ACTIVE',NULL),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','none-sub','None','none@mapping-a.example',NULL,'ACTIVE',NULL),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','suspended-sub','Suspended','suspended@mapping-a.example','engineering','SUSPENDED',NULL),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','deleted-sub','Deleted','deleted@mapping-a.example','engineering','DELETED',NULL);
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','deleted-sub','Deleted','deleted@mapping-a.example','engineering','DELETED',NULL),
+        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','admin-sub','Tenant B Admin','admin@mapping-b.example',NULL,'ACTIVE',NULL);
       INSERT INTO uptech.people_groups(workspace_id,generation_id,google_group_id,group_name) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','g-admin','Old Admins'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-admin','Admins'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-sales','Sales'),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','HR');
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','HR'),
+        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','g-admin','Tenant B Admins');
       INSERT INTO uptech.people_group_memberships(workspace_id,generation_id,google_group_id,google_subject) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000020','g-admin','admin-sub'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-admin','admin-sub'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','admin-sub'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-sales','member-sub'),
-        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','conflict-sub');
+        ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000021','g-hr','conflict-sub'),
+        ('97400000-0000-4000-8000-000000000002','97400000-0000-4000-8000-000000000043','g-admin','admin-sub');
       INSERT INTO uptech.people_permission_mappings(workspace_id,id,source_kind,source_value,target_role,target_department_key,status) VALUES
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000030','ADMIN_GROUP','g-admin','ADMIN',NULL,'ACTIVE'),
         ('97400000-0000-4000-8000-000000000001','97400000-0000-4000-8000-000000000031','GROUP','g-sales','MEMBER','SALES','ACTIVE'),
