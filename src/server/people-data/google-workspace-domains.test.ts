@@ -5,21 +5,21 @@ import {
   normalizeVerifiedGoogleWorkspaceDomains,
 } from "./google-workspace-domains.ts";
 
-const customerDomain = "company-a.com";
+const customerDomain = "tenant-a.example";
 
 test("normalizes verified primary, secondary, and alias domains deterministically", () => {
   const result = normalizeVerifiedGoogleWorkspaceDomains({
     customerDomain,
     domains: [
-      { domainName: "Company-A.VN", verified: true, isPrimary: false },
-      { domainName: "company-a.com", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "STAFF.company-a.com", verified: true }] },
+      { domainName: "Tenant-B.Example", verified: true, isPrimary: false },
+      { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "UNKNOWN.EXAMPLE", verified: true }] },
     ],
   });
 
   assert.deepEqual(result, [
-    { normalizedDomain: "company-a.com", kind: "PRIMARY", providerParentDomain: null, verified: true },
-    { normalizedDomain: "company-a.vn", kind: "SECONDARY", providerParentDomain: null, verified: true },
-    { normalizedDomain: "staff.company-a.com", kind: "ALIAS", providerParentDomain: "company-a.com", verified: true },
+    { normalizedDomain: "tenant-a.example", kind: "PRIMARY", providerParentDomain: null, verified: true },
+    { normalizedDomain: "tenant-b.example", kind: "SECONDARY", providerParentDomain: null, verified: true },
+    { normalizedDomain: "unknown.example", kind: "ALIAS", providerParentDomain: "tenant-a.example", verified: true },
   ]);
 });
 
@@ -31,19 +31,19 @@ test("omits unverified aliases and aliases whose parent Domain resource is unver
         domainName: customerDomain,
         verified: true,
         isPrimary: true,
-        domainAliases: [{ domainAliasName: "unverified.company-a.com", verified: false }],
+        domainAliases: [{ domainAliasName: "unknown.example", verified: false }],
       },
       {
-        domainName: "secondary.company-a.com",
+        domainName: "tenant-b.example",
         verified: false,
         isPrimary: false,
-        domainAliases: [{ domainAliasName: "alias.secondary.company-a.com", verified: true }],
+        domainAliases: [{ domainAliasName: "unknown.example", verified: true }],
       },
     ],
   });
 
   assert.deepEqual(result, [
-    { normalizedDomain: "company-a.com", kind: "PRIMARY", providerParentDomain: null, verified: true },
+    { normalizedDomain: "tenant-a.example", kind: "PRIMARY", providerParentDomain: null, verified: true },
   ]);
 });
 
@@ -51,15 +51,15 @@ test("rejects non-canonical or unsafe Google domain evidence", () => {
   const valid = { domainName: customerDomain, verified: true, isPrimary: true };
   const invalidInputs = [
     { customerDomain, domains: [{ ...valid, verified: false }] },
-    { customerDomain, domains: [valid, { domainName: "company-a.vn", verified: true, isPrimary: true }] },
-    { customerDomain: "other.example", domains: [valid] },
-    { customerDomain, domains: [{ ...valid, verified: false, domainAliases: [{ domainName: "staff.company-a.com" }] }] },
+    { customerDomain, domains: [valid, { domainName: "tenant-b.example", verified: true, isPrimary: true }] },
+    { customerDomain: "tenant-b.example", domains: [valid] },
+    { customerDomain, domains: [{ ...valid, verified: false, domainAliases: [{ domainName: "unknown.example" }] }] },
     { customerDomain, domains: [valid, { domainName: customerDomain, verified: true, isPrimary: false }] },
-    { customerDomain, domains: Array.from({ length: 1_001 }, (_, index) => ({ domainName: `domain-${index}.example`, verified: true, isPrimary: index === 0 })) },
-    { customerDomain, domains: [{ domainName: `${"a".repeat(250)}.com`, verified: true, isPrimary: true }] },
+    { customerDomain, domains: Array.from({ length: 1_001 }, (_, index) => ({ ...valid, isPrimary: index === 0 })) },
+    { customerDomain, domains: [{ domainName: customerDomain.padStart(254, "a"), verified: true, isPrimary: true }] },
     { customerDomain, domains: [
       valid,
-      ...Array.from({ length: 999 }, (_, index) => ({ domainName: `a${index}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}.example`, verified: true, isPrimary: false })),
+      ...Array.from({ length: 999 }, () => ({ domainName: "unknown.example", verified: true, isPrimary: false })),
     ] },
   ];
   for (const input of invalidInputs) {

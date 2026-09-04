@@ -23,7 +23,7 @@ const CONFIG = Object.freeze({
   clientId: "directory-client.apps.googleusercontent.com",
   clientSecret: "directory-client-secret",
   redirectUri:
-    "https://knowledge.uptech.example/api/v1/admin/connectors/google-directory/callback",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/callback",
 });
 const TRANSACTION = Object.freeze({
   state: Buffer.alloc(32, 0x11).toString("base64url"),
@@ -83,7 +83,7 @@ function directoryFetchFixture(options: {
     }
     if (url.pathname.endsWith("/customer/C0123abc/domains")) {
       return json({ domains: options.domains ?? [
-        { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "staff.tenant-a.example", verified: true }] },
+        { domainName: "Tenant-A.Example", verified: true, isPrimary: true, domainAliases: [{ domainAliasName: "unknown.example", verified: true }] },
       ] });
     }
     if (url.pathname.includes("/users/") && !url.pathname.endsWith("/users")) {
@@ -188,7 +188,7 @@ test("authorization request fixes identity and Directory read-only scopes with o
 
 test("Directory consent accepts the exact bootstrap callback without weakening callback validation", () => {
   const bootstrapRedirectUri =
-    "https://knowledge.uptech.example/api/v1/onboarding/google-workspace/callback";
+    "https://tenant-a.example/api/v1/onboarding/google-workspace/callback";
   assert.doesNotThrow(() => createGoogleDirectoryConsentProvider({
     ...CONFIG,
     redirectUri: bootstrapRedirectUri,
@@ -197,7 +197,7 @@ test("Directory consent accepts the exact bootstrap callback without weakening c
   for (const redirectUri of [
     `${bootstrapRedirectUri}/extra`,
     `${bootstrapRedirectUri}?next=/admin`,
-    "https://knowledge.uptech.example/api/v1/onboarding/google-workspace/other",
+    "https://tenant-a.example/api/v1/onboarding/google-workspace/other",
   ]) {
     assert.throws(
       () => createGoogleDirectoryConsentProvider({ ...CONFIG, redirectUri }, dependencies()),
@@ -239,8 +239,8 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
       directoryUserActive: true,
       primaryDomain: "tenant-a.example",
       verifiedDomains: [
-        { normalizedDomain: "staff.tenant-a.example", kind: "ALIAS", providerParentDomain: "tenant-a.example", verified: true },
         { normalizedDomain: "tenant-a.example", kind: "PRIMARY", providerParentDomain: null, verified: true },
+        { normalizedDomain: "unknown.example", kind: "ALIAS", providerParentDomain: "tenant-a.example", verified: true },
       ],
       providerSubject: "google-subject-admin",
       normalizedEmail: "admin@tenant-a.example",
@@ -285,7 +285,7 @@ test("exchange verifies the Workspace identity and derives bounded Directory set
 test("consent rejects a hosted domain absent from verified Google Workspace domains", async () => {
   const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
     fetch: directoryFetchFixture({
-      domains: [{ domainName: "other.example", verified: true, isPrimary: true }],
+      domains: [{ domainName: "tenant-b.example", verified: true, isPrimary: true }],
     }).fetch,
   }));
   await assert.rejects(
@@ -449,7 +449,7 @@ test("Directory redirects and timeouts fail closed without leaking bearer materi
     {
       fetch: async () => new Response(null, {
         status: 302,
-        headers: { location: "https://attacker.example/token/directory-access-token" },
+        headers: { location: "https://tenant-b.example/token/directory-access-token" },
       }),
     },
     {

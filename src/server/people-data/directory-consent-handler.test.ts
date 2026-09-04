@@ -40,7 +40,7 @@ function dependencies(overrides: Partial<DirectoryConsentHandlerDependencies> = 
   return {
     loadRuntime: () => ({
       config: {
-        appOrigin: "https://knowledge.example",
+        appOrigin: "https://tenant-a.example",
         sessionPepper: new Uint8Array(32),
       },
       pool: {} as Pick<DatabasePool, "query">,
@@ -93,12 +93,12 @@ test("consent initiation authenticates and enforces CSRF before setting an encry
   }));
 
   const response = await POST(new Request(
-    "https://knowledge.example/api/v1/admin/connectors/google-directory/transactions",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/transactions",
     {
       method: "POST",
       headers: {
         cookie: "__Host-uptech_session=session",
-        origin: "https://knowledge.example",
+        origin: "https://tenant-a.example",
         "x-uptech-csrf": "csrf",
       },
     },
@@ -122,14 +122,14 @@ test("consent initiation rejects an untrusted provider redirect and emits no coo
       service: {
         ...dependencies().loadRuntime().service,
         initiate: async () => ({
-          authorizationUrl: new URL("https://attacker.example/steal"),
+          authorizationUrl: new URL("https://tenant-b.example/steal"),
           cookie: COOKIE_VALUE,
         }),
       },
     }),
   }));
   const response = await POST(new Request(
-    "https://knowledge.example/api/v1/admin/connectors/google-directory/transactions",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/transactions",
     { method: "POST" },
   ));
   assert.equal(response.status, 503);
@@ -155,12 +155,12 @@ test("callback requires one consent cookie, keeps the same active session, clear
     }),
   }));
   const response = await GET(new Request(
-    "https://knowledge.example/api/v1/admin/connectors/google-directory/callback?code=secret-code&state=state-value",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/callback?code=secret-code&state=state-value",
     { headers: { cookie: `__Host-uptech_session=session; __Host-uptech_directory_tx=${COOKIE_VALUE}` } },
   ));
 
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), "https://knowledge.example/admin/connectors?directory=connected");
+  assert.equal(response.headers.get("location"), "https://tenant-a.example/admin/connectors?directory=connected");
   assert.match(response.headers.get("set-cookie") ?? "", /^__Host-uptech_directory_tx=;/u);
   assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/u);
   assert.equal(callbackInput?.session, SESSION);
@@ -187,19 +187,19 @@ test("callback rejects duplicate cookies and masks provider or token details", a
   }));
 
   const duplicate = await GET(new Request(
-    "https://knowledge.example/api/v1/admin/connectors/google-directory/callback?code=code&state=state",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/callback?code=code&state=state",
     { headers: { cookie: `__Host-uptech_directory_tx=${COOKIE_VALUE}; __Host-uptech_directory_tx=duplicate` } },
   ));
   assert.equal(duplicate.status, 303);
-  assert.equal(duplicate.headers.get("location"), "https://knowledge.example/admin/connectors?directory=failed");
+  assert.equal(duplicate.headers.get("location"), "https://tenant-a.example/admin/connectors?directory=failed");
   assert.equal(called, 0);
 
   const failed = await GET(new Request(
-    "https://knowledge.example/api/v1/admin/connectors/google-directory/callback?code=code&state=state",
+    "https://tenant-a.example/api/v1/admin/connectors/google-directory/callback?code=code&state=state",
     { headers: { cookie: `__Host-uptech_directory_tx=${COOKIE_VALUE}` } },
   ));
   assert.equal(failed.status, 303);
-  assert.equal(failed.headers.get("location"), "https://knowledge.example/admin/connectors?directory=failed");
+  assert.equal(failed.headers.get("location"), "https://tenant-a.example/admin/connectors?directory=failed");
   const serialized = JSON.stringify(events);
   assert.equal(serialized.includes("refresh-token-secret"), false);
   assert.equal(serialized.includes("customer-123"), false);

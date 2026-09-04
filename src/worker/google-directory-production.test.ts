@@ -67,12 +67,12 @@ test("production Directory worker configuration is fail-closed and trims server-
 
   assert.deepEqual(
     loadGoogleDirectoryProductionConfiguration({
-      DATABASE_URL: " postgresql://runtime@db.example/uptech ",
+      DATABASE_URL: " postgresql://runtime@tenant-a.example/uptech ",
       GOOGLE_CLIENT_ID: " google-client.apps.googleusercontent.com ",
       GOOGLE_CLIENT_SECRET: " server-only-client-secret ",
     }),
     {
-      databaseUrl: "postgresql://runtime@db.example/uptech",
+      databaseUrl: "postgresql://runtime@tenant-a.example/uptech",
       oauthClient: {
         clientId: "google-client.apps.googleusercontent.com",
         clientSecret: "server-only-client-secret",

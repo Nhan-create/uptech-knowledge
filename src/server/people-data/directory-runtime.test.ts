@@ -188,7 +188,7 @@ test("Directory runtime preserves the opaque-reference refresh-token-to-read-onl
         return json({ access_token: "directory-access-token" });
       }
       if (request.pathname.endsWith("/customers/my_customer")) {
-        return json({ id: "C0123abc", customerDomain: "workspace.example" });
+        return json({ id: "C0123abc", customerDomain: "tenant-a.example" });
       }
       if (request.pathname.endsWith("/orgunits")) return json({ organizationUnits: [] });
       if (request.pathname.endsWith("/users")) return json({ users: [] });
