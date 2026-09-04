@@ -770,6 +770,9 @@ DO $verify$
 DECLARE
   mobile_v2_oid regprocedure :=
     'uptech.complete_mobile_google_callback_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure;
+  denial_oid regprocedure :=
+    'uptech.complete_mobile_google_denial_v1(uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_rejection_class_v1,uptech.mobile_auth_ui_category_v1,uuid)'::regprocedure;
+  denial_source text;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_proc AS routine
@@ -783,6 +786,22 @@ BEGIN
     OR pg_catalog.has_function_privilege('public',mobile_v2_oid,'EXECUTE')
   THEN RAISE EXCEPTION 'Mobile Directory V2 boundary is misconfigured';
   END IF;
+  SELECT routine.prosrc INTO denial_source FROM pg_catalog.pg_proc AS routine WHERE routine.oid=denial_oid;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=routine.proowner
+    WHERE routine.oid=denial_oid AND routine.prosecdef AND routine.provolatile='v'
+      AND routine.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+      AND owner_role.rolname='uptech_migration_owner'
+      AND routine.prorettype='uptech.mobile_callback_result_v1'::regtype)
+    OR NOT pg_catalog.has_function_privilege('uptech_api_runtime',denial_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime',denial_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('public',denial_oid,'EXECUTE')
+    OR pg_catalog.strpos(denial_source,'FROM uptech.mobile_handoffs WHERE handoff_hash=p_handoff_hash')=0
+    OR pg_catalog.strpos(denial_source,'WHERE token_hash=p_handoff_hash OR csrf_token_hash=p_handoff_hash')=0
+    OR pg_catalog.strpos(denial_source,'FROM uptech.onboarding_sessions WHERE token_hash=p_handoff_hash')=0
+    OR pg_catalog.strpos(denial_source,'p_request_id IS DISTINCT FROM selected_transaction.request_id')=0
+    OR pg_catalog.strpos(denial_source,'''handoff_hash'',p_handoff_hash')>0
+  THEN RAISE EXCEPTION 'Mobile denial helper boundary or collision guard is misconfigured'; END IF;
 END
 $verify$;
 

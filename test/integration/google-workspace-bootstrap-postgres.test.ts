@@ -3266,3 +3266,159 @@ test("Mobile Directory V2 denial categories roll back every core authority sourc
     }
   }
 });
+
+test("Mobile Directory V2 rejects a handoff hash colliding with onboarding authority", async () => {
+  const workspaceId="97400000-0000-4000-8000-000000000001";
+  const transactionId="97c00000-0000-4000-8000-000000000001";
+  const subject="mobile-v2-member-sub";
+  const digest=(label:string)=>createHash("sha256").update(`mobile-collision:${label}`).digest();
+  const handle=digest("handle"); const nonce=digest("nonce"); const collided=digest("shared");
+  const environment=await ensureActiveGoogleEnvironment();
+  const beforeMembership=(await pool.query(`SELECT m.role,m.status,m.authz_version FROM uptech.identities i
+    JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$1
+    WHERE i.provider_subject=$2`,[workspaceId,subject])).rows[0];
+  await asMigrationOwner(async (client)=> {
+    await client.query(`INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,status,
+      created_at,expires_at,resource_workspace_id,access_request_reason_class)
+    SELECT '97c00000-0000-4000-8000-000000000002',id,$1,
+      ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],'ACTIVE',statement_timestamp(),
+      statement_timestamp()+interval '20 minutes',$2,'USER_NOT_PROVISIONED'
+    FROM uptech.identities WHERE provider='GOOGLE' AND provider_subject=$3`,
+    [collided,workspaceId,subject]);
+    await client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,
+      nonce_hash,installation_binding_hash,app_exchange_challenge,pkce_envelope,pkce_kms_key_version,
+      pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,
+      completion_expires_at) VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,
+      ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,'mobile-v2-kms',
+      convert_to('mobile-collision','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',
+      statement_timestamp()+interval '4 minutes',statement_timestamp(),statement_timestamp()+interval '2 minutes')`,
+    [transactionId,environment,digest("state"),nonce,digest("install"),digest("challenge"),
+      Buffer.alloc(12,0xc1),Buffer.alloc(48,0xc2),Buffer.alloc(16,0xc3),handle]);
+  });
+
+  const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,
+      denial_category::text FROM uptech.complete_mobile_google_callback_directory_v2($1,
+      ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+        statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)
+        ::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+  [handle,subject,`${subject}@mapping-a.example`,nonce,collided,transactionId]))).rows[0];
+  assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"});
+  assert.deepEqual((await pool.query(`SELECT
+      (SELECT status::text FROM uptech.mobile_google_transactions WHERE id=$1) AS transaction_status,
+      (SELECT count(*)::int FROM uptech.mobile_handoffs WHERE handoff_hash=$2) AS mobile_handoffs,
+      (SELECT count(*)::int FROM uptech.onboarding_sessions WHERE token_hash=$2 AND status='ACTIVE') AS onboarding_authorities`,
+  [transactionId,collided])).rows[0],{transaction_status:"REJECTED",mobile_handoffs:0,onboarding_authorities:1});
+  assert.deepEqual((await pool.query(`SELECT m.role,m.status,m.authz_version FROM uptech.identities i
+    JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$1
+    WHERE i.provider_subject=$2`,[workspaceId,subject])).rows[0],beforeMembership);
+});
+
+test("Mobile Directory V2 denies a stable subject bound only to Tenant B without mutation", async () => {
+  const a="97400000-0000-4000-8000-000000000001",b="97400000-0000-4000-8000-000000000002";
+  const generation="97800000-0000-4000-8000-000000000002",subject="mobile-tenant-b-only";
+  const tx="97d00000-0000-4000-8000-000000000001",digest=(s:string)=>createHash("sha256").update(`x:${s}`).digest();
+  const handle=digest("handle"),nonce=digest("nonce"),handoff=digest("handoff"),environment=await ensureActiveGoogleEnvironment();
+  await asMigrationOwner(async (client)=> {
+    await client.query(`INSERT INTO uptech.users(id) VALUES ('97d00000-0000-4000-8000-000000000002')`);
+    await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
+      VALUES ('97d00000-0000-4000-8000-000000000003','97d00000-0000-4000-8000-000000000002','GOOGLE','https://accounts.google.com',$1,'member@mapping-b.example',true,'mapping-b.example',statement_timestamp());
+    `,[subject]);
+    await client.query(`INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status)
+      VALUES ($1,'97d00000-0000-4000-8000-000000000004','97d00000-0000-4000-8000-000000000002','MEMBER','ACTIVE')`,[b]);
+    await client.query(`INSERT INTO uptech.people_profiles(workspace_id,generation_id,google_subject,full_name,primary_email,lifecycle_state,effective_role,effective_department_key)
+      VALUES ($2,$3,$1,'Tenant B only','member@mapping-a.example','ACTIVE','MEMBER','SALES')`,[subject,a,generation]);
+    await client.query(`INSERT INTO uptech.people_group_memberships(workspace_id,generation_id,google_group_id,google_subject) VALUES ($2,$3,'g-sales',$1)`,[subject,a,generation]);
+    await client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,nonce_hash,installation_binding_hash,
+      app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
+      VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('tenant-b','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',statement_timestamp(),statement_timestamp()+interval '2 minutes')`,
+    [tx,environment,digest("state"),nonce,digest("install"),digest("challenge"),Buffer.alloc(12,0xd1),Buffer.alloc(48,0xd2),Buffer.alloc(16,0xd3),handle]);
+  });
+  const before=(await pool.query(`SELECT to_jsonb(i) AS identity,to_jsonb(m) AS membership FROM uptech.identities i
+    JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$2 WHERE i.provider_subject=$1`,[subject,b])).rows[0];
+  const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
+    FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+      statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+  [handle,subject,"member@mapping-a.example",nonce,handoff,tx]))).rows[0];
+  assert.deepEqual(row,{outcome:"DENIED",app_return_uri:"https://uptech-knowledge-sigma.vercel.app/auth/mobile/callback",denial_category:"AUTH_ERROR"});
+  assert.deepEqual((await pool.query(`SELECT to_jsonb(i) AS identity,to_jsonb(m) AS membership FROM uptech.identities i
+    JOIN uptech.workspace_memberships m ON m.user_id=i.user_id AND m.workspace_id=$2 WHERE i.provider_subject=$1`,[subject,b])).rows[0],before);
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.workspace_memberships WHERE workspace_id=$1 AND user_id='97d00000-0000-4000-8000-000000000002') AS tenant_a,
+    (SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$2 AND identity_id IS NOT NULL) AS authoritative,
+    (SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$2 AND identity_id IS NULL) AS denial`,[a,tx])).rows[0],
+  {tenant_a:0,authoritative:0,denial:1});
+});
+
+test("Mobile Directory V2 replay never creates a second transition or authority", async () => {
+  const successDigest=(s:string)=>createHash("sha256").update(`mobile-v2:${s}`).digest();
+  const denialDigest=(s:string)=>createHash("sha256").update(`mobile-denial:${s}`).digest();
+  const fixtures=[
+    {tx:"97900000-0000-4000-8000-000000000010",subject:"mobile-v2-admin-sub",handle:successDigest("mobile-v2-admin-sub:handle:0"),nonce:successDigest("mobile-v2-admin-sub:nonce:0"),handoff:successDigest("mobile-v2-admin-sub:handoff:0")},
+    {tx:"97900000-0000-4000-8000-000000000030",subject:"mobile-v2-member-sub",handle:denialDigest("handle"),nonce:denialDigest("nonce"),handoff:denialDigest("handoff")},
+  ];
+  for (const f of fixtures) {
+    const snapshot=()=>pool.query(`SELECT (SELECT status::text FROM uptech.mobile_google_transactions WHERE id=$1) AS status,
+      (SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$1) AS handoffs,
+      (SELECT count(*)::int FROM uptech.workspace_memberships) AS memberships,(SELECT count(*)::int FROM uptech.sessions) AS sessions,
+      (SELECT count(*)::int FROM uptech.session_tokens) AS tokens,(SELECT count(*)::int FROM uptech.onboarding_sessions) AS capabilities,
+      (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$1) AS audits`,[f.tx]);
+    const before=(await snapshot()).rows[0];
+    const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
+      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+    [f.handle,f.subject,`${f.subject}@mapping-a.example`,f.nonce,f.handoff,f.tx]))).rows[0];
+    assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"});
+    assert.deepEqual((await snapshot()).rows[0],before);
+  }
+});
+
+test("Mobile Directory V2 rejects collisions in handoff, session-token, and CSRF namespaces", async () => {
+  const subject="mobile-v2-member-sub",environment=await ensureActiveGoogleEnvironment();
+  const digest=(s:string)=>createHash("sha256").update(`credential-matrix:${s}`).digest();
+  const collisionRows=(await pool.query(`(SELECT 'handoff'::text AS kind,handoff_hash AS value FROM uptech.mobile_handoffs WHERE identity_id IS NOT NULL LIMIT 1)
+    UNION ALL (SELECT 'token',token_hash FROM uptech.session_tokens LIMIT 1)
+    UNION ALL (SELECT 'csrf',csrf_token_hash FROM uptech.session_tokens WHERE csrf_token_hash IS NOT NULL LIMIT 1)`)).rows;
+  assert.equal(collisionRows.length,3);
+  for (const [i,collision] of collisionRows.entries()) {
+    const tx=`97e00000-0000-4000-8000-00000000000${i+1}`,handle=digest(`handle:${i}`),nonce=digest(`nonce:${i}`);
+    await asMigrationOwner((client)=>client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,nonce_hash,
+      installation_binding_hash,app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
+      VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('collision','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',statement_timestamp(),statement_timestamp()+interval '2 minutes')`,
+    [tx,environment,digest(`state:${i}`),nonce,digest(`install:${i}`),digest(`challenge:${i}`),Buffer.alloc(12,0xe1+i),Buffer.alloc(48,0xe4+i),Buffer.alloc(16,0xe7+i),handle]));
+    const snapshot=()=>pool.query(`SELECT (SELECT to_jsonb(i) FROM uptech.identities i WHERE provider_subject=$1) AS identity,
+      (SELECT to_jsonb(m) FROM uptech.workspace_memberships m JOIN uptech.identities i ON i.user_id=m.user_id
+        WHERE i.provider_subject=$1 AND m.workspace_id='97400000-0000-4000-8000-000000000001') AS membership,
+      (SELECT count(*)::int FROM uptech.mobile_handoffs) AS handoffs,(SELECT count(*)::int FROM uptech.sessions) AS sessions,
+      (SELECT count(*)::int FROM uptech.session_tokens) AS tokens,(SELECT count(*)::int FROM uptech.onboarding_sessions) AS capabilities`,[subject]);
+    const before=(await snapshot()).rows[0];
+    const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
+      FROM uptech.complete_mobile_google_callback_directory_v2($1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+    [handle,subject,`${subject}@mapping-a.example`,nonce,collision.value,tx]))).rows[0];
+    assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"},collision.kind);
+    assert.deepEqual((await snapshot()).rows[0],before,collision.kind);
+    assert.deepEqual((await pool.query(`SELECT status::text,(SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$1) AS added,
+      (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$1 AND metadata::text ~* '(token|credential|secret|hash)') AS secret_audits
+      FROM uptech.mobile_google_transactions WHERE id=$1`,[tx])).rows[0],{status:"REJECTED",added:0,secret_audits:0});
+  }
+});
+
+test("Mobile denial helper cannot settle a reserved transaction under a different request", async () => {
+  const tx="97f00000-0000-4000-8000-000000000001",wrong="97f00000-0000-4000-8000-000000000002";
+  const digest=(s:string)=>createHash("sha256").update(`denial-binding:${s}`).digest();
+  const handle=digest("handle"),handoff=digest("handoff"),environment=await ensureActiveGoogleEnvironment();
+  await asMigrationOwner((client)=>client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,configuration_key,state_hash,nonce_hash,
+    installation_binding_hash,app_exchange_challenge,pkce_envelope,pkce_kms_key_version,pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
+    VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+    'mobile-v2-kms',convert_to('binding','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',statement_timestamp()+interval '4 minutes',statement_timestamp(),statement_timestamp()+interval '2 minutes')`,
+  [tx,environment,digest("state"),digest("nonce"),digest("install"),digest("challenge"),Buffer.alloc(12,0xf1),Buffer.alloc(48,0xf2),Buffer.alloc(16,0xf3),handle]));
+  const row=(await asApi((client)=>client.query(`SELECT outcome::text,app_return_uri::text,denial_category::text
+    FROM uptech.complete_mobile_google_denial_v1($1,$2,'CLAIMS_INVALID','AUTH_ERROR',$3)`,[handle,handoff,wrong]))).rows[0];
+  assert.deepEqual(row,{outcome:"DENIED",app_return_uri:null,denial_category:"AUTH_ERROR"});
+  assert.deepEqual((await pool.query(`SELECT status::text,
+    (SELECT count(*)::int FROM uptech.mobile_handoffs WHERE transaction_id=$1) AS handoffs,
+    (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$2) AS wrong_audits
+    FROM uptech.mobile_google_transactions WHERE id=$1`,[tx,wrong])).rows[0],{status:"EXCHANGE_RESERVED",handoffs:0,wrong_audits:0});
+});

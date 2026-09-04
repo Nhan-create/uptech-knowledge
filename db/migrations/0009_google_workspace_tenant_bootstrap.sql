@@ -3691,6 +3691,119 @@ FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 REVOKE ALL ON FUNCTION uptech.evaluate_google_directory_mapping_v1(uuid,uuid,text)
 FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+-- Keep denial handoffs in the same credential namespace as every other bearer
+-- authority. A collision is terminal for the reserved Mobile transaction but
+-- never creates a second object under the collided raw credential.
+CREATE OR REPLACE FUNCTION uptech.complete_mobile_google_denial_v1(
+  p_completion_handle_hash uptech.google_auth_hash32_v1,
+  p_handoff_hash uptech.google_auth_hash32_v1,
+  p_rejection_class uptech.google_auth_rejection_class_v1,
+  p_denial_category uptech.mobile_auth_ui_category_v1,
+  p_request_id uuid
+)
+RETURNS uptech.mobile_callback_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz:=pg_catalog.clock_timestamp();
+  selected_transaction uptech.mobile_google_transactions%ROWTYPE;
+  selected_configuration uptech.mobile_google_configuration_registry%ROWTYPE;
+  transitioned_rows integer:=0;
+  credential_collision boolean:=false;
+BEGIN
+  IF p_completion_handle_hash IS NOT NULL THEN
+    SELECT candidate.* INTO selected_transaction
+    FROM uptech.mobile_google_transactions AS candidate
+    WHERE candidate.completion_handle_hash=p_completion_handle_hash
+      AND candidate.status='EXCHANGE_RESERVED' FOR UPDATE;
+  END IF;
+  IF selected_transaction.id IS NOT NULL THEN
+    SELECT candidate.* INTO selected_configuration
+    FROM uptech.mobile_google_configuration_registry AS candidate
+    WHERE candidate.environment_name=selected_transaction.environment_name
+      AND candidate.platform=selected_transaction.platform
+      AND candidate.configuration_key=selected_transaction.configuration_key
+      AND candidate.is_enabled;
+  END IF;
+  IF selected_transaction.id IS NULL
+     OR selected_transaction.completion_expires_at IS NULL
+     OR selected_transaction.completion_expires_at<=observed_at
+     OR selected_configuration.configuration_key IS NULL
+     OR p_handoff_hash IS NULL OR p_rejection_class IS NULL
+     OR p_denial_category IS NULL OR p_request_id IS NULL
+     OR p_request_id IS DISTINCT FROM selected_transaction.request_id THEN
+    RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'UPTECH_CREDENTIAL_V1'||pg_catalog.encode(p_handoff_hash,'hex'),0));
+  credential_collision:=
+    EXISTS(SELECT 1 FROM uptech.mobile_handoffs WHERE handoff_hash=p_handoff_hash)
+    OR EXISTS(SELECT 1 FROM uptech.session_tokens
+      WHERE token_hash=p_handoff_hash OR csrf_token_hash=p_handoff_hash)
+    OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_handoff_hash);
+
+  IF credential_collision THEN
+    UPDATE uptech.mobile_google_transactions SET status='REJECTED',rejected_at=observed_at
+    WHERE id=selected_transaction.id AND status='EXCHANGE_RESERVED';
+    GET DIAGNOSTICS transitioned_rows=ROW_COUNT;
+    IF transitioned_rows<>1 THEN
+      RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
+    END IF;
+    INSERT INTO uptech.platform_audit_events(
+      id,action,target_type,outcome,request_id,metadata,occurred_at
+    ) VALUES (pg_catalog.gen_random_uuid(),'MOBILE_GOOGLE_CALLBACK_REJECTED',
+      'MOBILE_GOOGLE_TRANSACTION','DENIED',p_request_id,
+      pg_catalog.jsonb_build_object('correlation_id',selected_transaction.id,
+        'platform',selected_transaction.platform::text,
+        'configuration_key',selected_transaction.configuration_key::text,
+        'rejection_class','PROTOCOL_INVALID','denial_category','AUTH_ERROR',
+        'denial_handoff_created',false),observed_at);
+    RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
+  END IF;
+
+  INSERT INTO uptech.mobile_handoffs(id,transaction_id,handoff_hash,platform,
+    installation_binding_hash,app_exchange_challenge,identity_id,user_id,workspace_id,
+    membership_id,user_security_version,identity_security_version,workspace_security_version,
+    membership_authz_version,denial_category,created_at,expires_at)
+  VALUES(pg_catalog.gen_random_uuid(),selected_transaction.id,p_handoff_hash,
+    selected_transaction.platform,selected_transaction.installation_binding_hash,
+    selected_transaction.app_exchange_challenge,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+    p_denial_category,observed_at,observed_at+interval '60 seconds');
+  UPDATE uptech.mobile_google_transactions SET status='REJECTED',rejected_at=observed_at
+  WHERE id=selected_transaction.id AND status='EXCHANGE_RESERVED';
+  GET DIAGNOSTICS transitioned_rows=ROW_COUNT;
+  IF transitioned_rows<>1 THEN
+    RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='mobile denial transition lost';
+  END IF;
+  INSERT INTO uptech.platform_audit_events(id,action,target_type,outcome,request_id,metadata,occurred_at)
+  VALUES(pg_catalog.gen_random_uuid(),'MOBILE_GOOGLE_CALLBACK_REJECTED','MOBILE_GOOGLE_TRANSACTION',
+    'DENIED',p_request_id,pg_catalog.jsonb_build_object('correlation_id',selected_transaction.id,
+      'platform',selected_transaction.platform::text,
+      'configuration_key',selected_transaction.configuration_key::text,
+      'rejection_class',p_rejection_class::text,'denial_category',p_denial_category::text,
+      'denial_handoff_created',true),observed_at);
+  RETURN ROW('DENIED',selected_configuration.app_return_uri,p_denial_category)
+    ::uptech.mobile_callback_result_v1;
+EXCEPTION WHEN unique_violation OR SQLSTATE 'PGA01' THEN
+  UPDATE uptech.mobile_google_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
+  WHERE id=selected_transaction.id AND status='EXCHANGE_RESERVED';
+  RETURN ROW('DENIED',NULL,'AUTH_ERROR')::uptech.mobile_callback_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.complete_mobile_google_denial_v1(
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_rejection_class_v1,uptech.mobile_auth_ui_category_v1,uuid
+) FROM PUBLIC,uptech_api_runtime,uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.complete_mobile_google_denial_v1(
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_rejection_class_v1,uptech.mobile_auth_ui_category_v1,uuid
+) TO uptech_api_runtime;
+
 CREATE FUNCTION uptech.complete_mobile_google_callback_directory_v2(
   p_completion_handle_hash uptech.google_auth_hash32_v1,
   p_claims uptech.google_verified_claims_assertion_v1,
