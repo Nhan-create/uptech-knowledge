@@ -15,7 +15,7 @@ import pg from "pg";
 const CONTRACT = Object.freeze({
   browser: "chromium-cdp-websocket",
   build: "fresh-next-production-build",
-  canonicalOrigin: "https://browser-login.test:<ephemeral>",
+  canonicalOrigin: "https://tenant-a.example:<ephemeral>",
   childEnvironment: "explicit-allowlist",
   cleanup: ["browser", "next", "proxies", "runtime-role", "child-database", "profile"],
   credentialPostComparison: "sha256+bounded-shape",
@@ -266,7 +266,7 @@ try {
   const nextPort = tlsPort;
   const transportPort = await port();
   const cdpPort = await port();
-  const canonicalOrigin = `https://browser-login.test:${tlsPort}`;
+  const canonicalOrigin = `https://tenant-a.example:${tlsPort}`;
   const canonicalHost = new URL(canonicalOrigin).host;
   const transportOrigin = `http://127.0.0.1:${transportPort}`;
   const clientId = "browser-test-client.apps.googleusercontent.com";
@@ -278,7 +278,7 @@ try {
   await childOwner.query(`INSERT INTO uptech.google_auth_environment_registry(environment_name,rate_limit_audit_hmac_key,is_active) VALUES ('browser-test',$1,true)`, [localKey]);
   await childOwner.query(`INSERT INTO uptech.google_auth_configuration_registry(configuration_key,environment_name,purpose,google_client_id,google_audience,audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,web_pkce_kms_key_version,is_enabled) VALUES ('GOOGLE_WEB_LOGIN_V1','browser-test','WEB_LOGIN',$1,$1,'GOOGLE_WEB_LOGIN_V1',$2,ARRAY['openid','email','profile']::text[],ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],'local-browser-test-v1',true)`, [clientId, `${canonicalOrigin}/api/v1/auth/google/callback`]);
   await childOwner.query("INSERT INTO uptech.users(id,status) VALUES($1,'ACTIVE')", [ids[0]]);
-  await childOwner.query("INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,email_claim,email_verified,hosted_domain_claim) VALUES($1,$2,'GOOGLE','https://accounts.google.com','browser-owner','ACTIVE','owner@browser.test',true,'browser.test')", [ids[1], ids[0]]);
+  await childOwner.query("INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,email_claim,email_verified,hosted_domain_claim) VALUES($1,$2,'GOOGLE','https://accounts.google.com','browser-owner','ACTIVE','owner@tenant-a.example',true,'tenant-a.example')", [ids[1], ids[0]]);
   await childOwner.query("INSERT INTO uptech.workspaces(workspace_id,status,provisioning_policy,google_customer_id) VALUES($1,'ACTIVE','GOOGLE_GROUP_CONTROLLED','browser-customer')", [ids[2]]);
   await childOwner.query("INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status) VALUES($1,$2,$3,'OWNER','ACTIVE')", [ids[2], ids[3], ids[0]]);
   await childOwner.query(`INSERT INTO uptech.sessions(workspace_id,id,identity_id,user_id,membership_id,client_type,status,user_security_version,identity_security_version,workspace_security_version,membership_authz_version,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,$5,'WEB','ACTIVE',1,1,1,1,clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day')`, [ids[2], ids[4], ids[1], ids[0], ids[3]]);
@@ -293,8 +293,8 @@ try {
     [ids[7], createHash("sha256").update(sourceCredential).digest(), ids[8], createHash("sha256").update(onboardingCredential).digest(), randomUUID()]);
   assert.equal(prepared.rows[0]?.outcome, "PREPARED");
   const completed = await childOwner.query(`SELECT result.outcome::text AS outcome FROM uptech.complete_google_workspace_bootstrap_v1(
-    $1,$2,$3,'browser-bootstrap-customer','browser.test','browser-owner','browser.test',
-    ARRAY[ROW('browser.test','PRIMARY'::uptech.google_workspace_domain_kind_v1,NULL)::uptech.google_workspace_verified_domain_v1],
+    $1,$2,$3,'browser-bootstrap-customer','tenant-a.example','browser-owner','tenant-a.example',
+    ARRAY[ROW('tenant-a.example','PRIMARY'::uptech.google_workspace_domain_kind_v1,NULL)::uptech.google_workspace_verified_domain_v1],
     'secretref://browser/bootstrap',ARRAY[
       'https://www.googleapis.com/auth/admin.directory.customer.readonly',
       'https://www.googleapis.com/auth/admin.directory.user.readonly',
@@ -330,10 +330,10 @@ try {
   const certPath = join(temporaryRoot, "browser.crt");
   const keyPath = join(temporaryRoot, "browser.key");
   const openssl = "C:/Program Files/Git/usr/bin/openssl.exe";
-  await run(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certPath, "-days", "1", "-subj", "/CN=browser-login.test", "-addext", "subjectAltName=DNS:browser-login.test"], { label: "TLS certificate generation failed" });
+  await run(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certPath, "-days", "1", "-subj", "/CN=tenant-a.example", "-addext", "subjectAltName=DNS:tenant-a.example"], { label: "TLS certificate generation failed" });
   const [key, cert] = await Promise.all([readFile(keyPath), readFile(certPath)]);
   const dnsPreloadPath = join(temporaryRoot, "browser-dns.cjs");
-  await writeFile(dnsPreloadPath, `const dns=require("node:dns");const lookup=dns.lookup;dns.lookup=function(host,options,callback){if(host!=="browser-login.test")return lookup.apply(this,arguments);if(typeof options==="function")return options(null,"127.0.0.1",4);if(options?.all)return callback(null,[{address:"127.0.0.1",family:4}]);return callback(null,"127.0.0.1",4);};\n`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(dnsPreloadPath, `const dns=require("node:dns");const lookup=dns.lookup;dns.lookup=function(host,options,callback){if(host!=="tenant-a.example")return lookup.apply(this,arguments);if(typeof options==="function")return options(null,"127.0.0.1",4);if(options?.all)return callback(null,[{address:"127.0.0.1",family:4}]);return callback(null,"127.0.0.1",4);};\n`, { encoding: "utf8", mode: 0o600 });
   failurePhase = "server-start";
   const runtimeEnvironment = {
     ...childEnvironment(),
@@ -348,7 +348,7 @@ try {
     UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/browser-test-pool/providers/browser-test-provider",
     UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "browser-test-service@browser-test-project.iam.gserviceaccount.com",
   };
-  nextProcess = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "--hostname", "browser-login.test", "--port", String(nextPort)], { cwd: repoRoot, env: runtimeEnvironment, stdio: process.env.UPTECH_BROWSER_DEBUG === "1" ? "inherit" : "ignore" });
+  nextProcess = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "--hostname", "tenant-a.example", "--port", String(nextPort)], { cwd: repoRoot, env: runtimeEnvironment, stdio: process.env.UPTECH_BROWSER_DEBUG === "1" ? "inherit" : "ignore" });
   httpProxy = http.createServer(forwardToNext(nextPort, canonicalHost));
   httpsProxy = https.createServer({ key, cert }, forwardToNext(nextPort, canonicalHost));
   await Promise.all([
@@ -374,7 +374,7 @@ try {
   const profile = join(temporaryRoot, "chromium-profile");
   browserProcess = spawn(chrome, [
     "--headless=new", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`,
-    "--host-resolver-rules=MAP browser-login.test 127.0.0.2", "--ignore-certificate-errors",
+    "--host-resolver-rules=MAP tenant-a.example 127.0.0.2", "--ignore-certificate-errors",
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank",
   ], { stdio: "ignore", env: childEnvironment() });
   const cdpUrl = await bounded(browserTarget(cdpPort), 15_000, "Chromium CDP open timeout");

@@ -573,7 +573,7 @@ test("browser harness owns a disposable Chromium and NOBYPASSRLS acceptance boun
   assert.deepEqual(JSON.parse(result.stdout), {
     browser: "chromium-cdp-websocket",
     build: "fresh-next-production-build",
-    canonicalOrigin: "https://browser-login.test:<ephemeral>",
+    canonicalOrigin: "https://tenant-a.example:<ephemeral>",
     childEnvironment: "explicit-allowlist",
     cleanup: ["browser", "next", "proxies", "runtime-role", "child-database", "profile"],
     credentialPostComparison: "sha256+bounded-shape",
