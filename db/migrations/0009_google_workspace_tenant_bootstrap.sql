@@ -3032,7 +3032,9 @@ BEGIN
     IF p_session_token_hash IS NULL OR p_csrf_token_hash IS NULL
       OR p_session_token_hash=p_csrf_token_hash OR p_session_token_hash=p_onboarding_token_hash
       OR p_csrf_token_hash=p_onboarding_token_hash
-      OR EXISTS(SELECT 1 FROM uptech.session_tokens WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash))
+      OR EXISTS(SELECT 1 FROM uptech.session_tokens
+        WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)
+          OR csrf_token_hash IN(p_session_token_hash,p_csrf_token_hash))
       OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash IN(p_session_token_hash,p_csrf_token_hash)) THEN
       RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='credential collision';
     END IF;
@@ -3107,7 +3109,8 @@ BEGIN
   IF p_onboarding_token_hash IS NULL
      OR p_onboarding_token_hash = p_session_token_hash
      OR p_onboarding_token_hash = p_csrf_token_hash
-     OR EXISTS (SELECT 1 FROM uptech.session_tokens WHERE token_hash=p_onboarding_token_hash)
+     OR EXISTS (SELECT 1 FROM uptech.session_tokens
+       WHERE token_hash=p_onboarding_token_hash OR csrf_token_hash=p_onboarding_token_hash)
      OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_onboarding_token_hash)
   THEN
     PERFORM uptech.record_google_login_rejection_v1(
@@ -3182,7 +3185,12 @@ BEGIN
 
   UPDATE uptech.oauth_transactions SET status='COMPLETED',completed_at=observed_at
   WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED'
-    AND completion_expires_at > observed_at;
+    AND completion_expires_at > observed_at
+    AND (canonical_claims).issued_at >= observed_at - interval '5 minutes'
+    AND (canonical_claims).issued_at <= observed_at + interval '2 minutes'
+    AND (canonical_claims).expires_at > observed_at
+    AND (canonical_claims).expires_at > (canonical_claims).issued_at
+    AND (canonical_claims).expires_at <= (canonical_claims).issued_at + interval '2 hours';
   GET DIAGNOSTICS transitioned_rows = ROW_COUNT;
   IF transitioned_rows <> 1 THEN
     RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='google login reservation expired';

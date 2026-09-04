@@ -213,16 +213,16 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
 
   const complete = (completionByte: number, nonceByte: number, tokenByte: number,
     subject: string, email: string, domain: string | null, requestId: string,
-    claimExpiresAt: Date | null = null) => asApi((client) => client.query(`
+    claimExpiresAt: Date | null = null, claimIssuedAt: Date | null = null) => asApi((client) => client.query(`
       SELECT outcome::text,access_state::text,allowed_operations,expires_at,route
       FROM uptech.complete_web_google_login_directory_v2(
         $1,ROW('accounts.google.com',$2,$3,true,$4,
-          statement_timestamp()-interval '5 seconds',
+          coalesce($11::timestamptz,statement_timestamp()-interval '5 seconds'),
           coalesce($10::timestamptz,statement_timestamp()+interval '1 hour'),
           'GOOGLE_WEB_LOGIN_V1',NULL,$5)::uptech.google_verified_claims_assertion_v1,
         $6,$7,$8,$9)`, [hash32(completionByte), subject, email, domain,
       hash32(nonceByte), hash32(tokenByte + 1), hash32(tokenByte + 2), hash32(tokenByte),
-      requestId, claimExpiresAt]));
+      requestId, claimExpiresAt, claimIssuedAt]));
 
   await reserve("97300000-0000-4000-8000-000000000001", 0xa1, 0xa2);
   const first = await complete(0xa1, 0xa2, 0xa3,
@@ -383,6 +383,62 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
   });
   assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.audit_events
     WHERE request_id='97300000-0000-4000-8000-000000000006'`)).rows[0].count, 0);
+
+  const claimIssuedAt = new Date(Date.now() - 5 * 60 * 1000 + 1_000);
+  const claimBoundary = claimIssuedAt.getTime() + 5 * 60 * 1000;
+  const claimTimeReservation = await reserve(
+    "97300000-0000-4000-8000-000000000007", 0x61, 0x62,
+  );
+  assert.equal(
+    new Date(claimTimeReservation.rows[0].completion_expires_at).getTime() > claimBoundary + 30_000,
+    true,
+  );
+  const claimTimeIdentityBlocker = await pool.connect();
+  try {
+    await claimTimeIdentityBlocker.query("BEGIN; SET LOCAL ROLE uptech_migration_owner");
+    await claimTimeIdentityBlocker.query(`SELECT id FROM uptech.identities
+      WHERE id='97300000-0000-4000-8000-000000000011' FOR UPDATE`);
+    const claimTimeCompletion = complete(0x61, 0x62, 0x63,
+      "web-v2-rollback-sub", "claim-time@rollback.example", "claim-time.example",
+      "97300000-0000-4000-8000-000000000007", null, claimIssuedAt);
+
+    let completionOwnsOauthLock = false;
+    for (let attempt = 0; attempt < 50 && !completionOwnsOauthLock; attempt += 1) {
+      const probe = await pool.connect();
+      try {
+        await probe.query("BEGIN; SET LOCAL ROLE uptech_migration_owner");
+        await probe.query(`SELECT id FROM uptech.oauth_transactions
+          WHERE id='97300000-0000-4000-8000-000000000007' FOR UPDATE NOWAIT`);
+        await probe.query("ROLLBACK");
+        await delay(20);
+      } catch (error) {
+        await probe.query("ROLLBACK").catch(() => undefined);
+        if ((error as { code?: string }).code !== "55P03") throw error;
+        completionOwnsOauthLock = true;
+      } finally {
+        probe.release();
+      }
+    }
+    assert.equal(completionOwnsOauthLock, true);
+    await delay(Math.max(0, claimBoundary - Date.now() + 150));
+    await claimTimeIdentityBlocker.query("COMMIT");
+    assert.equal((await claimTimeCompletion).rows[0].outcome, "DENIED");
+  } finally {
+    await claimTimeIdentityBlocker.query("ROLLBACK").catch(() => undefined);
+    claimTimeIdentityBlocker.release();
+  }
+  assert.deepEqual((await pool.query(`SELECT
+    i.email_claim,i.hosted_domain_claim,
+    count(*) FILTER (WHERE o.status='ACTIVE')::int AS active,
+    count(*) FILTER (WHERE o.token_hash=decode(repeat('63',32),'hex'))::int AS new_capabilities,
+    (SELECT status FROM uptech.oauth_transactions
+      WHERE id='97300000-0000-4000-8000-000000000007') AS transaction_status
+    FROM uptech.identities i LEFT JOIN uptech.onboarding_sessions o ON o.identity_id=i.id
+    WHERE i.id='97300000-0000-4000-8000-000000000011'
+    GROUP BY i.id`)).rows[0], {
+    email_claim: "old@rollback.example", hosted_domain_claim: "rollback.example",
+    active: 1, new_capabilities: 0, transaction_status: "EXCHANGE_RESERVED",
+  });
 });
 
 async function seedBootstrapSource(input: {
@@ -1918,14 +1974,15 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
       handle: token(`${label}-handle`), nonce: token(`${label}-nonce`), subject,
     })));
   const complete = (fixture: Awaited<ReturnType<typeof reserve>>, label: string,
-    session = token(`${label}-session`), csrf = token(`${label}-csrf`)) =>
+    session = token(`${label}-session`), csrf = token(`${label}-csrf`),
+    onboarding = token(`${label}-onboarding`), hostedDomain = "mapping-a.example") =>
     asApi((client) => client.query(`SELECT outcome::text,access_state::text,route::text
       FROM uptech.complete_web_google_login_directory_v2(
-        $1,ROW('accounts.google.com',$2,$3,true,'mapping-a.example',
+        $1,ROW('accounts.google.com',$2,$3,true,$9,
           statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
           'GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,
-        $5,$6,$7,$8)`, [fixture.handle, fixture.subject, `${fixture.subject}@mapping-a.example`,
-      fixture.nonce, session, csrf, token(`${label}-onboarding`), fixture.id]));
+        $5,$6,$7,$8)`, [fixture.handle, fixture.subject, `${fixture.subject}@${hostedDomain}`,
+      fixture.nonce, session, csrf, onboarding, fixture.id, hostedDomain]));
   const permissionContext = async (subject: string) => {
     const authority = (await pool.query(`SELECT m.id AS membership_id,m.user_id,s.id AS session_id
       FROM uptech.identities i JOIN uptech.workspace_memberships m ON m.user_id=i.user_id
@@ -2071,6 +2128,24 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
   assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.platform_audit_events
     WHERE request_id IN ($1,$2) AND action='GOOGLE_AUTH_LOGIN_SUCCEEDED'`,
   [member.id, owner.id])).rows[0].count, 2);
+
+  const normalCrossColumnCollision = await reserve("9c", "normal-cross-column", "rollback-sub");
+  assert.deepEqual((await complete(normalCrossColumnCollision, "normal-cross-column",
+    token("mapped-member-csrf"))).rows[0], {
+    outcome: "DENIED", access_state: null, route: null,
+  });
+  const unknownCrossColumnCollision = await reserve("9d", "unknown-cross-column", "unknown-collision-sub");
+  assert.deepEqual((await complete(unknownCrossColumnCollision, "unknown-cross-column",
+    undefined, undefined, token("mapped-member-csrf"), "unknown-collision.example")).rows[0], {
+    outcome: "DENIED", access_state: null, route: null,
+  });
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.identities
+      WHERE provider_subject='unknown-collision-sub') AS identities,
+    (SELECT count(*)::int FROM uptech.onboarding_sessions o JOIN uptech.identities i
+      ON i.id=o.identity_id WHERE i.provider_subject='unknown-collision-sub') AS capabilities`)).rows[0], {
+    identities: 0, capabilities: 0,
+  });
 
   const rollback = await reserve("93", "collision-rollback", "rollback-sub");
   assert.deepEqual((await complete(rollback, "collision-rollback",
