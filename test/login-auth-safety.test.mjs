@@ -4,6 +4,8 @@ import test from "node:test";
 
 const baseUrl = process.env.LOGIN_TEST_BASE_URL;
 const provisioningPagePath = new URL("../src/app/setup/provisioning/page.tsx", import.meta.url);
+const enterpriseHelpPagePath = new URL("../src/app/help/enterprise-login/page.tsx", import.meta.url);
+const domainHelpPagePath = new URL("../src/app/help/google-workspace/domain-verification/page.tsx", import.meta.url);
 const appOrigin = expectedAppOrigin();
 const requestId = "00000000-0000-4000-8000-000000000091";
 
@@ -43,6 +45,37 @@ test("provisioning page is a headers-only fail-closed surface with server-select
   assert.doesNotMatch(source, /searchParams|useSearchParams|URLSearchParams|dangerouslySetInnerHTML|\bwindow\b|\bfetch\s*\(/);
   assert.doesNotMatch(source, /href=|<form\b|action=|\/admin\b|\/home\b/);
   assert.doesNotMatch(source, /customerId|workspaceId|tenantId|providerError|generationId|groupName|departmentName|orgUnit/);
+});
+
+test("enterprise help pages are cookie-localized static server surfaces without authority inputs", () => {
+  for (const pagePath of [enterpriseHelpPagePath, domainHelpPagePath]) {
+    assert.equal(existsSync(pagePath), true, `missing help page: ${pagePath.pathname}`);
+    if (!existsSync(pagePath)) continue;
+
+    const source = readFileSync(pagePath, "utf8");
+    assert.match(source, /import \{ cookies \} from "next\/headers"/);
+    assert.match(source, /import \{ LOCALE_COOKIE_NAME, parseLocale, type Locale \} from "@\/lib\/preferences"/);
+    assert.match(source, /robots:\s*\{[\s\S]*?index:\s*false[\s\S]*?follow:\s*false[\s\S]*?googleBot:\s*\{[\s\S]*?index:\s*false[\s\S]*?follow:\s*false[\s\S]*?noimageindex:\s*true/);
+    assert.match(source, /const cookieStore = await cookies\(\)/);
+    assert.match(source, /parseLocale\(cookieStore\.get\(LOCALE_COOKIE_NAME\)\?\.value\)/);
+    assert.doesNotMatch(source, /"use client"|'use client'|searchParams|useSearchParams|URLSearchParams|\bheaders\s*\(|dangerouslySetInnerHTML|\bfetch\s*\(|\bwindow\b|\bdocument\b/);
+    assert.doesNotMatch(source, /<form\b|<input\b|<button\b|action=|method=|@\/server|database|auth\/runtime|PublicNav/);
+    assert.doesNotMatch(source, /href="\/(?:admin|home|san-pham|nguyen-tac|nang-luc|quy-trinh)\b/);
+    assert.doesNotMatch(source, /customerId|workspaceId|tenantId|providerSubject|generationId|groupName|departmentName|orgUnit|providerError/);
+  }
+});
+
+test("help page link authority is a literal closed allowlist", () => {
+  const enterprise = readFileSync(enterpriseHelpPagePath, "utf8");
+  const domain = readFileSync(domainHelpPagePath, "utf8");
+  const hrefs = (source) => [...source.matchAll(/href="([^"]+)"/gu)].map((match) => match[1]).sort();
+
+  assert.deepEqual(hrefs(enterprise), ["/login"]);
+  assert.deepEqual(hrefs(domain), ["/login", "https://admin.google.com/ac/domains/manage"]);
+  assert.match(
+    domain,
+    /<a(?=[^>]*href="https:\/\/admin\.google\.com\/ac\/domains\/manage")(?=[^>]*target="_blank")(?=[^>]*rel="noopener noreferrer")(?=[^>]*referrerPolicy="no-referrer")[^>]*>/,
+  );
 });
 
 async function loginHtml(path, context) {

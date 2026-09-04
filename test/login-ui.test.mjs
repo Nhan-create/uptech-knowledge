@@ -4,6 +4,20 @@ import test from "node:test";
 
 const baseUrl = process.env.LOGIN_TEST_BASE_URL;
 const provisioningPagePath = new URL("../src/app/setup/provisioning/page.tsx", import.meta.url);
+const enterpriseHelpPagePath = new URL("../src/app/help/enterprise-login/page.tsx", import.meta.url);
+const domainHelpPagePath = new URL("../src/app/help/google-workspace/domain-verification/page.tsx", import.meta.url);
+
+function literalHrefs(source) {
+  return [...source.matchAll(/href="([^"]+)"/gu)].map((match) => match[1]).sort();
+}
+
+function mainMarkup(html) {
+  const start = html.indexOf("<main");
+  const end = html.indexOf("</main>", start);
+  assert.notEqual(start, -1, "help response must render main content");
+  assert.notEqual(end, -1, "help response must close main content");
+  return html.slice(start, end + "</main>".length);
+}
 
 test("provisioning page presents every bounded setup state in Vietnamese and English", () => {
   assert.equal(existsSync(provisioningPagePath), true, "the provisioning-only page must exist");
@@ -39,6 +53,123 @@ test("provisioning page presents every bounded setup state in Vietnamese and Eng
   assert.match(source, /aria-live=\{isProblem \? "assertive" : "polite"\}/);
   assert.match(source, /data-testid="provisioning-request-id"/);
   assert.match(source, /max-w-(?:lg|xl)/);
+});
+
+test("enterprise login help is a fixed bilingual and actionable explanation", () => {
+  assert.equal(existsSync(enterpriseHelpPagePath), true, "enterprise login help must exist");
+  if (!existsSync(enterpriseHelpPagePath)) return;
+
+  const source = readFileSync(enterpriseHelpPagePath, "utf8");
+  for (const marker of [
+    "Đăng nhập doanh nghiệp bằng Google Workspace",
+    "UPTECH chặn tài khoản Gmail cá nhân vì quyền truy cập doanh nghiệp yêu cầu tài khoản Google Workspace do công ty quản lý.",
+    "Chỉ Google Workspace Super Admin của chính công ty đó mới có thể thiết lập tổ chức lần đầu.",
+    "Nhân viên hoặc quản trị viên được ủy quyền chưa đủ quyền thiết lập trong phiên bản V1.",
+    "nhân viên cần Membership UPTECH đang hoạt động và ánh xạ Group, OU hoặc Department do OWNER/ADMIN của công ty cấp.",
+    "không biến người dùng thành quản trị viên nền tảng hoặc hệ thống UPTECH.",
+    "Enterprise access with Google Workspace",
+    "UPTECH blocks personal Gmail accounts because enterprise access requires a company-managed Google Workspace account.",
+    "Only that company's Google Workspace Super Admin can perform first-time organization setup.",
+    "An employee or delegated administrator does not have enough privilege for V1 setup.",
+    "an employee needs an active UPTECH Membership and a Group, OU, or Department mapping granted by that company's UPTECH OWNER/ADMIN.",
+    "does not make the person an UPTECH platform or system administrator.",
+  ]) {
+    assert.equal(source.includes(marker), true, `missing enterprise help copy: ${marker}`);
+  }
+
+  assert.match(source, /export default async function EnterpriseLoginHelpPage\(\)/);
+  assert.match(source, /parseLocale\(cookieStore\.get\(LOCALE_COOKIE_NAME\)\?\.value\)/);
+  assert.match(source, /<main\b/);
+  assert.match(source, /<article\b[^>]*aria-labelledby="enterprise-login-help-title"/);
+  assert.match(source, /<h1\b[^>]*id="enterprise-login-help-title"/);
+  assert.match(source, /<ol\b/);
+  assert.deepEqual(literalHrefs(source), ["/login"]);
+});
+
+test("domain verification help pins Google Admin and return actions", () => {
+  assert.equal(existsSync(domainHelpPagePath), true, "domain verification help must exist");
+  if (!existsSync(domainHelpPagePath)) return;
+
+  const source = readFileSync(domainHelpPagePath, "utf8");
+  for (const marker of [
+    "Xác minh domain Google Workspace",
+    "Google chưa xác nhận domain Google Workspace là đã được xác minh.",
+    "UPTECH không tin domain do người dùng nhập và không suy luận quyền sở hữu tổ chức từ địa chỉ email.",
+    "Tài khoản → Miền → Quản lý miền",
+    "bản ghi DNS TXT",
+    "đã xác minh và đang hoạt động",
+    "quay lại UPTECH bằng chính tài khoản đó",
+    "không có cách bỏ qua bước xác minh.",
+    "Verify your Google Workspace domain",
+    "Google has not confirmed the Google Workspace domain as verified.",
+    "UPTECH never trusts a typed domain or infers organization ownership from an email address.",
+    "Account → Domains → Manage domains",
+    "DNS TXT record",
+    "verified and active",
+    "return to UPTECH with the same account",
+    "there is no verification bypass.",
+  ]) {
+    assert.equal(source.includes(marker), true, `missing domain help copy: ${marker}`);
+  }
+
+  assert.match(source, /export default async function DomainVerificationHelpPage\(\)/);
+  assert.match(source, /parseLocale\(cookieStore\.get\(LOCALE_COOKIE_NAME\)\?\.value\)/);
+  assert.match(source, /<main\b/);
+  assert.match(source, /<article\b[^>]*aria-labelledby="domain-verification-help-title"/);
+  assert.match(source, /<h1\b[^>]*id="domain-verification-help-title"/);
+  assert.match(source, /<ol\b/);
+  assert.deepEqual(literalHrefs(source), [
+    "/login",
+    "https://admin.google.com/ac/domains/manage",
+  ]);
+  assert.match(
+    source,
+    /href="https:\/\/admin\.google\.com\/ac\/domains\/manage"[\s\S]*?target="_blank"[\s\S]*?rel="noopener noreferrer"[\s\S]*?referrerPolicy="no-referrer"/,
+  );
+});
+
+test("help pages localize only from the locale cookie and ignore hostile queries", async (context) => {
+  if (baseUrl === undefined) {
+    context.skip("Set LOGIN_TEST_BASE_URL to a running web app URL.");
+    return;
+  }
+
+  const cases = [
+    {
+      path: "/help/enterprise-login",
+      vi: "Đăng nhập doanh nghiệp bằng Google Workspace",
+      en: "Enterprise access with Google Workspace",
+      hrefs: ["/login"],
+    },
+    {
+      path: "/help/google-workspace/domain-verification",
+      vi: "Xác minh domain Google Workspace",
+      en: "Verify your Google Workspace domain",
+      hrefs: ["/login", "https://admin.google.com/ac/domains/manage"],
+    },
+  ];
+
+  for (const entry of cases) {
+    for (const [cookie, expected, rejected] of [
+      ["uptech-locale=vi", entry.vi, entry.en],
+      ["uptech-locale=en", entry.en, entry.vi],
+      ["uptech-locale=unsafe", entry.vi, entry.en],
+    ]) {
+      const response = await fetch(new URL(`${entry.path}?domain=evil.example&returnUrl=https%3A%2F%2Fevil.example%2Ftakeover`, baseUrl), {
+        headers: { cookie },
+      });
+      assert.equal(response.status, 200);
+      const main = mainMarkup(await response.text());
+      assert.match(main, new RegExp(expected));
+      assert.doesNotMatch(main, new RegExp(rejected));
+      assert.doesNotMatch(main, /evil\.example|takeover/);
+      assert.deepEqual(
+        [...main.matchAll(/<a\b[^>]*href="([^"]+)"/gu)].map((match) => match[1]).sort(),
+        [...entry.hrefs].sort(),
+      );
+      assert.doesNotMatch(main, /<form\b|<input\b|href="\/(?:admin|home|san-pham|nguyen-tac|nang-luc|quy-trinh)\b/);
+    }
+  }
 });
 
 test("login page renders the approved Uptech branding and readable Google action", async (context) => {
