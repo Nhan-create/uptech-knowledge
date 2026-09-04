@@ -23,8 +23,9 @@ export const RECOVERY_OPERATION_FAMILIES = Object.freeze({
   BOOTSTRAP_STATUS: Object.freeze(["DIRECTORY_BOOTSTRAP_STATUS_READ", "DIRECTORY_BOOTSTRAP_SYNC_RETRY"] as const),
 });
 export type RecoveryOperation = (typeof RECOVERY_OPERATION_FAMILIES)[keyof typeof RECOVERY_OPERATION_FAMILIES][number];
+export const RECOVERY_AUTHORITY_KIND = "AUTHENTICATED_ONBOARDING" as const;
 export interface RecoveryAuthority {
-  readonly authenticated: boolean;
+  readonly kind: typeof RECOVERY_AUTHORITY_KIND;
   readonly operations: readonly RecoveryOperation[];
 }
 
@@ -81,16 +82,26 @@ const REQUIRED_FAMILY: Readonly<Partial<Record<RecoveryActionId, keyof typeof RE
   CHECK_BOOTSTRAP_STATUS: "BOOTSTRAP_STATUS", RETRY_DIRECTORY_SYNC: "BOOTSTRAP_STATUS", FINISH_BOOTSTRAP: "BOOTSTRAP_STATUS", EXIT_ONBOARDING: "ONBOARDING",
 });
 
+function hasExactOperations(operations: unknown, expected: readonly RecoveryOperation[]): boolean {
+  return Array.isArray(operations) && operations.length === expected.length && operations.every((operation, index) => operation === expected[index]);
+}
+
+function isAuthenticatedOnboardingAuthority(authority: unknown): authority is RecoveryAuthority {
+  if (authority === null || typeof authority !== "object") return false;
+  const candidate = authority as Readonly<{ kind?: unknown; operations?: unknown }>;
+  return candidate.kind === RECOVERY_AUTHORITY_KIND && Object.values(RECOVERY_OPERATION_FAMILIES).some((family) => hasExactOperations(candidate.operations, family));
+}
+
 function hasExactFamily(authority: RecoveryAuthority | null, family: keyof typeof RECOVERY_OPERATION_FAMILIES): boolean {
-  if (authority?.authenticated !== true) return false;
+  if (!isAuthenticatedOnboardingAuthority(authority)) return false;
   const expected = RECOVERY_OPERATION_FAMILIES[family];
-  return authority.operations.length === expected.length && authority.operations.every((operation, index) => operation === expected[index]);
+  return hasExactOperations(authority.operations, expected);
 }
 
 function isExecutable(id: RecoveryActionId, authority: RecoveryAuthority | null): boolean {
   const requirement = REQUIRED_FAMILY[id];
   if (requirement === undefined) return true;
-  if (requirement === "ONBOARDING") return authority?.authenticated === true;
+  if (requirement === "ONBOARDING") return isAuthenticatedOnboardingAuthority(authority);
   return hasExactFamily(authority, requirement);
 }
 
