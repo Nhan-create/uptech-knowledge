@@ -54,6 +54,19 @@ test("allows only the exact approved auth ingress paths", () => {
   }
 });
 
+test("allows only the exact Workspace bootstrap methods", () => {
+  const start = "/api/v1/onboarding/google-workspace/transactions";
+  const callback = "/api/v1/onboarding/google-workspace/callback";
+  assert.equal(classifyUnconfiguredRoute(start, "POST"), "allow-auth-ingress");
+  assert.equal(classifyUnconfiguredRoute(callback, "GET"), "allow-auth-ingress");
+  for (const [pathname, method] of [
+    [start, "GET"], [start + "/", "POST"], [start + "/tenant-a", "POST"],
+    [callback, "POST"], [callback + "/", "GET"], [callback + "/tenant-a", "GET"],
+  ]) {
+    assert.equal(classifyUnconfiguredRoute(pathname, method), "deny-unconfigured", `${method} ${pathname}`);
+  }
+});
+
 test("allows only /home through to protected route enforcement", () => {
   assert.equal(classifyUnconfiguredRoute("/home"), "allow-protected");
 

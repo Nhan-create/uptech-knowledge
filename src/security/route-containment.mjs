@@ -34,6 +34,11 @@ const DIRECTORY_CONSENT_METHODS = new Map([
   ["/api/v1/admin/connectors/google-directory/callback", "GET"],
 ]);
 
+const WORKSPACE_BOOTSTRAP_METHODS = new Map([
+  ["/api/v1/onboarding/google-workspace/transactions", "POST"],
+  ["/api/v1/onboarding/google-workspace/callback", "GET"],
+]);
+
 const PROTECTED_APPLICATION_PATHS = new Set([
   "/home",
   "/admin",
@@ -101,6 +106,12 @@ export function classifyUnconfiguredRoute(pathname, method) {
 
   if (DIRECTORY_CONSENT_METHODS.has(pathname)) {
     return DIRECTORY_CONSENT_METHODS.get(pathname) === method
+      ? "allow-auth-ingress"
+      : "deny-unconfigured";
+  }
+
+  if (WORKSPACE_BOOTSTRAP_METHODS.has(pathname)) {
+    return WORKSPACE_BOOTSTRAP_METHODS.get(pathname) === method
       ? "allow-auth-ingress"
       : "deny-unconfigured";
   }

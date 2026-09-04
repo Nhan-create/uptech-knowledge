@@ -13,6 +13,9 @@ let initiateResult: unknown = { outcome: "DENIED" };
 let callbackResult: unknown = { outcome: "DENIED" };
 let runtimeCreationError: Error | null = null;
 let webSessionResult: unknown = new WebSessionAuthenticationError("stale");
+let bootstrapInitiateResult: unknown;
+let bootstrapCallbackResult: unknown;
+const bootstrapPepper = new Uint8Array(32).fill(7);
 
 mock.module("@/server/auth/web-session", {
   namedExports: {
@@ -26,10 +29,35 @@ mock.module("@/server/auth/web-session", {
 
 mock.module("@/server/auth/google/config", {
   namedExports: {
+    loadGoogleLoginRuntimeConfig() {
+      return {
+        appOrigin,
+        sessionPepper: bootstrapPepper,
+      };
+    },
     loadWebSessionRuntimeConfig() {
       return {
         databaseUrl: "postgresql://runtime@unknown.example/test",
         sessionPepper: new Uint8Array(32),
+      };
+    },
+  },
+});
+
+mock.module("@/server/onboarding/google-workspace/runtime", {
+  namedExports: {
+    createConfiguredGoogleWorkspaceBootstrapRuntime() {
+      return {
+        service: {
+          async initiate() {
+            if (bootstrapInitiateResult instanceof Error) throw bootstrapInitiateResult;
+            return bootstrapInitiateResult;
+          },
+          async callback() {
+            if (bootstrapCallbackResult instanceof Error) throw bootstrapCallbackResult;
+            return bootstrapCallbackResult;
+          },
+        },
       };
     },
   },
@@ -67,7 +95,10 @@ mock.module("@/server/auth/google/runtime", {
 const transactionRoute = await import("../src/app/api/v1/auth/google/transactions/route.ts");
 const callbackRoute = await import("../src/app/api/v1/auth/google/callback/route.ts");
 const sessionRoute = await import("../src/app/api/v1/auth/session/route.ts");
+const bootstrapTransactionRoute = await import("../src/app/api/v1/onboarding/google-workspace/transactions/route.ts");
+const bootstrapCallbackRoute = await import("../src/app/api/v1/onboarding/google-workspace/callback/route.ts");
 const { issueSessionCredential } = await import("../src/server/sessions/session-security.ts");
+const { deriveCsrfCredential, issueOpaqueProof } = await import("../src/server/auth/google/crypto.ts");
 
 const trustedHeaders = {
   "x-uptech-request-id": requestId,
@@ -255,4 +286,44 @@ test("session bootstrap treats an integrity failure as stale authority instead o
     detail: "Authentication is required.",
     request_id: requestId,
   });
+});
+
+test("Workspace bootstrap adapters expose only the guarded POST and callback GET flow", async () => {
+  const onboarding = issueOpaqueProof();
+  const setup = "1.AAAAAAAAAAAAAAAA.ciphertext.BBBBBBBBBBBBBBBBBBBBBB";
+  const status = issueOpaqueProof();
+  bootstrapInitiateResult = {
+    authorizationUrl: new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=approved"),
+    transactionCookie: setup,
+  };
+  const start = await bootstrapTransactionRoute.POST(new Request(
+    `${appOrigin}/api/v1/onboarding/google-workspace/transactions`,
+    {
+      method: "POST",
+      headers: {
+        ...trustedHeaders,
+        cookie: `__Host-uptech_onboarding=${onboarding}`,
+        origin: appOrigin,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": deriveCsrfCredential(onboarding, bootstrapPepper),
+      },
+    },
+  ));
+  assert.equal(start.status, 303);
+  assert.equal(start.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=approved");
+  assert.match(start.headers.get("set-cookie") ?? "", /__Host-uptech_workspace_setup_tx=/u);
+
+  bootstrapCallbackResult = {
+    outcome: "PROVISIONING",
+    statusCredential: status,
+    statusExpiresAt: new Date(Date.now() + 60_000),
+  };
+  const callback = await bootstrapCallbackRoute.GET(new Request(
+    `${appOrigin}/api/v1/onboarding/google-workspace/callback?code=provider-code&state=${issueOpaqueProof()}`,
+    { headers: { ...trustedHeaders, cookie: `__Host-uptech_onboarding=${onboarding}; __Host-uptech_workspace_setup_tx=${setup}` } },
+  ));
+  assert.equal(callback.status, 303);
+  assert.equal(callback.headers.get("location"), `${appOrigin}/setup/provisioning`);
+  assert.equal(hasSessionCookie(callback), false);
+  assert.ok(callback.headers.getSetCookie().some((cookie) => cookie.startsWith(`__Host-uptech_onboarding=${status};`)));
 });
