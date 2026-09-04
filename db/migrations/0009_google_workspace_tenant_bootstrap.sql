@@ -2657,6 +2657,55 @@ REVOKE ALL ON FUNCTION uptech.validate_web_google_login_completion_v1(
   uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uuid
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
+CREATE FUNCTION uptech.append_google_controlled_login_denial_audit_v1(
+  p_workspace_id uuid,
+  p_identity_id uuid,
+  p_access_state text,
+  p_reason_class text,
+  p_request_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+BEGIN
+  IF p_workspace_id IS NULL OR p_identity_id IS NULL OR p_request_id IS NULL
+    OR p_access_state NOT IN (
+      'USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT','USER_SUSPENDED','USER_REMOVED',
+      'DIRECTORY_SYNC_PENDING','DIRECTORY_STALE','WORKSPACE_SUSPENDED','INTERNAL_ERROR')
+    OR p_reason_class NOT IN (
+      'USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT','USER_SUSPENDED','USER_REMOVED',
+      'DIRECTORY_SYNC_PENDING','DIRECTORY_STALE','WORKSPACE_SUSPENDED',
+      'DIRECTORY_AUTHORITY_UNAVAILABLE','IDENTITY_INELIGIBLE')
+  THEN
+    RAISE EXCEPTION 'invalid controlled-login denial audit' USING ERRCODE='22023';
+  END IF;
+
+  INSERT INTO uptech.platform_audit_events(
+    id,identity_id,action,target_type,outcome,request_id,metadata,occurred_at
+  ) VALUES (
+    pg_catalog.gen_random_uuid(),p_identity_id,'GOOGLE_AUTH_LOGIN_DENIED','GOOGLE_IDENTITY',
+    'DENIED',p_request_id,
+    pg_catalog.jsonb_build_object('access_state',p_access_state,'reason_class',p_reason_class),
+    pg_catalog.clock_timestamp()
+  );
+  INSERT INTO uptech.audit_events(
+    workspace_id,id,actor_kind,action,target_type,target_id,outcome,request_id,metadata,occurred_at
+  ) VALUES (
+    p_workspace_id,pg_catalog.gen_random_uuid(),'SYSTEM','GOOGLE_AUTH_LOGIN_DENIED',
+    'GOOGLE_IDENTITY',p_identity_id,'DENIED',p_request_id,
+    pg_catalog.jsonb_build_object('access_state',p_access_state,'reason_class',p_reason_class),
+    pg_catalog.clock_timestamp()
+  );
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.append_google_controlled_login_denial_audit_v1(
+  uuid,uuid,text,text,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
 -- Task 7B1 intentionally handles only an unknown verified hosted domain. All
 -- known-tenant paths fail closed here until the Directory/JIT slice lands.
 CREATE FUNCTION uptech.complete_web_google_login_directory_v2(
@@ -2704,6 +2753,7 @@ DECLARE
   reactivate_member boolean := false;
   credential_expiry timestamptz;
   denial_access_state uptech.google_login_access_state_v2;
+  denial_reason text;
   capability_reason text;
   capability_public_state uptech.google_login_access_state_v2;
   capability_committed boolean := false;
@@ -2792,6 +2842,8 @@ BEGIN
         hosted_domain_claim=(canonical_claims).normalized_hosted_domain::text,claims_observed_at=observed_at,
         updated_at=observed_at WHERE id=selected_identity_id;
     ELSE
+      PERFORM uptech.append_google_controlled_login_denial_audit_v1(
+        selected_workspace_id,selected_identity_id,'USER_REMOVED','IDENTITY_INELIGIBLE',p_request_id);
       UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=observed_at
       WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
       RETURN ROW('DENIED','USER_REMOVED',NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
@@ -2825,7 +2877,8 @@ BEGIN
         END IF;
       ELSIF NOT uptech.google_directory_generation_has_current_authority_v1(
         selected_workspace_id,selected_generation_id) THEN
-        denial_access_state:='USER_NOT_PROVISIONED';
+        denial_access_state:='DIRECTORY_STALE';
+        denial_reason:='DIRECTORY_AUTHORITY_UNAVAILABLE';
       END IF;
     END IF;
 
@@ -2919,6 +2972,10 @@ BEGIN
     END IF;
 
     IF denial_access_state IS NOT NULL OR capability_reason IS NOT NULL THEN
+      PERFORM uptech.append_google_controlled_login_denial_audit_v1(
+        selected_workspace_id,selected_identity_id,
+        coalesce(denial_access_state::text,'INTERNAL_ERROR'),
+        coalesce(denial_reason,capability_reason,denial_access_state::text),p_request_id);
       UPDATE uptech.oauth_transactions SET status='REJECTED',rejected_at=pg_catalog.clock_timestamp()
       WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED';
       RETURN ROW('DENIED',denial_access_state,NULL,NULL,NULL)

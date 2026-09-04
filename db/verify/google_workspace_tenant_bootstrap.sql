@@ -125,6 +125,7 @@ DO $verify_web_v2_unknown_completion$
 DECLARE
   validator_oid oid := 'uptech.validate_web_google_login_completion_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uuid)'::regprocedure::oid;
   completion_oid oid := 'uptech.complete_web_google_login_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid;
+  denial_audit_oid oid := 'uptech.append_google_controlled_login_denial_audit_v1(uuid,uuid,text,text,uuid)'::regprocedure::oid;
   definition text;
 BEGIN
   IF NOT EXISTS (
@@ -200,6 +201,30 @@ BEGIN
     OR pg_catalog.strpos(definition,'capability_committed')=0
   THEN
     RAISE EXCEPTION 'V2 unknown-domain completion bypasses its private seam or widens authority';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid=denial_audit_oid AND procedure_row.provolatile='v'
+      AND procedure_row.prosecdef
+      AND procedure_row.proowner='uptech_migration_owner'::regrole::oid
+      AND procedure_row.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[])
+    OR pg_catalog.has_function_privilege('public',denial_audit_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_api_runtime',denial_audit_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime',denial_audit_oid,'EXECUTE')
+  THEN
+    RAISE EXCEPTION 'controlled-login denial audit helper has wrong attributes or ACL';
+  END IF;
+  definition := pg_catalog.pg_get_functiondef(denial_audit_oid);
+  IF pg_catalog.strpos(definition,'GOOGLE_AUTH_LOGIN_DENIED')=0
+    OR pg_catalog.strpos(definition,'platform_audit_events')=0
+    OR pg_catalog.strpos(definition,'audit_events')=0
+    OR pg_catalog.strpos(definition,'access_state')=0
+    OR pg_catalog.strpos(definition,'reason_class')=0
+    OR pg_catalog.strpos(definition,'token')<>0
+    OR pg_catalog.strpos(definition,'credential')<>0
+    OR pg_catalog.strpos(definition,'domain')<>0
+  THEN
+    RAISE EXCEPTION 'controlled-login denial audit helper widened or lost its closed redacted schema';
   END IF;
 END
 $verify_web_v2_unknown_completion$;

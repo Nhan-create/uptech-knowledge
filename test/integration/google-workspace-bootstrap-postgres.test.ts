@@ -2001,8 +2001,10 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     WHERE workspace_id=$1 AND id='97400000-0000-4000-8000-000000000010'`, [workspaceId]));
   const disabledOwner = await reserve("98", "disabled-owner", "none-sub");
   assert.deepEqual((await complete(disabledOwner, "disabled-owner")).rows[0], {
-    outcome: "DENIED", access_state: "USER_NOT_PROVISIONED", route: null,
+    outcome: "DENIED", access_state: "DIRECTORY_STALE", route: null,
   });
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.onboarding_sessions
+    WHERE token_hash=$1`, [token("disabled-owner-onboarding")])).rows[0].count, 0);
   await asMigrationOwner((client) => client.query(`UPDATE uptech.connectors SET status='ACTIVE'
     WHERE workspace_id=$1 AND id='97400000-0000-4000-8000-000000000010'`, [workspaceId]));
   await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
@@ -2010,11 +2012,26 @@ test("V2 completion preserves controlled and invite-only authority with atomic c
     WHERE id='97400000-0000-4000-8000-000000000004'`));
   const mismatchedOwner = await reserve("9b", "mismatched-owner", "none-sub");
   assert.deepEqual((await complete(mismatchedOwner, "mismatched-owner")).rows[0], {
-    outcome: "DENIED", access_state: "USER_NOT_PROVISIONED", route: null,
+    outcome: "DENIED", access_state: "DIRECTORY_STALE", route: null,
   });
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.onboarding_sessions
+    WHERE token_hash=$1`, [token("mismatched-owner-onboarding")])).rows[0].count, 0);
   await asMigrationOwner((client) => client.query(`UPDATE uptech.identities
     SET hosted_domain_claim='mapping-a.example'
     WHERE id='97400000-0000-4000-8000-000000000004'`));
+  assert.deepEqual((await pool.query(`SELECT request_id,metadata
+    FROM uptech.platform_audit_events WHERE action='GOOGLE_AUTH_LOGIN_DENIED'
+      AND request_id IN ($1,$2) ORDER BY request_id`, [disabledOwner.id, mismatchedOwner.id])).rows, [
+    { request_id: disabledOwner.id, metadata: {
+      access_state: "DIRECTORY_STALE", reason_class: "DIRECTORY_AUTHORITY_UNAVAILABLE",
+    } },
+    { request_id: mismatchedOwner.id, metadata: {
+      access_state: "DIRECTORY_STALE", reason_class: "DIRECTORY_AUTHORITY_UNAVAILABLE",
+    } },
+  ]);
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.audit_events
+    WHERE action='GOOGLE_AUTH_LOGIN_DENIED' AND actor_kind='SYSTEM'
+      AND request_id IN ($1,$2)`, [disabledOwner.id, mismatchedOwner.id])).rows[0].count, 2);
 
   await asMigrationOwner((client) => client.query(`INSERT INTO uptech.people_group_memberships(
     workspace_id,generation_id,google_group_id,google_subject) VALUES ($1,$2,'g-admin','member-sub')`,
@@ -2246,6 +2263,27 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
   assert.deepEqual(conflictCollision.row, { outcome: "DENIED", access_state: null,
     allowed_operations: null, expires_at: null, route: null });
 
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces SET status='SUSPENDED'
+    WHERE workspace_id=$1`, [workspaceId]));
+  const workspaceSuspended = await complete("workspace-suspended-sub", "workspace-suspended");
+  assert.deepEqual(workspaceSuspended.row, { outcome: "DENIED", access_state: "WORKSPACE_SUSPENDED",
+    allowed_operations: null, expires_at: null, route: null });
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.workspaces SET status='ACTIVE'
+    WHERE workspace_id=$1`, [workspaceId]));
+
+  await asMigrationOwner(async (client) => {
+    await client.query(`INSERT INTO uptech.users(id,status) VALUES
+      ('97600000-0000-4000-8000-000000000101','SUSPENDED')`);
+    await client.query(`INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,status,
+      email_claim,email_verified,hosted_domain_claim,claims_observed_at) VALUES
+      ('97600000-0000-4000-8000-000000000102','97600000-0000-4000-8000-000000000101',
+       'GOOGLE','https://accounts.google.com','ineligible-sub','ACTIVE','ineligible@mapping-a.example',
+       true,'mapping-a.example',statement_timestamp())`);
+  });
+  const ineligible = await complete("ineligible-sub", "ineligible");
+  assert.deepEqual(ineligible.row, { outcome: "DENIED", access_state: "USER_REMOVED",
+    allowed_operations: null, expires_at: null, route: null });
+
   const tenantB = await complete("admin-sub", "tenant-b", token("tenant-b-onb"),
     "mapping-b.example");
   assert.equal(tenantB.row.outcome, "ONBOARDING");
@@ -2262,6 +2300,24 @@ test("V2 controlled denials commit only workspace-bound access-request capabilit
     FROM uptech.complete_web_google_login_directory_v2(
       $1,NULL,NULL,NULL,NULL,$2)`, [staleEmployee.onboarding, staleEmployee.id]))).rows[0];
   assert.deepEqual(replay, { outcome: "DENIED", access_state: null });
+  for (const auditTable of ["platform_audit_events", "audit_events"] as const) {
+    const audit = (await pool.query(`SELECT count(*)::int AS count,
+        bool_and(request_id IS NOT NULL) AS correlated,
+        bool_and(metadata ? 'access_state' AND metadata ? 'reason_class') AS closed_reason,
+        bool_and((metadata - ARRAY['access_state','reason_class']::text[])='{}'::jsonb) AS redacted
+      FROM uptech.${auditTable}
+      WHERE action='GOOGLE_AUTH_LOGIN_DENIED'
+        AND request_id::text LIKE '97600000-0000-4000-8000-%'`)).rows[0];
+    assert.deepEqual(audit, { count: 10, correlated: true, closed_reason: true, redacted: true });
+  }
+  assert.equal((await pool.query(`SELECT bool_and(identity_id IS NOT NULL) AS identity_correlated
+    FROM uptech.platform_audit_events WHERE action='GOOGLE_AUTH_LOGIN_DENIED'
+      AND request_id::text LIKE '97600000-0000-4000-8000-%'`)).rows[0].identity_correlated, true);
+  assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.audit_events
+    WHERE action='GOOGLE_AUTH_LOGIN_DENIED' AND actor_kind='SYSTEM' AND actor_id IS NULL
+      AND target_id IS NOT NULL AND workspace_id=$1
+      AND request_id::text LIKE '97600000-0000-4000-8000-%'`,
+  [workspaceId])).rows[0].count, 10);
   assert.deepEqual((await pool.query(`SELECT
     count(DISTINCT m.id)::int AS memberships,count(DISTINCT s.id)::int AS sessions
     FROM uptech.identities i
