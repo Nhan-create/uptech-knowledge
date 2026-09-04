@@ -787,7 +787,7 @@ test("revoked, expired, wrong-operation, and inactive bootstrap sources authenti
       identityId: `96000000-0000-4000-9000-0000000000${item.suffix}`,
       sourceId: `96000000-0000-4000-a000-0000000000${item.suffix}`,
     };
-    await seedBootstrapSource({ ...ids, sourceByte: item.byte, subject: `masked-${item.suffix}`, domain: `masked-${item.suffix}.example` });
+    await seedBootstrapSource({ ...ids, sourceByte: item.byte, subject: `masked-${item.suffix}`, domain: UNKNOWN_DOMAIN });
     const mutationValues: readonly unknown[] = item.suffix === "34" ? [ids.identityId]
       : item.suffix === "35" ? [ids.userId] : [hash32(item.byte)];
     await asMigrationOwner((client) => client.query(item.mutation, [...mutationValues]));
