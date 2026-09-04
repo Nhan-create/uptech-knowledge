@@ -155,6 +155,132 @@ before(async () => {
 
 after(async () => { await pool?.end(); });
 
+test("V2 web completion persists one unknown-domain capability and consumes the reservation once", async () => {
+  const environment = await asMigrationOwner(async (client) => {
+    const active = await client.query<{ environment_name: string }>(
+      "SELECT environment_name::text FROM uptech.google_auth_environment_registry WHERE is_active",
+    );
+    const environmentName = active.rows[0]?.environment_name ?? "web-v2-test";
+    if (active.rowCount === 0) {
+      await client.query(`INSERT INTO uptech.google_auth_environment_registry(
+        environment_name,rate_limit_audit_hmac_key,is_active
+      ) VALUES ($1,$2,true)`, [environmentName, hash32(0xa0)]);
+    }
+    await client.query(`INSERT INTO uptech.google_auth_configuration_registry(
+      configuration_key,environment_name,purpose,google_client_id,google_audience,
+      audience_configuration_key,callback_uri,scopes,allowed_azp_configuration_keys,
+      web_pkce_kms_key_version,is_enabled
+    ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','web-v2.apps.googleusercontent.com',
+      'web-v2.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1',
+      'https://unknown.example/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
+      ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
+      'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environmentName]);
+    return environmentName;
+  });
+
+  const reserve = (id: string, completionByte: number, nonceByte: number) =>
+    asMigrationOwner((client) => client.query(`INSERT INTO uptech.oauth_transactions(
+      id,environment_name,purpose,configuration_key,locator_hash,web_state_hash,
+      web_nonce_hash,web_browser_binding_hash,web_pkce_envelope_version,
+      web_pkce_algorithm,web_pkce_nonce,web_pkce_ciphertext,web_pkce_tag,
+      web_pkce_kms_key_version,web_pkce_associated_data,status,
+      completion_handle_hash,request_id,created_at,expires_at,consumed_at,completion_expires_at
+    ) VALUES ($1,$2,'WEB_LOGIN','GOOGLE_WEB_LOGIN_V1',$3,$3,$4,$5,1,
+      'AES-256-GCM',decode(repeat('ab',12),'hex'),decode(repeat('bc',40),'hex'),
+      decode(repeat('cd',16),'hex'),'test-key-v1',decode(repeat('de',32),'hex'),
+      'EXCHANGE_RESERVED',$6,$1,statement_timestamp()-interval '1 minute',
+      statement_timestamp()+interval '9 minutes',statement_timestamp()-interval '5 seconds',
+      statement_timestamp()-interval '5 seconds'+interval '2 minutes')`,
+    [id, environment, hash32(completionByte + 20), hash32(nonceByte),
+      hash32(completionByte + 40), hash32(completionByte)]));
+
+  const complete = (completionByte: number, nonceByte: number, tokenByte: number,
+    subject: string, email: string, domain: string | null, requestId: string) => asApi((client) => client.query(`
+      SELECT outcome::text,access_state::text,allowed_operations,expires_at,route
+      FROM uptech.complete_web_google_login_directory_v2(
+        $1,ROW('accounts.google.com',$2,$3,true,$4,
+          statement_timestamp()-interval '5 seconds',statement_timestamp()+interval '1 hour',
+          'GOOGLE_WEB_LOGIN_V1',NULL,$5)::uptech.google_verified_claims_assertion_v1,
+        $6,$7,$8,$9)`, [hash32(completionByte), subject, email, domain,
+      hash32(nonceByte), hash32(tokenByte + 1), hash32(tokenByte + 2), hash32(tokenByte),
+      requestId]));
+
+  await reserve("97300000-0000-4000-8000-000000000001", 0xa1, 0xa2);
+  const first = await complete(0xa1, 0xa2, 0xa3,
+    "web-v2-unknown-sub", "owner@unknown.example", "unknown.example",
+    "97300000-0000-4000-8000-000000000001");
+  assert.deepEqual(first.rows[0].outcome, "ONBOARDING");
+  assert.deepEqual(first.rows[0].access_state, "UNKNOWN_WORKSPACE");
+  assert.deepEqual(first.rows[0].allowed_operations, [
+    "FIRST_DOMAIN_CLAIM_READ", "FIRST_DOMAIN_CLAIM_RESERVE", "FIRST_DOMAIN_CLAIM_COMPLETE",
+  ]);
+  assert.equal(first.rows[0].route, null);
+
+  const replay = await complete(0xa1, 0xa2, 0xa4,
+    "web-v2-unknown-sub", "changed@unknown.example", "unknown.example",
+    "97300000-0000-4000-8000-000000000001");
+  assert.equal(replay.rows[0].outcome, "DENIED");
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.users u JOIN uptech.identities i ON i.user_id=u.id
+      WHERE i.provider='GOOGLE' AND i.issuer='https://accounts.google.com'
+        AND i.provider_subject='web-v2-unknown-sub') AS users,
+    (SELECT count(*)::int FROM uptech.onboarding_sessions o JOIN uptech.identities i ON i.id=o.identity_id
+      WHERE i.provider_subject='web-v2-unknown-sub' AND o.status='ACTIVE'
+        AND o.resource_workspace_id IS NULL) AS capabilities,
+    (SELECT count(*)::int FROM uptech.sessions s JOIN uptech.identities i ON i.id=s.identity_id
+      WHERE i.provider_subject='web-v2-unknown-sub') AS sessions,
+    (SELECT status FROM uptech.oauth_transactions WHERE id='97300000-0000-4000-8000-000000000001') AS transaction_status`)).rows[0], {
+    users: 1, capabilities: 1, sessions: 0, transaction_status: "COMPLETED",
+  });
+
+  await reserve("97300000-0000-4000-8000-000000000003", 0xc1, 0xc2);
+  const metadataRefresh = await complete(0xc1, 0xc2, 0xc3,
+    "web-v2-unknown-sub", "renamed@unknown-two.example", "unknown-two.example",
+    "97300000-0000-4000-8000-000000000003");
+  assert.equal(metadataRefresh.rows[0].outcome, "ONBOARDING");
+  assert.deepEqual((await pool.query(`SELECT count(*)::int AS identities,
+    min(email_claim) AS email_claim,min(hosted_domain_claim) AS hosted_domain_claim
+    FROM uptech.identities WHERE provider='GOOGLE'
+      AND issuer='https://accounts.google.com' AND provider_subject='web-v2-unknown-sub'`)).rows[0], {
+    identities: 1, email_claim: "renamed@unknown-two.example",
+    hosted_domain_claim: "unknown-two.example",
+  });
+  assert.deepEqual((await pool.query(`SELECT
+    count(*) FILTER (WHERE o.status='ACTIVE')::int AS active,
+    count(*) FILTER (WHERE o.status='REVOKED')::int AS revoked
+    FROM uptech.onboarding_sessions o JOIN uptech.identities i ON i.id=o.identity_id
+    WHERE i.provider_subject='web-v2-unknown-sub'
+      AND o.resource_workspace_id IS NULL`)).rows[0], { active: 1, revoked: 1 });
+
+  await reserve("97300000-0000-4000-8000-000000000004", 0xd1, 0xd2);
+  const requestMismatch = await complete(0xd1, 0xd2, 0xd3,
+    "web-v2-mismatch-sub", "owner@mismatch.example", "mismatch.example",
+    "97300000-0000-4000-8000-000000000099");
+  assert.equal(requestMismatch.rows[0].outcome, "DENIED");
+  assert.deepEqual((await pool.query(`SELECT
+    (SELECT status FROM uptech.oauth_transactions
+      WHERE id='97300000-0000-4000-8000-000000000004') AS transaction_status,
+    (SELECT count(*)::int FROM uptech.identities
+      WHERE provider_subject='web-v2-mismatch-sub') AS identities,
+    (SELECT count(*)::int FROM uptech.onboarding_sessions o JOIN uptech.identities i
+      ON i.id=o.identity_id WHERE i.provider_subject='web-v2-mismatch-sub') AS capabilities,
+    (SELECT request_id::text FROM uptech.platform_audit_events
+      WHERE metadata->>'correlation_id'='97300000-0000-4000-8000-000000000004'
+      ORDER BY occurred_at DESC LIMIT 1) AS audit_request_id`)).rows[0], {
+    transaction_status: "REJECTED", identities: 0, capabilities: 0,
+    audit_request_id: "97300000-0000-4000-8000-000000000004",
+  });
+
+  await reserve("97300000-0000-4000-8000-000000000002", 0xb1, 0xb2);
+  const personal = await complete(0xb1, 0xb2, 0xb3,
+    "web-v2-personal-sub", "person@gmail.com", null,
+    "97300000-0000-4000-8000-000000000002");
+  assert.equal(personal.rows[0].outcome, "DENIED");
+  assert.equal((await pool.query(`SELECT count(*)::int AS count
+    FROM uptech.onboarding_sessions o JOIN uptech.identities i ON i.id=o.identity_id
+    WHERE i.provider_subject='web-v2-personal-sub'`)).rows[0].count, 0);
+});
+
 async function seedBootstrapSource(input: {
   userId: string;
   identityId: string;

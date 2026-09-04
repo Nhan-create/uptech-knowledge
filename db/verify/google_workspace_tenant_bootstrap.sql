@@ -34,6 +34,8 @@ BEGIN
     ('google_directory_mapping_outcome_v1', ARRAY[
       'ADMIN','MEMBER','ACCESS_MAPPING_CONFLICT','USER_NOT_PROVISIONED',
       'USER_SUSPENDED','USER_REMOVED']::text[]),
+    ('google_web_completion_validation_outcome_v1', ARRAY['VALID','DENIED']::text[]),
+    ('google_login_route_v1', ARRAY['/admin','/home']::text[]),
     ('workspace_access_request_status_v1', ARRAY['PENDING','FULFILLED','CANCELLED']::text[]),
     ('google_login_access_state_v2', ARRAY[
       'UNKNOWN_WORKSPACE','USER_NOT_PROVISIONED','ACCESS_MAPPING_CONFLICT',
@@ -90,7 +92,11 @@ BEGIN
     ('workspace_access_request_read_result_v1', ARRAY['outcome','request_id','status']::text[],
       ARRAY['uptech.workspace_access_request_read_outcome_v1','uuid','uptech.workspace_access_request_status_v1']::text[]),
     ('google_directory_mapping_result_v1', ARRAY['outcome','target_role','target_department_key']::text[],
-      ARRAY['uptech.google_directory_mapping_outcome_v1','text','text']::text[])
+      ARRAY['uptech.google_directory_mapping_outcome_v1','text','text']::text[]),
+    ('google_web_completion_validation_result_v1', ARRAY['outcome','transaction_id','canonical_claims']::text[],
+      ARRAY['uptech.google_web_completion_validation_outcome_v1','uuid','uptech.google_verified_claims_assertion_v1']::text[]),
+    ('google_login_completion_result_v3', ARRAY['outcome','access_state','allowed_operations','expires_at','route']::text[],
+      ARRAY['uptech.google_login_completion_outcome_v1','uptech.google_login_access_state_v2','text[]','timestamp with time zone','uptech.google_login_route_v1']::text[])
   ) AS required(type_name, attribute_names, attribute_types)
   WHERE required.attribute_names IS DISTINCT FROM (
     SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum)
@@ -114,6 +120,78 @@ BEGIN
   END IF;
 END
 $verify$;
+
+DO $verify_web_v2_unknown_completion$
+DECLARE
+  validator_oid oid := 'uptech.validate_web_google_login_completion_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uuid)'::regprocedure::oid;
+  completion_oid oid := 'uptech.complete_web_google_login_directory_v2(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid;
+  definition text;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid=validator_oid
+      AND procedure_row.prorettype='uptech.google_web_completion_validation_result_v1'::regtype
+      AND procedure_row.provolatile='v' AND procedure_row.prosecdef
+      AND procedure_row.proowner='uptech_migration_owner'::regrole::oid
+      AND procedure_row.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+  ) OR pg_catalog.has_function_privilege('public',validator_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_api_runtime',validator_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime',validator_oid,'EXECUTE')
+  THEN
+    RAISE EXCEPTION 'private Web completion validator has wrong type, attributes, or ACL';
+  END IF;
+
+  definition := pg_catalog.pg_get_functiondef(validator_oid);
+  IF pg_catalog.strpos(definition,'EXCHANGE_RESERVED')=0
+    OR pg_catalog.strpos(definition,'FOR UPDATE')=0
+    OR pg_catalog.strpos(definition,'https://accounts.google.com')=0
+    OR pg_catalog.strpos(definition,'configuration_row.environment_name = selected_transaction.environment_name')=0
+    OR pg_catalog.strpos(definition,'configuration_row.configuration_key = selected_transaction.configuration_key')=0
+    OR pg_catalog.strpos(definition,$needle$configuration_row.purpose = 'WEB_LOGIN'$needle$)=0
+    OR pg_catalog.strpos(definition,'configuration_row.is_enabled')=0
+    OR pg_catalog.strpos(definition,'audience_configuration_key')=0
+    OR pg_catalog.strpos(definition,'authorized_party_configuration_key')=0
+    OR pg_catalog.strpos(definition,'web_nonce_hash')=0
+    OR pg_catalog.strpos(definition,'p_request_id = selected_transaction.request_id')=0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.users')<>0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.identities')<>0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.onboarding_sessions')<>0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.sessions')<>0
+  THEN
+    RAISE EXCEPTION 'private Web completion validator drifted from canonical validation-only seam';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS procedure_row
+    WHERE procedure_row.oid=completion_oid
+      AND procedure_row.prorettype='uptech.google_login_completion_result_v3'::regtype
+      AND procedure_row.provolatile='v' AND procedure_row.prosecdef
+      AND procedure_row.proowner='uptech_migration_owner'::regrole::oid
+      AND procedure_row.proconfig=ARRAY['search_path=pg_catalog, uptech']::text[]
+  ) OR NOT pg_catalog.has_function_privilege('uptech_api_runtime',completion_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('public',completion_oid,'EXECUTE')
+    OR pg_catalog.has_function_privilege('uptech_worker_runtime',completion_oid,'EXECUTE')
+  THEN
+    RAISE EXCEPTION 'V2 Web completion has wrong result type, attributes, or ACL';
+  END IF;
+
+  definition := pg_catalog.pg_get_functiondef(completion_oid);
+  IF pg_catalog.strpos(definition,'validate_web_google_login_completion_v1')=0
+    OR pg_catalog.strpos(definition,'complete_web_google_login_v1')<>0
+    OR pg_catalog.strpos(definition,'complete_web_google_login_directory_v1')<>0
+    OR pg_catalog.strpos(definition,'FIRST_DOMAIN_CLAIM_READ')=0
+    OR pg_catalog.strpos(definition,'resource_workspace_id')=0
+    OR pg_catalog.strpos(definition,$needle$status='REVOKED'$needle$)=0
+    OR pg_catalog.strpos(definition,$needle$WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED'$needle$)=0
+    OR pg_catalog.strpos(definition,'transitioned_rows <> 1')=0
+    OR pg_catalog.strpos(definition,$needle$EXCEPTION WHEN SQLSTATE 'PGA01'$needle$)=0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.sessions')<>0
+    OR pg_catalog.strpos(definition,'INSERT INTO uptech.workspace_memberships')<>0
+  THEN
+    RAISE EXCEPTION 'V2 unknown-domain completion bypasses its private seam or widens authority';
+  END IF;
+END
+$verify_web_v2_unknown_completion$;
 
 DO $verify_mapping_evaluator$
 DECLARE

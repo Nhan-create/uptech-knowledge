@@ -27,6 +27,26 @@ CREATE TYPE uptech.google_login_access_state_v2 AS ENUM (
   'WORKSPACE_SUSPENDED'
 );
 
+CREATE TYPE uptech.google_web_completion_validation_outcome_v1 AS ENUM (
+  'VALID', 'DENIED'
+);
+
+CREATE TYPE uptech.google_login_route_v1 AS ENUM ('/admin', '/home');
+
+CREATE TYPE uptech.google_web_completion_validation_result_v1 AS (
+  outcome uptech.google_web_completion_validation_outcome_v1,
+  transaction_id uuid,
+  canonical_claims uptech.google_verified_claims_assertion_v1
+);
+
+CREATE TYPE uptech.google_login_completion_result_v3 AS (
+  outcome uptech.google_login_completion_outcome_v1,
+  access_state uptech.google_login_access_state_v2,
+  allowed_operations text[],
+  expires_at timestamptz,
+  route uptech.google_login_route_v1
+);
+
 CREATE TYPE uptech.google_workspace_verified_domain_v1 AS (
   normalized_domain text,
   domain_kind uptech.google_workspace_domain_kind_v1,
@@ -2531,6 +2551,273 @@ REVOKE ALL ON FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
 ) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 GRANT EXECUTE ON FUNCTION uptech.admit_google_workspace_bootstrap_start_v1(
   uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
+-- Shared private Web completion prelude. It owns the EXCHANGE_RESERVED row
+-- lock and canonical OIDC validation, but never creates product authority.
+CREATE FUNCTION uptech.validate_web_google_login_completion_v1(
+  p_completion_handle_hash uptech.google_auth_hash32_v1,
+  p_claims uptech.google_verified_claims_assertion_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_web_completion_validation_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz := pg_catalog.clock_timestamp();
+  selected_transaction uptech.oauth_transactions%ROWTYPE;
+  bound_configuration uptech.google_auth_configuration_registry%ROWTYPE;
+  canonical_claims uptech.google_verified_claims_assertion_v1;
+  claims_are_valid boolean;
+BEGIN
+  canonical_claims := ROW(
+    'https://accounts.google.com',
+    (p_claims).provider_subject,
+    (p_claims).normalized_email,
+    (p_claims).email_verified,
+    (p_claims).normalized_hosted_domain,
+    (p_claims).issued_at,
+    (p_claims).expires_at,
+    (p_claims).audience_configuration_key,
+    (p_claims).authorized_party_configuration_key,
+    (p_claims).web_nonce_hash
+  )::uptech.google_verified_claims_assertion_v1;
+
+  IF p_completion_handle_hash IS NOT NULL THEN
+    SELECT transaction_row.* INTO selected_transaction
+    FROM uptech.oauth_transactions AS transaction_row
+    WHERE transaction_row.completion_handle_hash = p_completion_handle_hash
+      AND transaction_row.purpose = 'WEB_LOGIN'
+      AND transaction_row.status = 'EXCHANGE_RESERVED'
+    FOR UPDATE;
+  END IF;
+
+  IF selected_transaction.id IS NULL
+     OR selected_transaction.completion_expires_at IS NULL
+     OR selected_transaction.completion_expires_at <= observed_at THEN
+    RETURN ROW('DENIED',NULL,NULL)
+      ::uptech.google_web_completion_validation_result_v1;
+  END IF;
+
+  SELECT configuration_row.* INTO bound_configuration
+  FROM uptech.google_auth_configuration_registry AS configuration_row
+  WHERE configuration_row.environment_name = selected_transaction.environment_name
+    AND configuration_row.configuration_key = selected_transaction.configuration_key
+    AND configuration_row.purpose = 'WEB_LOGIN'
+    AND configuration_row.is_enabled;
+
+  claims_are_valid :=
+    bound_configuration.configuration_key IS NOT NULL
+    AND (p_claims).issuer::text IN ('https://accounts.google.com','accounts.google.com')
+    AND p_request_id = selected_transaction.request_id
+    AND (canonical_claims).provider_subject IS NOT NULL
+    AND pg_catalog.length((canonical_claims).provider_subject::text) BETWEEN 1 AND 512
+    AND (canonical_claims).normalized_email IS NOT NULL
+    AND (canonical_claims).email_verified IS TRUE
+    AND (canonical_claims).normalized_hosted_domain IS NOT NULL
+    AND (canonical_claims).issued_at IS NOT NULL
+    AND (canonical_claims).expires_at IS NOT NULL
+    AND (canonical_claims).issued_at >= observed_at - interval '5 minutes'
+    AND (canonical_claims).issued_at <= observed_at + interval '2 minutes'
+    AND (canonical_claims).expires_at > observed_at
+    AND (canonical_claims).expires_at > (canonical_claims).issued_at
+    AND (canonical_claims).expires_at <= (canonical_claims).issued_at + interval '2 hours'
+    AND (canonical_claims).audience_configuration_key =
+      bound_configuration.audience_configuration_key
+    AND ((canonical_claims).authorized_party_configuration_key IS NULL
+      OR (canonical_claims).authorized_party_configuration_key = ANY (
+        bound_configuration.allowed_azp_configuration_keys))
+    AND (canonical_claims).web_nonce_hash IS NOT NULL
+    AND (canonical_claims).web_nonce_hash = selected_transaction.web_nonce_hash;
+
+  IF claims_are_valid IS NOT TRUE THEN
+    PERFORM uptech.record_google_login_rejection_v1(
+      p_completion_handle_hash,
+      'CLAIMS_INVALID'::uptech.google_auth_rejection_class_v1,
+      selected_transaction.request_id
+    );
+    RETURN ROW('DENIED',NULL,NULL)
+      ::uptech.google_web_completion_validation_result_v1;
+  END IF;
+
+  RETURN ROW('VALID',selected_transaction.id,canonical_claims)
+    ::uptech.google_web_completion_validation_result_v1;
+END
+$function$;
+
+REVOKE ALL ON TYPE uptech.google_web_completion_validation_outcome_v1,
+  uptech.google_web_completion_validation_result_v1
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+REVOKE ALL ON FUNCTION uptech.validate_web_google_login_completion_v1(
+  uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+-- Task 7B1 intentionally handles only an unknown verified hosted domain. All
+-- known-tenant paths fail closed here until the Directory/JIT slice lands.
+CREATE FUNCTION uptech.complete_web_google_login_directory_v2(
+  p_completion_handle_hash uptech.google_auth_hash32_v1,
+  p_claims uptech.google_verified_claims_assertion_v1,
+  p_session_token_hash uptech.google_auth_hash32_v1,
+  p_csrf_token_hash uptech.google_auth_hash32_v1,
+  p_onboarding_token_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.google_login_completion_result_v3
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  validation uptech.google_web_completion_validation_result_v1;
+  canonical_claims uptech.google_verified_claims_assertion_v1;
+  observed_at timestamptz;
+  selected_identity_id uuid;
+  selected_user_id uuid;
+  selected_user_status text;
+  selected_identity_status text;
+  credential_expiry timestamptz;
+  transitioned_rows integer;
+BEGIN
+  validation := uptech.validate_web_google_login_completion_v1(
+    p_completion_handle_hash,p_claims,p_request_id
+  );
+  IF (validation).outcome <> 'VALID' THEN
+    RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+  END IF;
+  canonical_claims := (validation).canonical_claims;
+
+  IF EXISTS (
+    SELECT 1 FROM uptech.workspace_domain_locators AS locator
+    WHERE locator.normalized_domain = (canonical_claims).normalized_hosted_domain
+      AND locator.status = 'VERIFIED'
+  ) THEN
+    PERFORM uptech.record_google_login_rejection_v1(
+      p_completion_handle_hash,'IDENTITY_INELIGIBLE',p_request_id
+    );
+    RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+  END IF;
+
+  IF p_onboarding_token_hash IS NOT NULL THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+      'UPTECH_CREDENTIAL_V1' || pg_catalog.encode(p_onboarding_token_hash,'hex'),0
+    ));
+  END IF;
+  IF p_onboarding_token_hash IS NULL
+     OR p_onboarding_token_hash = p_session_token_hash
+     OR p_onboarding_token_hash = p_csrf_token_hash
+     OR EXISTS (SELECT 1 FROM uptech.session_tokens WHERE token_hash=p_onboarding_token_hash)
+     OR EXISTS (SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_onboarding_token_hash)
+  THEN
+    PERFORM uptech.record_google_login_rejection_v1(
+      p_completion_handle_hash,'INTERNAL_FAILURE',p_request_id
+    );
+    RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    (canonical_claims).issuer::text || pg_catalog.chr(31)
+      || (canonical_claims).provider_subject::text,0
+  ));
+  SELECT identity_row.id,identity_row.user_id,user_row.status,identity_row.status
+  INTO selected_identity_id,selected_user_id,selected_user_status,selected_identity_status
+  FROM uptech.identities AS identity_row
+  JOIN uptech.users AS user_row ON user_row.id=identity_row.user_id
+  WHERE identity_row.provider='GOOGLE'
+    AND identity_row.issuer=(canonical_claims).issuer::text
+    AND identity_row.provider_subject=(canonical_claims).provider_subject::text
+  FOR UPDATE OF identity_row,user_row;
+
+  observed_at := pg_catalog.clock_timestamp();
+  IF selected_identity_id IS NULL THEN
+    selected_user_id := pg_catalog.gen_random_uuid();
+    selected_identity_id := pg_catalog.gen_random_uuid();
+    INSERT INTO uptech.users(id,status,security_version,created_at,updated_at)
+    VALUES(selected_user_id,'ACTIVE',1,observed_at,observed_at);
+    INSERT INTO uptech.identities(
+      id,user_id,provider,issuer,provider_subject,status,security_version,
+      email_claim,email_verified,hosted_domain_claim,claims_observed_at,created_at,updated_at
+    ) VALUES (
+      selected_identity_id,selected_user_id,'GOOGLE',(canonical_claims).issuer::text,
+      (canonical_claims).provider_subject::text,'ACTIVE',1,
+      (canonical_claims).normalized_email::text,true,
+      (canonical_claims).normalized_hosted_domain::text,observed_at,observed_at,observed_at
+    );
+  ELSIF selected_user_status='ACTIVE' AND selected_identity_status='ACTIVE' THEN
+    UPDATE uptech.identities SET
+      email_claim=(canonical_claims).normalized_email::text,
+      email_verified=true,
+      hosted_domain_claim=(canonical_claims).normalized_hosted_domain::text,
+      claims_observed_at=observed_at,
+      updated_at=observed_at
+    WHERE id=selected_identity_id;
+  ELSE
+    PERFORM uptech.record_google_login_rejection_v1(
+      p_completion_handle_hash,'IDENTITY_INELIGIBLE',p_request_id
+    );
+    RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+  END IF;
+
+  credential_expiry := observed_at + interval '30 minutes';
+  -- The identity row lock serializes replacement: one current unknown-domain
+  -- capability per identity, while preserving revoked rows for audit.
+  UPDATE uptech.onboarding_sessions
+  SET status='REVOKED',revoked_at=observed_at
+  WHERE identity_id=selected_identity_id
+    AND status='ACTIVE'
+    AND resource_workspace_id IS NULL
+    AND allowed_operations <@ ARRAY[
+      'FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'
+    ]::text[];
+
+  INSERT INTO uptech.onboarding_sessions(
+    id,identity_id,token_hash,allowed_operations,status,created_at,expires_at,
+    resource_workspace_id,access_request_reason_class
+  ) VALUES (
+    pg_catalog.gen_random_uuid(),selected_identity_id,p_onboarding_token_hash,
+    ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],
+    'ACTIVE',observed_at,credential_expiry,NULL,NULL
+  );
+
+  UPDATE uptech.oauth_transactions SET status='COMPLETED',completed_at=observed_at
+  WHERE id=(validation).transaction_id AND status='EXCHANGE_RESERVED'
+    AND completion_expires_at > observed_at;
+  GET DIAGNOSTICS transitioned_rows = ROW_COUNT;
+  IF transitioned_rows <> 1 THEN
+    RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='google login reservation expired';
+  END IF;
+
+  INSERT INTO uptech.platform_audit_events(
+    id,identity_id,action,target_type,outcome,request_id,metadata,occurred_at
+  ) VALUES (
+    pg_catalog.gen_random_uuid(),selected_identity_id,'GOOGLE_AUTH_ONBOARDING_ISSUED',
+    'ONBOARDING_SESSION','SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object('correlation_id',(validation).transaction_id,
+      'identity_id',selected_identity_id,'access_state','UNKNOWN_WORKSPACE'),observed_at
+  );
+  RETURN ROW('ONBOARDING','UNKNOWN_WORKSPACE',
+    ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],
+    credential_expiry,NULL)::uptech.google_login_completion_result_v3;
+EXCEPTION WHEN SQLSTATE 'PGA01' THEN
+  RETURN ROW('DENIED',NULL,NULL,NULL,NULL)::uptech.google_login_completion_result_v3;
+END
+$function$;
+
+REVOKE ALL ON TYPE uptech.google_login_route_v1,
+  uptech.google_login_completion_result_v3
+FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+REVOKE ALL ON FUNCTION uptech.complete_web_google_login_directory_v2(
+  uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_hash32_v1,uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.complete_web_google_login_directory_v2(
+  uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,
+  uptech.google_auth_hash32_v1,uptech.google_auth_hash32_v1,
+  uptech.google_auth_hash32_v1,uuid
 ) TO uptech_api_runtime;
 
 -- Internal, versioned Directory mapping decision used by login completion.
