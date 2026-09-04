@@ -114,7 +114,7 @@ async function sql(path: string): Promise<string> {
 }
 
 type ExecutableSqlToken = {
-  readonly kind: "word" | "quoted-identifier" | "symbol";
+  readonly kind: "word" | "quoted-identifier" | "symbol" | "unsupported-do-body";
   readonly value: string;
 };
 
@@ -136,6 +136,19 @@ function executableSqlTokens(source: string): ExecutableSqlToken[] {
     tokens.push({ kind, value: value.toLowerCase() });
     if (kind === "word" && value.toLowerCase() === "do") awaitingDoBody = true;
   };
+  const skipSingleQuotedLiteral = (quoteIndex: number, escapeBackslashes: boolean): number => {
+    let cursor = quoteIndex + 1;
+    while (cursor < source.length) {
+      if (escapeBackslashes && source[cursor] === "\\") {
+        cursor += Math.min(2, source.length - cursor);
+        continue;
+      }
+      if (source[cursor] !== "'") { cursor += 1; continue; }
+      if (source[cursor + 1] === "'") { cursor += 2; continue; }
+      return cursor + 1;
+    }
+    return source.length;
+  };
 
   while (index < source.length) {
     if (source.startsWith("--", index)) {
@@ -153,14 +166,15 @@ function executableSqlTokens(source: string): ExecutableSqlToken[] {
       }
       continue;
     }
-    if (source[index] === "'") {
-      index += 1;
-      while (index < source.length) {
-        if (source[index] !== "'") { index += 1; continue; }
-        if (source[index + 1] === "'") { index += 2; continue; }
-        index += 1;
-        break;
+    const isEscapeString = (source[index] === "E" || source[index] === "e")
+      && source[index + 1] === "'";
+    if (source[index] === "'" || isEscapeString) {
+      const quoteIndex = index + (isEscapeString ? 1 : 0);
+      if (awaitingDoBody) {
+        tokens.push({ kind: "unsupported-do-body", value: "single-quoted" });
+        awaitingDoBody = false;
       }
+      index = skipSingleQuotedLiteral(quoteIndex, isEscapeString);
       continue;
     }
     if (source[index] === "$") {
@@ -209,10 +223,13 @@ function executableSqlTokens(source: string): ExecutableSqlToken[] {
 function verifierSafetyViolations(source: string): string[] {
   const tokens = executableSqlTokens(source);
   const violations = new Set<string>();
-  const prohibitedWords = new Set(["insert", "update", "delete", "merge", "truncate"]);
+  const prohibitedWords = new Set(["insert", "update", "delete", "merge", "truncate", "copy"]);
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (!token) continue;
+    if (token.kind === "unsupported-do-body") {
+      violations.add("unsupported single-quoted DO body");
+    }
     if (token.kind === "word" && prohibitedWords.has(token.value)) {
       violations.add(`executable ${token.value.toUpperCase()}`);
     }
@@ -734,10 +751,13 @@ test("bootstrap verifier is a bounded production-safe read-only catalog contract
 test("bootstrap verifier safety scanner rejects executable mutations without catalog-literal false positives", () => {
   const unsafeSpecimens = [
     "DO $$ BEGIN PERFORM uptech.finish_google_workspace_bootstrap_v1(NULL, NULL); END $$;",
+    "DO 'BEGIN PERFORM uptech.finish_google_workspace_bootstrap_v1(NULL, NULL); END';",
+    "DO E'BEGIN EXECUTE ''SELECT 1''; END';",
     "SELECT uptech.retry_google_workspace_bootstrap_sync_v1(NULL, NULL);",
     "DO $$ DECLARE result record; BEGIN result := uptech.reissue_google_workspace_bootstrap_status_v1(NULL, NULL, NULL, NULL); END $$;",
     "CALL uptech.some_dynamic_mutator();",
     "DO $$ BEGIN EXECUTE 'SELECT 1'; END $$;",
+    "COPY uptech.sessions TO STDOUT;",
     "UPDATE uptech.workspaces SET status = 'SUSPENDED';",
     "WITH erased AS (DELETE FROM uptech.sessions RETURNING id) SELECT * FROM erased;",
   ];
@@ -745,8 +765,24 @@ test("bootstrap verifier safety scanner rejects executable mutations without cat
     assert.notDeepEqual(verifierSafetyViolations(specimen), [], specimen);
   }
 
+  for (const specimen of [
+    "DO 'BEGIN NULL; END';",
+    "DO E'BEGIN NULL; END';",
+    "DO 'unterminated",
+  ]) {
+    assert.deepEqual(
+      verifierSafetyViolations(specimen),
+      ["unsupported single-quoted DO body"],
+      `single-quoted DO bodies are rejected instead of being partially decoded: ${specimen}`,
+    );
+  }
+
   const safeSpecimens = [
     "-- DELETE FROM uptech.sessions; PERFORM uptech.finish_google_workspace_bootstrap_v1(NULL,NULL);\nSELECT 1;",
+    "SELECT 'DO ''BEGIN DELETE FROM uptech.sessions; END''';",
+    "SELECT E'catalog text: EXECUTE and DELETE are not executable';",
+    "SELECT E'catalog \\' DELETE FROM uptech.sessions is still quoted';",
+    "/* DO E'BEGIN EXECUTE DELETE; END'; */ SELECT 1;",
     "DO $body$ BEGIN IF pg_catalog.strpos(definition, 'INSERT INTO uptech.sessions') <> 0 THEN NULL; END IF; END $body$;",
     "DO $body$ BEGIN IF pg_catalog.strpos(definition, $needle$DELETE FROM uptech.sessions$needle$) <> 0 THEN NULL; END IF; END $body$;",
     "DO $$ BEGIN PERFORM uptech.normalize_google_workspace_verified_domains_v1(NULL, NULL); END $$;",
