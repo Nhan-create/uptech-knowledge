@@ -234,16 +234,9 @@ before(async () => {
   worker = rolePool(WORKER_LOGIN, "uptech_worker_runtime");
 
   await asOwner(async (client) => {
-    await client.query("INSERT INTO uptech.workspaces (workspace_id,status,google_customer_id) VALUES ($1,'ACTIVE','customer-a'),($2,'ACTIVE','customer-b')", [TENANT_A, TENANT_B]);
+    await client.query("INSERT INTO uptech.workspaces (workspace_id,status,google_customer_id,provisioning_policy) VALUES ($1,'ACTIVE','customer-a','GOOGLE_GROUP_CONTROLLED'),($2,'ACTIVE','customer-b','GOOGLE_GROUP_CONTROLLED')", [TENANT_A, TENANT_B]);
     await client.query("INSERT INTO uptech.workspace_domain_locators (normalized_domain,workspace_id,status,verified_at) VALUES ('tenant-a.example',$1,'VERIFIED',clock_timestamp()),('tenant-b.example',$2,'VERIFIED',clock_timestamp())", [TENANT_A, TENANT_B]);
     await client.query("INSERT INTO uptech.service_actors (workspace_id,id,actor_kind,status) VALUES ($1,$2,'SYNC_WORKER','ACTIVE'),($3,$4,'SYNC_WORKER','ACTIVE')", [TENANT_A, ACTOR_A, TENANT_B, ACTOR_B]);
-    await client.query("INSERT INTO uptech.connectors (workspace_id,id,purpose,status,provider_customer_id,credential_reference,directory_authorized_by_identity_id,directory_authorized_scopes) VALUES ($1,$2,'DIRECTORY','ACTIVE','customer-a','secretref://tenant-a-directory',$5,ARRAY['https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly','https://www.googleapis.com/auth/admin.directory.group.readonly','https://www.googleapis.com/auth/admin.directory.orgunit.readonly']),($3,$4,'DIRECTORY','ACTIVE','customer-b','secretref://tenant-b-directory',$6,ARRAY['https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly','https://www.googleapis.com/auth/admin.directory.group.readonly','https://www.googleapis.com/auth/admin.directory.orgunit.readonly'])", [TENANT_A, CONNECTOR_A, TENANT_B, CONNECTOR_B, USERS.ownerA[1], USERS.adminB[1]]);
-    await client.query(
-      `INSERT INTO uptech.sync_jobs (workspace_id,id,service_actor_id,connector_id,job_kind,status,dedupe_key,attempt_count,leased_at,lease_expires_at,lease_owner,lease_fence)
-       VALUES ($1,$2,$3,$4,'DIRECTORY_SYNC','LEASED','tenant-a-directory',1,clock_timestamp(),clock_timestamp()+interval '1 hour',$5,$6),
-              ($7,$8,$9,$10,'DIRECTORY_SYNC','LEASED','tenant-b-directory',1,clock_timestamp(),clock_timestamp()+interval '1 hour',$5,$11)`,
-      [TENANT_A, JOB_A, ACTOR_A, CONNECTOR_A, WORKER_LOGIN, LEASE_A, TENANT_B, JOB_B, ACTOR_B, CONNECTOR_B, LEASE_B],
-    );
     for (const fixture of Object.values(USERS)) {
       const workspaceId = fixture[3].startsWith("tenant-a-") ? TENANT_A : TENANT_B;
       const domain = workspaceId === TENANT_A ? "tenant-a.example" : "tenant-b.example";
@@ -255,6 +248,13 @@ before(async () => {
       );
       await client.query("INSERT INTO uptech.workspace_memberships (workspace_id,id,user_id,role,status) VALUES ($1,$2,$3,$4,'ACTIVE')", [workspaceId, fixture[2], fixture[0], fixture[3]==="tenant-a-owner" ? "OWNER" : "MEMBER"]);
     }
+    await client.query("INSERT INTO uptech.connectors (workspace_id,id,purpose,status,provider_customer_id,credential_reference,directory_authorized_by_identity_id,directory_authorized_scopes) VALUES ($1,$2,'DIRECTORY','ACTIVE','customer-a','secretref://tenant-a-directory',$5,ARRAY['https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly','https://www.googleapis.com/auth/admin.directory.group.readonly','https://www.googleapis.com/auth/admin.directory.orgunit.readonly']),($3,$4,'DIRECTORY','ACTIVE','customer-b','secretref://tenant-b-directory',$6,ARRAY['https://www.googleapis.com/auth/admin.directory.customer.readonly','https://www.googleapis.com/auth/admin.directory.user.readonly','https://www.googleapis.com/auth/admin.directory.group.readonly','https://www.googleapis.com/auth/admin.directory.orgunit.readonly'])", [TENANT_A, CONNECTOR_A, TENANT_B, CONNECTOR_B, USERS.ownerA[1], USERS.adminB[1]]);
+    await client.query(
+      `INSERT INTO uptech.sync_jobs (workspace_id,id,service_actor_id,connector_id,job_kind,status,dedupe_key,attempt_count,leased_at,lease_expires_at,lease_owner,lease_fence)
+       VALUES ($1,$2,$3,$4,'DIRECTORY_SYNC','LEASED','tenant-a-directory',1,clock_timestamp(),clock_timestamp()+interval '1 hour',$5,$6),
+              ($7,$8,$9,$10,'DIRECTORY_SYNC','LEASED','tenant-b-directory',1,clock_timestamp(),clock_timestamp()+interval '1 hour',$5,$11)`,
+      [TENANT_A, JOB_A, ACTOR_A, CONNECTOR_A, WORKER_LOGIN, LEASE_A, TENANT_B, JOB_B, ACTOR_B, CONNECTOR_B, LEASE_B],
+    );
     await client.query(
       "INSERT INTO uptech.workspaces (workspace_id,status) VALUES ($1,'ACTIVE')",
       [TENANT_PREP],
