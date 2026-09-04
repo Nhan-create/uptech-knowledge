@@ -37,6 +37,59 @@ export function parseBoundedRecoveryJson(text: unknown): unknown | null {
   }
 }
 
+export async function readBoundedRecoveryJson(response: Pick<Response, "body">): Promise<unknown | null> {
+  if (response.body === null) return null;
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = response.body.getReader();
+  } catch {
+    return null;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  let cancel = false;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      byteLength += chunk.value.byteLength;
+      if (byteLength > MAX_RECOVERY_JSON_CHARS) {
+        cancel = true;
+        return null;
+      }
+      chunks.push(chunk.value);
+    }
+
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const parsed = parseBoundedRecoveryJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    cancel = parsed === null;
+    return parsed;
+  } catch {
+    cancel = true;
+    return null;
+  } finally {
+    if (cancel) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The stream may already be errored or closed.
+      }
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Releasing an already-invalid reader must not escape the fixed failure path.
+    }
+  }
+}
+
 export function resolveRecoveryClipboardText(input: Readonly<{
   template: unknown;
   locale: unknown;

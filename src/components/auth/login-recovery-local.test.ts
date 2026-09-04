@@ -6,6 +6,7 @@ import {
   buildRecoveryContactHref,
   getLoginRecoveryFeedback,
   parseBoundedRecoveryJson,
+  readBoundedRecoveryJson,
   resolveRecoveryClipboardText,
 } from "./login-recovery-local.ts";
 import { RECOVERY_STATES } from "../../server/auth/recovery-actions.ts";
@@ -19,6 +20,47 @@ test("bounded JSON accepts an exact boundary string and rejects invalid, oversiz
   assert.equal(parseBoundedRecoveryJson({ state: "READY" }), null);
   const padding = " ".repeat(MAX_RECOVERY_JSON_CHARS - 3);
   assert.deepEqual(parseBoundedRecoveryJson(`[1]${padding}`), [1]);
+});
+
+test("bounded response JSON accepts normal and exact-bound UTF-8 streams", async () => {
+  const normal = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"state":'));
+      controller.enqueue(new TextEncoder().encode('"READY"}'));
+      controller.close();
+    },
+  }));
+  assert.deepEqual(await readBoundedRecoveryJson(normal), { state: "READY" });
+
+  const exactText = `"${"a".repeat(MAX_RECOVERY_JSON_CHARS - 2)}"`;
+  assert.equal(new TextEncoder().encode(exactText).byteLength, MAX_RECOVERY_JSON_CHARS);
+  assert.equal(await readBoundedRecoveryJson(new Response(exactText)), "a".repeat(MAX_RECOVERY_JSON_CHARS - 2));
+});
+
+test("bounded response JSON cancels a multi-chunk stream as soon as it crosses the byte ceiling", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(MAX_RECOVERY_JSON_CHARS));
+      controller.enqueue(new Uint8Array([1]));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }));
+
+  assert.equal(await readBoundedRecoveryJson(response), null);
+  assert.equal(cancelled, true);
+});
+
+test("bounded response JSON fails closed for a missing or errored stream", async () => {
+  assert.equal(await readBoundedRecoveryJson(new Response(null)), null);
+  const errored = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.error(new Error("stream failed"));
+    },
+  }));
+  assert.equal(await readBoundedRecoveryJson(errored), null);
 });
 
 test("fixed clipboard templates are localized and include only a canonical request UUID", () => {

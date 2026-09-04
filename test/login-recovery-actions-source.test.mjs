@@ -27,7 +27,7 @@ test("the renderer uses reviewed transports and bounded local output without a r
   for (const imported of [
     "resolveLoginRecoveryTransport",
     "parseLoginRecoveryFetchSuccess",
-    "parseBoundedRecoveryJson",
+    "readBoundedRecoveryJson",
     "resolveRecoveryClipboardText",
     "buildRecoveryContactHref",
     "getLoginRecoveryFeedback",
@@ -39,6 +39,7 @@ test("the renderer uses reviewed transports and bounded local output without a r
   assert.match(source, /fetch\(transport\.path,\s*\{[\s\S]*?method: transport\.method,[\s\S]*?credentials: transport\.credentials,[\s\S]*?cache: transport\.cache,[\s\S]*?headers: transport\.headers,[\s\S]*?\}\)/u);
   assert.doesNotMatch(source, /\bbody\s*:/u);
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|\.innerHTML|window\.open/u);
+  assert.doesNotMatch(source, /response\.(?:text|json)\(/u);
   assert.match(source, /window\.location\.assign\(result\.destination\)/u);
 });
 
@@ -53,6 +54,11 @@ test("the renderer pins global pending, browser-back reset, cooldown and selecta
   assert.match(source, /readOnly/u);
   assert.match(source, /contact@uptech\.vn/u);
   assert.match(source, /<GoogleLoginSubmitButton/u);
-  assert.match(readFileSync(googleButtonPath, "utf8"), /data-testid="google-login-submit"/u);
+  const googleButtonSource = readFileSync(googleButtonPath, "utf8");
+  assert.match(googleButtonSource, /data-testid="google-login-submit"/u);
+  assert.match(googleButtonSource, /withTopMargin\s*=\s*true/u);
+  assert.match(googleButtonSource, /withTopMargin\s*\?\s*"mt-6\s"\s*:\s*""/u);
+  assert.match(source, /<GoogleLoginSubmitButton[\s\S]*?withTopMargin=\{false\}/u);
+  assert.match(source, /<div className="mt-6 space-y-3">/u);
   assert.match(source, /type="hidden"/u);
 });

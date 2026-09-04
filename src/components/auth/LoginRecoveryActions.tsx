@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Locale } from "@/lib/preferences";
 import { RECOVERY_ACTION_DESCRIPTORS, type RecoveryActionDescriptor, type RecoveryActionId, type RecoveryState } from "@/server/auth/recovery-actions";
 import { GoogleLoginSubmitButton } from "./GoogleLoginSubmitButton";
-import { buildRecoveryContactHref, getLoginRecoveryFeedback, parseBoundedRecoveryJson, resolveRecoveryClipboardText } from "./login-recovery-local";
+import { buildRecoveryContactHref, getLoginRecoveryFeedback, readBoundedRecoveryJson, resolveRecoveryClipboardText } from "./login-recovery-local";
 import { parseLoginRecoveryFetchSuccess, resolveLoginRecoveryTransport, type LoginRecoveryTransport } from "./login-recovery-transport";
 
 export interface LoginRecoveryActionsProps {
@@ -71,7 +71,7 @@ export function LoginRecoveryActions({ actions, csrfToken, requestId, state, ret
         cache: transport.cache,
         headers: transport.headers,
       });
-      const payload = parseBoundedRecoveryJson(await response.text());
+      const payload = await readBoundedRecoveryJson(response);
       const result = parseLoginRecoveryFetchSuccess({ actionId: action.id, status: response.status, payload });
       if (result.kind === "NAVIGATE") { window.location.assign(result.destination); return; }
       if (result.kind === "ACCESS_REQUEST_RECEIPT") {
@@ -116,7 +116,7 @@ export function LoginRecoveryActions({ actions, csrfToken, requestId, state, ret
             return <form key={action.id} action={transport.action} method="post" onSubmit={(event) => submitNativeForm(event, transport)}>
               {transport.fields.map((field) => <input key={field.name} type="hidden" name={field.name} value={field.value} />)}
               {action.id === "START_NORMAL_LOGIN" || action.id === "START_NORMAL_LOGIN_AFTER_COOLDOWN"
-                ? <GoogleLoginSubmitButton label={action.label} loadingLabel={locale === "vi" ? "Đang chuyển đến Google…" : "Redirecting to Google…"} disabled={disabled} busy={pending} />
+                ? <GoogleLoginSubmitButton label={action.label} loadingLabel={locale === "vi" ? "Đang chuyển đến Google…" : "Redirecting to Google…"} disabled={disabled} busy={pending} withTopMargin={false} />
                 : <button type="submit" disabled={disabled} aria-busy={pending} aria-label={action.label} className={visual}>{action.label}</button>}
             </form>;
           case "FETCH":
