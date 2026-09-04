@@ -455,6 +455,36 @@ BEGIN
       RAISE EXCEPTION 'bootstrap status entrypoint % has wrong signature/definer/search_path/runtime grants', object_oid::regprocedure;
     END IF;
   END LOOP;
+
+  FOREACH object_oid IN ARRAY ARRAY[
+    'uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
+  ] LOOP
+    routine_definition := pg_catalog.pg_get_functiondef(object_oid);
+    IF pg_catalog.strpos(
+        routine_definition,
+        'receipt.initial_status_onboarding_session_id = selected_capability.id'
+      ) <> 0
+      OR pg_catalog.strpos(
+        routine_definition,
+        'receipt.identity_id = selected_capability.identity_id'
+      ) = 0
+      OR pg_catalog.strpos(
+        routine_definition,
+        'receipt.workspace_id = selected_capability.resource_workspace_id'
+      ) = 0
+      OR pg_catalog.strpos(
+        routine_definition,
+        'connector.directory_authorized_by_identity_id = receipt.identity_id'
+      ) = 0
+      OR pg_catalog.strpos(
+        routine_definition,
+        'job.payload ->> ''bootstrap_attempt_id'' = selected_attempt_id::text'
+      ) = 0
+    THEN
+      RAISE EXCEPTION 'bootstrap status entrypoint % lacks replacement-safe receipt/connector/job binding', object_oid::regprocedure;
+    END IF;
+  END LOOP;
 END
 $verify$;
 

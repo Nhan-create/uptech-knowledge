@@ -1204,6 +1204,39 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
   [initialStatusHash, fixture.identityId, workspaceId])).rows[0], {
     status: "REVOKED", active_statuses: 1, sessions: 0,
   });
+  const readStatus = (statusTokenHash: Buffer) => repositoryCall((repository) => repository.readStatus({
+    statusTokenHash, requestId: "97200000-0000-4000-8000-000000000021",
+  }));
+  const retryStatus = (statusTokenHash: Buffer) => repositoryCall((repository) => repository.retrySync({
+    statusTokenHash, requestId: "97200000-0000-4000-8000-000000000022",
+  }));
+  assert.deepEqual(await readStatus(replacementHash), {
+    outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+  });
+  assert.deepEqual(await retryStatus(replacementHash), {
+    outcome: "DIRECTORY_BOOTSTRAP_SYNC_PENDING",
+  });
+  assert.deepEqual(await readStatus(initialStatusHash), { outcome: "DENIED" });
+  assert.deepEqual(await retryStatus(initialStatusHash), { outcome: "DENIED" });
+
+  const wrongIdentityHash = hash32(0xf8);
+  const wrongWorkspaceHash = hash32(0xf9);
+  const wrongFamilyHash = hash32(0xfa);
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.onboarding_sessions(
+    id,identity_id,token_hash,allowed_operations,expires_at,resource_workspace_id
+  ) VALUES
+    ('97200000-0000-4000-8000-000000000030','90000000-0000-0000-0000-000000000003',$1,
+      ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY'],statement_timestamp()+interval '1 hour',$4),
+    ('97200000-0000-4000-8000-000000000031',$5,$2,
+      ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY'],statement_timestamp()+interval '1 hour',
+      '90000000-0000-0000-0000-000000000001'),
+    ('97200000-0000-4000-8000-000000000032',$5,$3,
+      ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes',$4)`,
+  [wrongIdentityHash, wrongWorkspaceHash, wrongFamilyHash, workspaceId, fixture.identityId]));
+  for (const deniedHash of [wrongIdentityHash, wrongWorkspaceHash, wrongFamilyHash]) {
+    assert.deepEqual(await readStatus(deniedHash), { outcome: "DENIED" });
+    assert.deepEqual(await retryStatus(deniedHash), { outcome: "DENIED" });
+  }
   assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
     reservedCompletionHash: completion, claims: claims(0x72),
     newStatusTokenHash: hash32(0xf4),

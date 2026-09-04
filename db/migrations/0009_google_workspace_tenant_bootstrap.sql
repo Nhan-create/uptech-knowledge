@@ -1431,8 +1431,7 @@ BEGIN
    AND connector.status IN ('ACTIVE', 'DEGRADED')
    AND connector.provider_customer_id = workspace.google_customer_id
    AND connector.directory_authorized_by_identity_id = receipt.identity_id
-  WHERE receipt.initial_status_onboarding_session_id = selected_capability.id
-    AND receipt.identity_id = selected_capability.identity_id
+  WHERE receipt.identity_id = selected_capability.identity_id
     AND receipt.workspace_id = selected_capability.resource_workspace_id;
 
   IF selected_attempt_id IS NULL THEN
@@ -1554,8 +1553,7 @@ BEGIN
    AND connector.status IN ('ACTIVE', 'DEGRADED')
    AND connector.provider_customer_id = workspace.google_customer_id
    AND connector.directory_authorized_by_identity_id = receipt.identity_id
-  WHERE receipt.initial_status_onboarding_session_id = selected_capability.id
-    AND receipt.identity_id = selected_capability.identity_id
+  WHERE receipt.identity_id = selected_capability.identity_id
     AND receipt.workspace_id = selected_capability.resource_workspace_id;
 
   IF selected_attempt_id IS NULL THEN
