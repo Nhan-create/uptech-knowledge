@@ -803,20 +803,24 @@ BEGIN
   END IF;
 
   normalized := uptech.normalize_google_workspace_verified_domains_v1(
-    ' Example.COM ', ARRAY[
-      ROW('alias.example.com','ALIAS','example.com')::uptech.google_workspace_verified_domain_v1,
-      ROW(' Example.COM ','PRIMARY',NULL)::uptech.google_workspace_verified_domain_v1,
-      ROW('alias.example.com','ALIAS','example.com')::uptech.google_workspace_verified_domain_v1
+    ' TENANT-A.EXAMPLE ', ARRAY[
+      ROW('unknown.example','ALIAS','tenant-a.example')::uptech.google_workspace_verified_domain_v1,
+      ROW(' TENANT-A.EXAMPLE ','PRIMARY',NULL)::uptech.google_workspace_verified_domain_v1,
+      ROW('tenant-b.example','SECONDARY',NULL)::uptech.google_workspace_verified_domain_v1,
+      ROW('unknown.example','ALIAS','tenant-a.example')::uptech.google_workspace_verified_domain_v1
     ]);
-  IF cardinality(normalized) <> 2 OR (normalized[1]).normalized_domain <> 'alias.example.com'
-     OR (normalized[2]).normalized_domain <> 'example.com' THEN
+  IF cardinality(normalized) <> 3 OR (normalized[1]).normalized_domain <> 'tenant-a.example'
+     OR (normalized[2]).normalized_domain <> 'tenant-b.example'
+     OR (normalized[3]).normalized_domain <> 'unknown.example' THEN
     RAISE EXCEPTION 'verified-domain normalization is not deterministic or deduplicating';
   END IF;
 
   BEGIN
     PERFORM uptech.normalize_google_workspace_verified_domains_v1(
-      'example.com', ARRAY[ROW('alias.example.com','ALIAS','missing.example.com')
-        ::uptech.google_workspace_verified_domain_v1]);
+      'tenant-a.example', ARRAY[
+        ROW('tenant-a.example','PRIMARY',NULL)::uptech.google_workspace_verified_domain_v1,
+        ROW('tenant-b.example','ALIAS','unknown.example')::uptech.google_workspace_verified_domain_v1
+      ]);
     RAISE EXCEPTION 'invalid alias provenance was accepted';
   EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
   END;

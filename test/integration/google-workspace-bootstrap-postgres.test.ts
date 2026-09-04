@@ -12,6 +12,9 @@ import {
 import { createGoogleWorkspaceBootstrapSourceAuthority } from "../../src/server/onboarding/google-workspace/source-authority.ts";
 
 const PREFIX = "uptech_phase1_test";
+const TENANT_A_DOMAIN = "tenant-a.example";
+const TENANT_B_DOMAIN = "tenant-b.example";
+const UNKNOWN_DOMAIN = "unknown.example";
 let pool: Pool;
 
 const CURRENT_DIRECTORY_SCOPES = [
@@ -29,7 +32,7 @@ const bootstrapFixtures = {
     sourceId: "92000000-0000-0000-0000-000000000003",
     sourceByte: 0x21,
     subject: "bootstrap-abort-sub",
-    domain: "abort.example",
+    domain: UNKNOWN_DOMAIN,
   },
   commit: {
     userId: "92000000-0000-0000-0000-000000000011",
@@ -37,7 +40,7 @@ const bootstrapFixtures = {
     sourceId: "92000000-0000-0000-0000-000000000013",
     sourceByte: 0x31,
     subject: "bootstrap-commit-sub",
-    domain: "commit.example",
+    domain: TENANT_A_DOMAIN,
   },
   deny: {
     userId: "92000000-0000-0000-0000-000000000021",
@@ -45,7 +48,7 @@ const bootstrapFixtures = {
     sourceId: "92000000-0000-0000-0000-000000000023",
     sourceByte: 0x41,
     subject: "bootstrap-deny-sub",
-    domain: "deny.example",
+    domain: UNKNOWN_DOMAIN,
   },
 } as const;
 
@@ -107,6 +110,60 @@ function databaseUrl(): string {
   const name = decodeURIComponent(parsed.pathname.slice(1));
   if (!name.startsWith(PREFIX)) throw new Error(`refusing non-disposable database: name must start with ${PREFIX}`);
   return value;
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+async function resetPostMigrationBase(): Promise<void> {
+  await asMigrationOwner(async (client) => {
+    const safety = await client.query<{ role_ok: boolean; database_ok: boolean; loopback_ok: boolean }>(`SELECT
+      current_user='uptech_migration_owner' AS role_ok,
+      current_database() LIKE 'uptech_phase1_test%' AS database_ok,
+      coalesce(inet_server_addr() << inet '127.0.0.0/8' OR inet_server_addr() = inet '::1',false) AS loopback_ok`);
+    assert.deepEqual(safety.rows[0], { role_ok: true, database_ok: true, loopback_ok: true });
+
+    const roots = await client.query<{ relname: string }>(`SELECT c.relname
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='uptech' AND c.relkind IN ('r','p')
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid)
+      ORDER BY c.relname`);
+    assert.ok(roots.rowCount && roots.rowCount > 0);
+    await client.query(`TRUNCATE TABLE ${roots.rows.map(({ relname }) =>
+      `${quoteIdentifier("uptech")}.${quoteIdentifier(relname)}`).join(",")} RESTART IDENTITY CASCADE`);
+
+    await client.query(`
+      INSERT INTO uptech.workspaces(workspace_id,status)
+        VALUES ('90000000-0000-0000-0000-000000000001','ACTIVE');
+      INSERT INTO uptech.users(id) VALUES
+        ('90000000-0000-0000-0000-000000000002'),
+        ('92000000-0000-0000-0000-000000000001'),
+        ('92000000-0000-0000-0000-000000000011'),
+        ('92000000-0000-0000-0000-000000000021');
+      INSERT INTO uptech.identities(
+        id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
+        hosted_domain_claim,claims_observed_at
+      ) VALUES
+        ('90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','GOOGLE','https://accounts.google.com','legacy-sub','owner@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+        ('92000000-0000-0000-0000-000000000002','92000000-0000-0000-0000-000000000001','GOOGLE','https://accounts.google.com','bootstrap-abort-sub','owner@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp()),
+        ('92000000-0000-0000-0000-000000000012','92000000-0000-0000-0000-000000000011','GOOGLE','https://accounts.google.com','bootstrap-commit-sub','owner@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+        ('92000000-0000-0000-0000-000000000022','92000000-0000-0000-0000-000000000021','GOOGLE','https://accounts.google.com','bootstrap-deny-sub','owner@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp());
+      INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at) VALUES
+        ('92000000-0000-0000-0000-000000000003','92000000-0000-0000-0000-000000000002',decode(repeat('21',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
+        ('92000000-0000-0000-0000-000000000013','92000000-0000-0000-0000-000000000012',decode(repeat('31',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
+        ('92000000-0000-0000-0000-000000000023','92000000-0000-0000-0000-000000000022',decode(repeat('41',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes');
+      INSERT INTO uptech.onboarding_sessions(
+        id,identity_id,token_hash,allowed_operations,expires_at,
+        resource_workspace_id,access_request_reason_class
+      ) VALUES (
+        '90000000-0000-0000-0000-000000000005','90000000-0000-0000-0000-000000000003',
+        decode(repeat('09',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
+        statement_timestamp()+interval '20 minutes','90000000-0000-0000-0000-000000000001',
+        'USER_NOT_PROVISIONED'
+      )`);
+  });
 }
 
 async function sql(path: string): Promise<string> {
@@ -269,11 +326,11 @@ before(async () => {
           VALUES ('90000000-0000-0000-0000-000000000001','ACTIVE','legacy-customer');
         INSERT INTO uptech.users(id) VALUES ('90000000-0000-0000-0000-000000000002'),('90000000-0000-0000-0000-000000000012');
         INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
-          VALUES ('90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','GOOGLE','https://accounts.google.com','legacy-sub','owner@legacy.example',true,'legacy.example',statement_timestamp());
+          VALUES ('90000000-0000-0000-0000-000000000003','90000000-0000-0000-0000-000000000002','GOOGLE','https://accounts.google.com','legacy-sub','owner@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp());
         INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,email_verified,hosted_domain_claim,claims_observed_at)
-          VALUES ('90000000-0000-0000-0000-000000000013','90000000-0000-0000-0000-000000000012','GOOGLE','https://accounts.google.com','unmatched-sub','owner@unmatched.example',true,'unmatched.example',statement_timestamp());
+          VALUES ('90000000-0000-0000-0000-000000000013','90000000-0000-0000-0000-000000000012','GOOGLE','https://accounts.google.com','unmatched-sub','owner@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp());
         INSERT INTO uptech.workspace_domain_locators(normalized_domain,workspace_id,status,verified_at)
-          VALUES ('legacy.example','90000000-0000-0000-0000-000000000001','VERIFIED',statement_timestamp());
+          VALUES ('${TENANT_A_DOMAIN}','90000000-0000-0000-0000-000000000001','VERIFIED',statement_timestamp());
         INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
           VALUES ('90000000-0000-0000-0000-000000000004','90000000-0000-0000-0000-000000000003',decode(repeat('09',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes');
         INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at) VALUES
@@ -293,9 +350,9 @@ before(async () => {
       id,user_id,provider,issuer,provider_subject,email_claim,email_verified,
       hosted_domain_claim,claims_observed_at
     ) VALUES
-      ('92000000-0000-0000-0000-000000000002','92000000-0000-0000-0000-000000000001','GOOGLE','https://accounts.google.com','bootstrap-abort-sub','owner@abort.example',true,'abort.example',statement_timestamp()),
-      ('92000000-0000-0000-0000-000000000012','92000000-0000-0000-0000-000000000011','GOOGLE','https://accounts.google.com','bootstrap-commit-sub','owner@commit.example',true,'commit.example',statement_timestamp()),
-      ('92000000-0000-0000-0000-000000000022','92000000-0000-0000-0000-000000000021','GOOGLE','https://accounts.google.com','bootstrap-deny-sub','owner@deny.example',true,'deny.example',statement_timestamp());
+      ('92000000-0000-0000-0000-000000000002','92000000-0000-0000-0000-000000000001','GOOGLE','https://accounts.google.com','bootstrap-abort-sub','owner@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp()),
+      ('92000000-0000-0000-0000-000000000012','92000000-0000-0000-0000-000000000011','GOOGLE','https://accounts.google.com','bootstrap-commit-sub','owner@${TENANT_A_DOMAIN}',true,'${TENANT_A_DOMAIN}',statement_timestamp()),
+      ('92000000-0000-0000-0000-000000000022','92000000-0000-0000-0000-000000000021','GOOGLE','https://accounts.google.com','bootstrap-deny-sub','owner@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp());
     INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at) VALUES
       ('92000000-0000-0000-0000-000000000003','92000000-0000-0000-0000-000000000002',decode(repeat('21',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
       ('92000000-0000-0000-0000-000000000013','92000000-0000-0000-0000-000000000012',decode(repeat('31',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
@@ -331,7 +388,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
       web_pkce_kms_key_version,is_enabled
     ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','web-v2.apps.googleusercontent.com',
       'web-v2.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1',
-      'https://unknown.example/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
+      'https://${UNKNOWN_DOMAIN}/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
       ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
       'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environmentName]);
     return environmentName;
@@ -371,7 +428,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
 
   await reserve("97300000-0000-4000-8000-000000000001", 0xa1, 0xa2);
   const first = await complete(0xa1, 0xa2, 0xa3,
-    "web-v2-unknown-sub", "owner@unknown.example", "unknown.example",
+    "web-v2-unknown-sub", `owner@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
     "97300000-0000-4000-8000-000000000001");
   assert.deepEqual(first.rows[0].outcome, "ONBOARDING");
   assert.deepEqual(first.rows[0].access_state, "UNKNOWN_WORKSPACE");
@@ -381,7 +438,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
   assert.equal(first.rows[0].route, null);
 
   const replay = await complete(0xa1, 0xa2, 0xa4,
-    "web-v2-unknown-sub", "changed@unknown.example", "unknown.example",
+    "web-v2-unknown-sub", `changed@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
     "97300000-0000-4000-8000-000000000001");
   assert.equal(replay.rows[0].outcome, "DENIED");
   assert.deepEqual((await pool.query(`SELECT
@@ -399,15 +456,15 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
 
   await reserve("97300000-0000-4000-8000-000000000003", 0xc1, 0xc2);
   const metadataRefresh = await complete(0xc1, 0xc2, 0xc3,
-    "web-v2-unknown-sub", "renamed@unknown-two.example", "unknown-two.example",
+    "web-v2-unknown-sub", `renamed@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
     "97300000-0000-4000-8000-000000000003");
   assert.equal(metadataRefresh.rows[0].outcome, "ONBOARDING");
   assert.deepEqual((await pool.query(`SELECT count(*)::int AS identities,
     min(email_claim) AS email_claim,min(hosted_domain_claim) AS hosted_domain_claim
     FROM uptech.identities WHERE provider='GOOGLE'
       AND issuer='https://accounts.google.com' AND provider_subject='web-v2-unknown-sub'`)).rows[0], {
-    identities: 1, email_claim: "renamed@unknown-two.example",
-    hosted_domain_claim: "unknown-two.example",
+    identities: 1, email_claim: `renamed@${UNKNOWN_DOMAIN}`,
+    hosted_domain_claim: UNKNOWN_DOMAIN,
   });
   assert.deepEqual((await pool.query(`SELECT
     count(*) FILTER (WHERE o.status='ACTIVE')::int AS active,
@@ -418,7 +475,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
 
   await reserve("97300000-0000-4000-8000-000000000004", 0xd1, 0xd2);
   const requestMismatch = await complete(0xd1, 0xd2, 0xd3,
-    "web-v2-mismatch-sub", "owner@mismatch.example", "mismatch.example",
+    "web-v2-mismatch-sub", `owner@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
     "97300000-0000-4000-8000-000000000099");
   assert.equal(requestMismatch.rows[0].outcome, "DENIED");
   assert.deepEqual((await pool.query(`SELECT
@@ -451,7 +508,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     await oauthBlocker.query(`SELECT id FROM uptech.oauth_transactions
       WHERE id='97300000-0000-4000-8000-000000000005' FOR UPDATE`);
     const blockedCompletion = complete(0xe1, 0xe2, 0xe3,
-      "web-v2-post-lock-time-sub", "owner@post-lock.example", "post-lock.example",
+      "web-v2-post-lock-time-sub", `owner@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
       "97300000-0000-4000-8000-000000000005", new Date(Date.now() + 400));
     await delay(1200);
     await oauthBlocker.query("COMMIT");
@@ -474,7 +531,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
       email_claim,email_verified,hosted_domain_claim,claims_observed_at)
     VALUES ('97300000-0000-4000-8000-000000000011',
       '97300000-0000-4000-8000-000000000010','GOOGLE','https://accounts.google.com',
-      'web-v2-rollback-sub','old@rollback.example',true,'rollback.example',statement_timestamp());
+      'web-v2-rollback-sub','old@${UNKNOWN_DOMAIN}',true,'${UNKNOWN_DOMAIN}',statement_timestamp());
     INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
     VALUES ('97300000-0000-4000-8000-000000000012',
       '97300000-0000-4000-8000-000000000011',decode(repeat('ef',32),'hex'),
@@ -488,7 +545,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     await identityBlocker.query(`SELECT id FROM uptech.identities
       WHERE id='97300000-0000-4000-8000-000000000011' FOR UPDATE`);
     const rollbackCompletion = complete(0xf1, 0xf2, 0xf3,
-      "web-v2-rollback-sub", "new@rollback.example", "rollback-new.example",
+      "web-v2-rollback-sub", `new@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
       "97300000-0000-4000-8000-000000000006");
 
     let completionOwnsOauthLock = false;
@@ -523,7 +580,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     FROM uptech.identities i LEFT JOIN uptech.onboarding_sessions o ON o.identity_id=i.id
     WHERE i.id='97300000-0000-4000-8000-000000000011'
     GROUP BY i.id`)).rows[0], {
-    email_claim: "old@rollback.example", hosted_domain_claim: "rollback.example",
+    email_claim: `old@${UNKNOWN_DOMAIN}`, hosted_domain_claim: UNKNOWN_DOMAIN,
     active: 1, new_capabilities: 0,
   });
   assert.equal((await pool.query(`SELECT count(*)::int AS count FROM uptech.audit_events
@@ -544,7 +601,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     await claimTimeIdentityBlocker.query(`SELECT id FROM uptech.identities
       WHERE id='97300000-0000-4000-8000-000000000011' FOR UPDATE`);
     const claimTimeCompletion = complete(0x61, 0x62, 0x63,
-      "web-v2-rollback-sub", "claim-time@rollback.example", "claim-time.example",
+      "web-v2-rollback-sub", `claim-time@${UNKNOWN_DOMAIN}`, UNKNOWN_DOMAIN,
       "97300000-0000-4000-8000-000000000007", null, claimIssuedAt);
 
     let completionOwnsOauthLock = false;
@@ -581,7 +638,7 @@ test("V2 web completion persists one unknown-domain capability and consumes the 
     FROM uptech.identities i LEFT JOIN uptech.onboarding_sessions o ON o.identity_id=i.id
     WHERE i.id='97300000-0000-4000-8000-000000000011'
     GROUP BY i.id`)).rows[0], {
-    email_claim: "old@rollback.example", hosted_domain_claim: "rollback.example",
+    email_claim: `old@${UNKNOWN_DOMAIN}`, hosted_domain_claim: UNKNOWN_DOMAIN,
     active: 1, new_capabilities: 0, transaction_status: "EXCHANGE_RESERVED",
   });
 });
@@ -909,9 +966,9 @@ test("approved activation and lease routines execute with five scopes and reject
     RESET ROLE`);
   await pool.query("SET ROLE uptech_api_runtime");
   await pool.query("SELECT set_config('app.workspace_id',$1,false),set_config('app.actor_id',$2,false),set_config('app.membership_id',$3,false),set_config('app.session_id',$4,false)", ['90000000-0000-0000-0000-000000000001','90000000-0000-0000-0000-000000000002','90000000-0000-0000-0000-000000000021','90000000-0000-0000-0000-000000000024']);
-  const activated = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://five','legacy-sub','legacy.example',scopes,'90000000-0000-0000-0000-000000000025']);
+  const activated = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://five','legacy-sub',TENANT_A_DOMAIN,scopes,'90000000-0000-0000-0000-000000000025']);
   assert.equal(activated.rows[0]?.outcome, 'ACTIVATED');
-  const denied = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://bad','legacy-sub','legacy.example',[...scopes.slice(0,4),scopes[0]],'90000000-0000-0000-0000-000000000026']);
+  const denied = await pool.query("SELECT outcome FROM uptech.activate_directory_connector_v1($1,$2,$3,$4,$5,$6,$7)", ['90000000-0000-0000-0000-000000000023','legacy-customer','secretref://bad','legacy-sub',TENANT_A_DOMAIN,[...scopes.slice(0,4),scopes[0]],'90000000-0000-0000-0000-000000000026']);
   assert.equal(denied.rows[0]?.outcome, 'DENIED');
   await pool.query("RESET ROLE; SET ROLE uptech_worker_runtime");
   const leased = await pool.query("SELECT connector_id::text FROM uptech.lease_next_directory_job_v1()");
@@ -920,6 +977,7 @@ test("approved activation and lease routines execute with five scopes and reject
 });
 
 test("prepare is idempotent, denies a second live source attempt, creates no authority, and aborts one-way", async () => {
+  await resetPostMigrationBase();
   const fixture = bootstrapFixtures.abort;
   const attemptId = "92000000-0000-0000-0000-000000000004";
   const candidateWorkspaceId = "92000000-0000-0000-0000-000000000005";
@@ -971,6 +1029,7 @@ test("prepare is idempotent, denies a second live source attempt, creates no aut
 });
 
 test("idempotent prepare retries revalidate every current source authority and candidate collision", async () => {
+  await resetPostMigrationBase();
   const scenarios = [
     {
       label: "revoked source",
@@ -1022,7 +1081,7 @@ test("idempotent prepare retries revalidate every current source authority and c
     const statusTokenHash = hash32(sourceByte + 1);
     await seedBootstrapSource({
       userId, identityId, sourceId, sourceByte,
-      subject: `prepare-retry-${index}-sub`, domain: `prepare-retry-${index}.example`,
+      subject: `prepare-retry-${index}-sub`, domain: UNKNOWN_DOMAIN,
     });
     const input = {
       attemptId, sourceTokenHash: hash32(sourceByte), candidateWorkspaceId, statusTokenHash,
@@ -1035,6 +1094,7 @@ test("idempotent prepare retries revalidate every current source authority and c
 });
 
 test("complete atomically creates the existing identity's tenant authority and no login session", async () => {
+  await resetPostMigrationBase();
   const fixture = bootstrapFixtures.commit;
   const attemptId = "92000000-0000-0000-0000-000000000014";
   const candidateWorkspaceId = "92000000-0000-0000-0000-000000000015";
@@ -1055,13 +1115,13 @@ test("complete atomically creates the existing identity's tenant authority and n
     sourceTokenHash,
     statusTokenHash,
     customerId: "customer-commit",
-    customerDomain: " COMMIT.EXAMPLE ",
+    customerDomain: ` ${TENANT_A_DOMAIN.toUpperCase()} `,
     providerSubject: fixture.subject,
-    hostedDomain: " COMMIT.EXAMPLE ",
+    hostedDomain: ` ${TENANT_A_DOMAIN.toUpperCase()} `,
     verifiedDomains: [
-      { normalizedDomain: "alias.commit.example", domainKind: "ALIAS", providerParentDomain: "commit.example" },
-      { normalizedDomain: " COMMIT.EXAMPLE ", domainKind: "PRIMARY", providerParentDomain: null },
-      { normalizedDomain: "secondary.commit.example", domainKind: "SECONDARY", providerParentDomain: null },
+      { normalizedDomain: UNKNOWN_DOMAIN, domainKind: "ALIAS", providerParentDomain: TENANT_A_DOMAIN },
+      { normalizedDomain: ` ${TENANT_A_DOMAIN.toUpperCase()} `, domainKind: "PRIMARY", providerParentDomain: null },
+      { normalizedDomain: TENANT_B_DOMAIN, domainKind: "SECONDARY", providerParentDomain: null },
     ],
     credentialReference: credentialReference as never,
     authorizedScopes: CURRENT_DIRECTORY_SCOPES,
@@ -1114,25 +1174,26 @@ test("complete atomically creates the existing identity's tenant authority and n
     provider_parent_domain::text FROM uptech.workspace_domain_locators
     WHERE workspace_id=$1 ORDER BY normalized_domain`, [candidateWorkspaceId]);
   assert.deepEqual(encodedDomains.rows, [
-    { normalized_domain: "alias.commit.example", domain_kind: "ALIAS", provider_parent_domain: "commit.example" },
-    { normalized_domain: "commit.example", domain_kind: "PRIMARY", provider_parent_domain: null },
-    { normalized_domain: "secondary.commit.example", domain_kind: "SECONDARY", provider_parent_domain: null },
+    { normalized_domain: TENANT_A_DOMAIN, domain_kind: "PRIMARY", provider_parent_domain: null },
+    { normalized_domain: TENANT_B_DOMAIN, domain_kind: "SECONDARY", provider_parent_domain: null },
+    { normalized_domain: UNKNOWN_DOMAIN, domain_kind: "ALIAS", provider_parent_domain: TENANT_A_DOMAIN },
   ]);
 });
 
 test("complete accepts a hosted domain proven as a verified secondary or alias", async () => {
   const cases = [
-    { kind: "SECONDARY" as const, hostedDomain: "secondary.accepted.example", parent: null },
-    { kind: "ALIAS" as const, hostedDomain: "alias.accepted.example", parent: "primary-alias.accepted.example" },
+    { kind: "SECONDARY" as const, hostedDomain: TENANT_B_DOMAIN, parent: null },
+    { kind: "ALIAS" as const, hostedDomain: TENANT_B_DOMAIN, parent: TENANT_A_DOMAIN },
   ];
   for (const [index, domainCase] of cases.entries()) {
+    await resetPostMigrationBase();
     const suffix = index === 0 ? "31" : "41";
     const userId = `96100000-0000-0000-0000-0000000000${suffix}`;
     const identityId = `96100000-0000-0000-0000-0000000000${Number(suffix) + 1}`;
     const sourceId = `96100000-0000-0000-0000-0000000000${Number(suffix) + 2}`;
     const attemptId = `96100000-0000-0000-0000-0000000000${Number(suffix) + 3}`;
     const candidateWorkspaceId = `96100000-0000-0000-0000-0000000000${Number(suffix) + 4}`;
-    const primaryDomain = domainCase.parent ?? "primary-secondary.accepted.example";
+    const primaryDomain = TENANT_A_DOMAIN;
     const sourceByte = 0xb0 + index * 2;
     await seedBootstrapSource({ userId, identityId, sourceId, sourceByte, subject: `accepted-${index}-sub`, domain: domainCase.hostedDomain });
     const repository = (client: PoolClient) => createGoogleWorkspaceBootstrapRepository(client as never);
@@ -1157,10 +1218,11 @@ test("complete accepts a hosted domain proven as a verified secondary or alias",
 });
 
 test("complete denies replay of an already committed attempt even when receipt bindings match", async () => {
+  await resetPostMigrationBase();
   const fixture = {
     userId: "96200000-0000-0000-0000-000000000001", identityId: "96200000-0000-0000-0000-000000000002",
     sourceId: "96200000-0000-0000-0000-000000000003", sourceByte: 0xc1,
-    subject: "committed-replay-sub", domain: "committed-replay.example",
+    subject: "committed-replay-sub", domain: TENANT_A_DOMAIN,
   };
   const attemptId = "96200000-0000-0000-0000-000000000004";
   const candidateWorkspaceId = "96200000-0000-0000-0000-000000000005";
@@ -1183,14 +1245,15 @@ test("complete denies replay of an already committed attempt even when receipt b
   assert.equal((await asApi((client) => repository(client).complete(baseComplete))).outcome, "PROVISIONING");
   assert.deepEqual(await asApi((client) => repository(client).complete({
     ...baseComplete,
-    customerId: "stale-customer", customerDomain: "stale.example",
-    providerSubject: "stale-subject", hostedDomain: "stale.example",
-    verifiedDomains: [{ normalizedDomain: "stale.example", domainKind: "PRIMARY", providerParentDomain: null }],
+    customerId: "stale-customer", customerDomain: TENANT_B_DOMAIN,
+    providerSubject: "stale-subject", hostedDomain: TENANT_B_DOMAIN,
+    verifiedDomains: [{ normalizedDomain: TENANT_B_DOMAIN, domainKind: "PRIMARY", providerParentDomain: null }],
     requestId: "96200000-0000-0000-0000-000000000008",
   })), { outcome: "DENIED" });
 });
 
 test("complete denies mismatched proof without leaving partial tenant authority", async () => {
+  await resetPostMigrationBase();
   const fixture = bootstrapFixtures.deny;
   const attemptId = "92000000-0000-0000-0000-000000000024";
   const candidateWorkspaceId = "92000000-0000-0000-0000-000000000025";
@@ -1236,6 +1299,7 @@ test("complete denies mismatched proof without leaving partial tenant authority"
 });
 
 test("two completions racing for one Google customer and domain commit exactly one workspace", async () => {
+  await resetPostMigrationBase();
   const sources = [
     {
       userId: "93000000-0000-0000-0000-000000000001",
@@ -1243,7 +1307,7 @@ test("two completions racing for one Google customer and domain commit exactly o
       sourceId: "93000000-0000-0000-0000-000000000003",
       sourceByte: 0x51,
       subject: "race-a-sub",
-      domain: "race.example",
+      domain: TENANT_A_DOMAIN,
       attemptId: "93000000-0000-0000-0000-000000000004",
       workspaceId: "93000000-0000-0000-0000-000000000005",
       statusByte: 0x52,
@@ -1254,7 +1318,7 @@ test("two completions racing for one Google customer and domain commit exactly o
       sourceId: "93000000-0000-0000-0000-000000000013",
       sourceByte: 0x61,
       subject: "race-b-sub",
-      domain: "race.example",
+      domain: TENANT_A_DOMAIN,
       attemptId: "93000000-0000-0000-0000-000000000014",
       workspaceId: "93000000-0000-0000-0000-000000000015",
       statusByte: 0x62,
@@ -1277,12 +1341,12 @@ test("two completions racing for one Google customer and domain commit exactly o
       sourceTokenHash: hash32(source.sourceByte),
       statusTokenHash: hash32(source.statusByte),
       customerId: "customer-race",
-      customerDomain: "race.example",
+      customerDomain: TENANT_A_DOMAIN,
       providerSubject: source.subject,
       hostedDomain: source.domain,
       verifiedDomains: [
-        { normalizedDomain: "race.example", domainKind: "PRIMARY", providerParentDomain: null },
-        { normalizedDomain: "alias.race.example", domainKind: "ALIAS", providerParentDomain: "race.example" },
+        { normalizedDomain: TENANT_A_DOMAIN, domainKind: "PRIMARY", providerParentDomain: null },
+        { normalizedDomain: TENANT_B_DOMAIN, domainKind: "ALIAS", providerParentDomain: TENANT_A_DOMAIN },
       ],
       credentialReference: `secretref://google-workspace/race-${index}` as never,
       authorizedScopes: CURRENT_DIRECTORY_SCOPES,
@@ -1292,20 +1356,21 @@ test("two completions racing for one Google customer and domain commit exactly o
   assert.deepEqual(completions.map((result) => result.outcome).sort(), ["DENIED", "PROVISIONING"]);
   const committed = await pool.query(`SELECT
     (SELECT count(*)::int FROM uptech.workspaces WHERE google_customer_id='customer-race') AS workspaces,
-    (SELECT count(*)::int FROM uptech.workspace_domain_locators WHERE normalized_domain='race.example') AS domains,
-    (SELECT count(*)::int FROM uptech.google_workspace_bootstrap_attempts WHERE id = ANY($1::uuid[]) AND state='COMMITTED') AS attempts`,
-    [sources.map((source) => source.attemptId)]);
+    (SELECT count(*)::int FROM uptech.workspace_domain_locators WHERE normalized_domain=$1) AS domains,
+    (SELECT count(*)::int FROM uptech.google_workspace_bootstrap_attempts WHERE id = ANY($2::uuid[]) AND state='COMMITTED') AS attempts`,
+    [TENANT_A_DOMAIN, sources.map((source) => source.attemptId)]);
   assert.deepEqual(committed.rows[0], { workspaces: 1, domains: 1, attempts: 1 });
 });
 
 test("reconcile waits for the completion lock and proves only the matching committed receipt", async () => {
+  await resetPostMigrationBase();
   const source = {
     userId: "94000000-0000-0000-0000-000000000001",
     identityId: "94000000-0000-0000-0000-000000000002",
     sourceId: "94000000-0000-0000-0000-000000000003",
     sourceByte: 0x71,
     subject: "lock-sub",
-    domain: "lock.example",
+    domain: TENANT_A_DOMAIN,
   } as const;
   const attemptId = "94000000-0000-0000-0000-000000000004";
   const workspaceId = "94000000-0000-0000-0000-000000000005";
@@ -1369,13 +1434,14 @@ test("reconcile waits for the completion lock and proves only the matching commi
 });
 
 test("reconcile aborts an expired clean attempt, denies delayed complete, and keeps live state unknown", async () => {
+  await resetPostMigrationBase();
   const expired = {
     userId: "95000000-0000-0000-0000-000000000001",
     identityId: "95000000-0000-0000-0000-000000000002",
     sourceId: "95000000-0000-0000-0000-000000000003",
     sourceByte: 0x81,
     subject: "expired-sub",
-    domain: "expired.example",
+    domain: UNKNOWN_DOMAIN,
   } as const;
   const attemptId = "95000000-0000-0000-0000-000000000004";
   const workspaceId = "95000000-0000-0000-0000-000000000005";
@@ -1425,7 +1491,7 @@ test("reconcile aborts an expired clean attempt, denies delayed complete, and ke
     sourceId: "95000000-0000-0000-0000-000000000013",
     sourceByte: 0x91,
     subject: "live-sub",
-    domain: "live.example",
+    domain: UNKNOWN_DOMAIN,
   } as const;
   const liveAttemptId = "95000000-0000-0000-0000-000000000014";
   await seedBootstrapSource(live);
@@ -1473,13 +1539,14 @@ test("status and retry expose only exact API routines and closed v1 result types
 });
 
 test("status and retry are capability-bound across job, generation, and tenant states", async () => {
+  await resetPostMigrationBase();
   const fixture = {
     userId: "97000000-0000-0000-0000-000000000001",
     identityId: "97000000-0000-0000-0000-000000000002",
     sourceId: "97000000-0000-0000-0000-000000000003",
     sourceByte: 0xe1,
     subject: "bootstrap-status-sub",
-    domain: "status.example",
+    domain: TENANT_A_DOMAIN,
   } as const;
   const attemptId = "97000000-0000-0000-0000-000000000004";
   const workspaceId = "97000000-0000-0000-0000-000000000005";
@@ -1518,7 +1585,7 @@ test("status and retry are capability-bound across job, generation, and tenant s
     sourceId: "97100000-0000-0000-0000-000000000003",
     sourceByte: 0xe3,
     subject: "bootstrap-status-other-sub",
-    domain: "status-other.example",
+    domain: TENANT_B_DOMAIN,
   } as const;
   const otherAttemptId = "97100000-0000-0000-0000-000000000004";
   const otherWorkspaceId = "97100000-0000-0000-0000-000000000005";
@@ -1601,8 +1668,8 @@ test("status and retry are capability-bound across job, generation, and tenant s
     VALUES ($1,'99000000-0000-4000-8000-000000000004',$2,$3,
       '99000000-0000-4000-8000-000000000005','PUBLISHED',true,
       statement_timestamp()-interval '3 hours',statement_timestamp()-interval '2 hours',
-      statement_timestamp()-interval '1 hour','customer-status','status.example')`,
-  [workspaceId, connectorId, jobId]));
+      statement_timestamp()-interval '1 hour','customer-status',$4)`,
+  [workspaceId, connectorId, jobId, TENANT_A_DOMAIN]));
   assert.deepEqual(await read(), { outcome: "DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED" });
   await asMigrationOwner((client) => client.query(`UPDATE uptech.people_sync_generations SET
     completed_at=statement_timestamp(),fresh_until=statement_timestamp()+interval '4 minutes'
@@ -1658,13 +1725,14 @@ test("status and retry are capability-bound across job, generation, and tenant s
 });
 
 test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed and replay-safe", async () => {
+  await resetPostMigrationBase();
   const fixture = {
     userId: "97200000-0000-0000-0000-000000000001",
     identityId: "97200000-0000-0000-0000-000000000002",
     sourceId: "97200000-0000-0000-0000-000000000003",
     sourceByte: 0xf1,
     subject: "bootstrap-reissue-sub",
-    domain: "reissue.example",
+    domain: TENANT_A_DOMAIN,
   } as const;
   const attemptId = "97200000-0000-0000-0000-000000000004";
   const workspaceId = "97200000-0000-0000-0000-000000000005";
@@ -1706,7 +1774,7 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
       web_pkce_kms_key_version,is_enabled
     ) VALUES ('GOOGLE_WEB_LOGIN_V1',$1,'WEB_LOGIN','reissue.apps.googleusercontent.com',
       'reissue.apps.googleusercontent.com','GOOGLE_WEB_LOGIN_V1',
-      'https://reissue.example/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
+      'https://${TENANT_A_DOMAIN}/api/v1/auth/google/callback',ARRAY['openid','email','profile'],
       ARRAY['GOOGLE_WEB_LOGIN_V1'::uptech.google_auth_configuration_key_v1],
       'test-key-v1',true) ON CONFLICT (configuration_key) DO NOTHING`, [environmentName]);
   });
@@ -1857,8 +1925,8 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
   ) VALUES ($1,'97200000-0000-4000-8000-000000000020',$2,$3,
     '97200000-0000-4000-8000-000000000021','PUBLISHED',true,
     statement_timestamp()-interval '3 minutes',statement_timestamp()-interval '2 minutes',
-    statement_timestamp()+interval '1 hour','customer-reissue','reissue.example')`,
-  [workspaceId, bound.rows[0].connector_id, bound.rows[0].job_id]));
+    statement_timestamp()+interval '1 hour','customer-reissue',$4)`,
+  [workspaceId, bound.rows[0].connector_id, bound.rows[0].job_id, TENANT_A_DOMAIN]));
   const readyCompletion = await reserve(4, 0x77, 0x78);
   assert.deepEqual(await repositoryCall((repository) => repository.reissueStatus({
     reservedCompletionHash: readyCompletion, claims: claims(0x78),
@@ -1884,6 +1952,7 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
 });
 
 test("access requests are exact-capability bound, concurrent-deduplicated, and grant no access", async () => {
+  await resetPostMigrationBase();
   const repositoryCall = <T>(operation: (repository: ReturnType<typeof createGoogleWorkspaceBootstrapRepository>) => Promise<T>) =>
     asApi((client) => operation(createGoogleWorkspaceBootstrapRepository(client as never)));
   const submit = () => repositoryCall((repository) => repository.submitAccessRequest({
@@ -1971,8 +2040,8 @@ test("access requests are exact-capability bound, concurrent-deduplicated, and g
     INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,
       email_verified,hosted_domain_claim,claims_observed_at)
       VALUES ('97300000-0000-4000-8000-000000000012','97300000-0000-4000-8000-000000000011',
-      'GOOGLE','https://accounts.google.com','access-b-sub','user@access-b.example',true,
-      'access-b.example',statement_timestamp());
+      'GOOGLE','https://accounts.google.com','access-b-sub','user@${TENANT_B_DOMAIN}',true,
+      '${TENANT_B_DOMAIN}',statement_timestamp());
     INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,
       status,created_at,expires_at,revoked_at,resource_workspace_id,
       access_request_reason_class) VALUES
