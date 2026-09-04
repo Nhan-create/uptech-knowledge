@@ -20,6 +20,10 @@ function credential(): string {
   return issueSessionCredential().raw_token;
 }
 
+function clearName(name: string): string {
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+}
+
 function onboardingContext(operations: readonly string[], contextExpiresAt = FUTURE) {
   return { kind: "onboarding" as const, identityId: "must-not-return", actorId: "must-not-return", allowedOperations: operations, contextExpiresAt };
 }
@@ -122,6 +126,35 @@ test("ambiguous or malformed cookies clear without invoking an authenticator", a
     assert.equal(result.activeKind, null, cookie);
     assert.equal(result.onboardingAuthority, null, cookie);
     assert.equal(result.staleCookieHeaders.length, 1, cookie);
+    assert.equal(calls, 0, cookie);
+  }
+});
+
+test("malformed authority-name occurrences are counted before authentication", async () => {
+  for (const [cookie, expectedClears] of [
+    [`${WEB_SESSION_COOKIE_NAME}; ${WEB_SESSION_COOKIE_NAME}=${credential()}`, [WEB_SESSION_COOKIE_NAME]],
+    [`${ONBOARDING_COOKIE_NAME} = ${credential()}; ${ONBOARDING_COOKIE_NAME}=${credential()}`, [ONBOARDING_COOKIE_NAME]],
+    [`${WEB_SESSION_COOKIE_NAME}; ${ONBOARDING_COOKIE_NAME}=${credential()}`, [WEB_SESSION_COOKIE_NAME, ONBOARDING_COOKIE_NAME]],
+    [`${WEB_SESSION_COOKIE_NAME} = ${credential()}; ${ONBOARDING_COOKIE_NAME}`, [WEB_SESSION_COOKIE_NAME, ONBOARDING_COOKIE_NAME]],
+  ] as const) {
+    let calls = 0;
+    const result = await inspectBrowserAuthority(
+      new Headers({ cookie }),
+      {} as never,
+      options(async () => {
+        calls += 1;
+        return null;
+      }, async () => {
+        calls += 1;
+        return {};
+      }),
+    );
+    assert.deepEqual(
+      result.staleCookieHeaders,
+      expectedClears.map(clearName),
+      cookie,
+    );
+    assert.equal(result.active, false, cookie);
     assert.equal(calls, 0, cookie);
   }
 });

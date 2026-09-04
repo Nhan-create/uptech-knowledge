@@ -25,15 +25,18 @@ export interface BrowserAuthorityInspection {
   readonly staleCookieHeaders: readonly string[];
 }
 
-function cookieValues(headers: Headers, name: string): string[] {
+function cookieValues(headers: Headers, name: string): (string | null)[] {
   const cookieHeader = headers.get("cookie");
   if (cookieHeader === null) return [];
-  const values: string[] = [];
+  const values: (string | null)[] = [];
   for (const part of cookieHeader.split(";")) {
     const trimmed = part.trim();
-    const separator = trimmed.indexOf("=");
-    if (separator >= 0 && trimmed.slice(0, separator) === name) {
-      values.push(trimmed.slice(separator + 1));
+    if (!trimmed.startsWith(name)) continue;
+    const remainder = trimmed.slice(name.length);
+    if (remainder.startsWith("=")) {
+      values.push(remainder.slice(1));
+    } else if (remainder.length === 0 || /^\s/u.test(remainder)) {
+      values.push(null);
     }
   }
   return values;
@@ -115,14 +118,15 @@ export async function inspectBrowserAuthority(
   ] as const) {
     const values = name === WEB_SESSION_COOKIE_NAME ? webValues : onboardingValues;
     if (values.length === 0) continue;
-    if (values.length !== 1 || values[0].length === 0) {
+    const value = values[0];
+    if (values.length !== 1 || value === undefined || value === null || value.length === 0) {
       staleCookieHeaders.push(clearingCookie(name));
       continue;
     }
 
     let digest: Uint8Array;
     try {
-      digest = Buffer.from(hashCredential(values[0]), "hex");
+      digest = Buffer.from(hashCredential(value), "hex");
     } catch {
       staleCookieHeaders.push(clearingCookie(name));
       continue;
@@ -131,7 +135,7 @@ export async function inspectBrowserAuthority(
     if (expectedKind === "session") {
       try {
         await authenticateWeb(
-          new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${values[0]}` }),
+          new Headers({ cookie: `${WEB_SESSION_COOKIE_NAME}=${value}` }),
           options.sessionPepper,
           pool,
         );
