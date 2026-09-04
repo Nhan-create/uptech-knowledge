@@ -3422,3 +3422,55 @@ test("Mobile denial helper cannot settle a reserved transaction under a differen
     (SELECT count(*)::int FROM uptech.platform_audit_events WHERE request_id=$2) AS wrong_audits
     FROM uptech.mobile_google_transactions WHERE id=$1`,[tx,wrong])).rows[0],{status:"EXCHANGE_RESERVED",handoffs:0,wrong_audits:0});
 });
+
+test("Mobile handoff TTL starts only after credential-lock contention", async () => {
+  const environment=await ensureActiveGoogleEnvironment();
+  const digest=(s:string)=>createHash("sha256").update(`handoff-clock:${s}`).digest();
+  const cases=[
+    {kind:"NORMAL",tx:"98a00000-0000-4000-8000-000000000001",subject:"mobile-v2-member-sub"},
+    {kind:"DENIED",tx:"98a00000-0000-4000-8000-000000000002",subject:null},
+  ] as const;
+  for (const [index,fixture] of cases.entries()) {
+    const handle=digest(`handle:${index}`),nonce=digest(`nonce:${index}`),handoff=digest(`handoff:${index}`);
+    await asMigrationOwner((client)=>client.query(`INSERT INTO uptech.mobile_google_transactions(id,environment_name,platform,
+      configuration_key,state_hash,nonce_hash,installation_binding_hash,app_exchange_challenge,pkce_envelope,pkce_kms_key_version,
+      pkce_associated_data,status,completion_handle_hash,request_id,created_at,expires_at,reserved_at,completion_expires_at)
+      VALUES ($1,$2,'ANDROID','GOOGLE_MOBILE_ANDROID_V1',$3,$4,$5,$6,ROW(1,'AES-256-GCM',$7,$8,$9)::uptech.google_web_pkce_envelope_v1,
+      'mobile-v2-kms',convert_to('clock','UTF8'),'EXCHANGE_RESERVED',$10,$1,statement_timestamp()-interval '1 minute',
+      statement_timestamp()+interval '4 minutes',statement_timestamp(),statement_timestamp()+interval '2 minutes')`,
+    [fixture.tx,environment,digest(`state:${index}`),nonce,digest(`install:${index}`),digest(`challenge:${index}`),
+      Buffer.alloc(12,0xa1+index),Buffer.alloc(48,0xb1+index),Buffer.alloc(16,0xc1+index),handle]));
+    const blocker=await pool.connect(),runner=await pool.connect();
+    let releaseAt:Date;
+    try {
+      await blocker.query(`SELECT pg_advisory_lock(pg_catalog.hashtextextended(
+        'UPTECH_CREDENTIAL_V1'||pg_catalog.encode($1::bytea,'hex'),0))`,[handoff]);
+      await runner.query("BEGIN"); await runner.query("SET LOCAL statement_timeout='5s'; SET LOCAL ROLE uptech_api_runtime");
+      const pid=(await runner.query<{pid:number}>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      const pending=fixture.kind==="NORMAL"
+        ? runner.query(`SELECT outcome::text FROM uptech.complete_mobile_google_callback_directory_v2($1,
+            ROW('accounts.google.com',$2,$3,true,'mapping-a.example',statement_timestamp()-interval '5 seconds',
+              statement_timestamp()+interval '1 hour','GOOGLE_WEB_LOGIN_V1',NULL,$4)::uptech.google_verified_claims_assertion_v1,$5,$6)`,
+          [handle,fixture.subject,`${fixture.subject}@mapping-a.example`,nonce,handoff,fixture.tx])
+        : runner.query(`SELECT outcome::text FROM uptech.complete_mobile_google_denial_v1($1,$2,'IDENTITY_INELIGIBLE','USER_NOT_PROVISIONED',$3)`,
+          [handle,handoff,fixture.tx]);
+      for(let attempt=0;attempt<100;attempt+=1){
+        const activity=(await pool.query(`SELECT wait_event_type,wait_event FROM pg_stat_activity WHERE pid=$1`,[pid])).rows[0];
+        if(activity?.wait_event_type==="Lock"&&activity.wait_event==="advisory") break;
+        if(attempt===99) assert.fail(`${fixture.kind} did not reach credential lock`); await delay(10);
+      }
+      await delay(40);
+      releaseAt=(await blocker.query<{released_at:Date}>(`SELECT clock_timestamp() AS released_at,
+        pg_advisory_unlock(pg_catalog.hashtextextended('UPTECH_CREDENTIAL_V1'||pg_catalog.encode($1::bytea,'hex'),0))`,[handoff])).rows[0].released_at;
+      const result=await pending; await runner.query("COMMIT");
+      assert.equal(result.rows[0].outcome,fixture.kind);
+    } finally {
+      await runner.query("ROLLBACK").catch(()=>undefined); await blocker.query("SELECT pg_advisory_unlock_all()").catch(()=>undefined);
+      runner.release(); blocker.release();
+    }
+    const persisted=(await pool.query(`SELECT created_at,extract(epoch FROM expires_at-created_at)::int AS lifetime_seconds,
+      extract(epoch FROM expires_at-clock_timestamp()) AS remaining_seconds FROM uptech.mobile_handoffs WHERE transaction_id=$1`,[fixture.tx])).rows[0];
+    assert.ok(persisted.created_at>=releaseAt!,`${fixture.kind} handoff was timestamped before lock release`);
+    assert.equal(persisted.lifetime_seconds,60); assert.ok(Number(persisted.remaining_seconds)>59);
+  }
+});

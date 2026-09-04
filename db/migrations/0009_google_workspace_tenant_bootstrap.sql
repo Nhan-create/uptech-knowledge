@@ -3745,6 +3745,7 @@ BEGIN
     OR EXISTS(SELECT 1 FROM uptech.session_tokens
       WHERE token_hash=p_handoff_hash OR csrf_token_hash=p_handoff_hash)
     OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_handoff_hash);
+  observed_at:=pg_catalog.clock_timestamp();
 
   IF credential_collision THEN
     UPDATE uptech.mobile_google_transactions SET status='REJECTED',rejected_at=observed_at
@@ -4071,6 +4072,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM uptech.onboarding_sessions WHERE token_hash=p_handoff_hash) THEN
       RAISE EXCEPTION USING ERRCODE='PGA01',MESSAGE='credential collision';
     END IF;
+    observed_at:=pg_catalog.clock_timestamp();
     INSERT INTO uptech.mobile_handoffs(id,transaction_id,handoff_hash,platform,
       installation_binding_hash,app_exchange_challenge,identity_id,user_id,workspace_id,membership_id,
       user_security_version,identity_security_version,workspace_security_version,membership_authz_version,
