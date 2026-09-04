@@ -155,7 +155,8 @@ REVOKE ALL ON FUNCTION uptech.onboarding_operations_are_unique_v1(text[])
   FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
 
 ALTER TABLE uptech.onboarding_sessions
-  ADD COLUMN resource_workspace_id uuid;
+  ADD COLUMN resource_workspace_id uuid,
+  ADD COLUMN access_request_reason_class text COLLATE "C";
 
 ALTER TABLE uptech.onboarding_sessions
   ADD CONSTRAINT onboarding_sessions_resource_workspace_fk
@@ -197,11 +198,12 @@ WHERE capability.identity_id = identity_row.id
   AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
   AND capability.resource_workspace_id IS NULL;
 
--- An access-only credential whose tenant cannot be reconstructed is unusable;
--- remove it rather than inventing or broadening tenant authority.
+-- Legacy access credentials have no persisted server reason provenance. Even
+-- when their tenant can be reconstructed, remove them rather than guessing a
+-- reason and accidentally merging distinct request families.
 DELETE FROM uptech.onboarding_sessions
 WHERE allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
-  AND resource_workspace_id IS NULL;
+  AND access_request_reason_class IS NULL;
 
 ALTER TABLE uptech.onboarding_sessions
   DROP CONSTRAINT onboarding_sessions_operations_check,
@@ -254,12 +256,36 @@ ALTER TABLE uptech.onboarding_sessions
         AND expires_at <= created_at + interval '30 minutes'
       )
     )
+  ) NOT VALID,
+  ADD CONSTRAINT onboarding_sessions_access_reason_check CHECK (
+    (
+      allowed_operations <@ ARRAY[
+        'ACCESS_REQUEST_READ',
+        'ACCESS_REQUEST_SUBMIT'
+      ]::text[]
+      AND access_request_reason_class IS NOT NULL
+      AND access_request_reason_class IN (
+        'ORGANIZATION_ALREADY_REGISTERED',
+        'USER_NOT_PROVISIONED',
+        'ACCESS_MAPPING_CONFLICT',
+        'DIRECTORY_STALE'
+      )
+    )
+    OR (
+      NOT (allowed_operations <@ ARRAY[
+        'ACCESS_REQUEST_READ',
+        'ACCESS_REQUEST_SUBMIT'
+      ]::text[])
+      AND access_request_reason_class IS NULL
+    )
   ) NOT VALID;
 
 ALTER TABLE uptech.onboarding_sessions
   VALIDATE CONSTRAINT onboarding_sessions_operations_check;
 ALTER TABLE uptech.onboarding_sessions
   VALIDATE CONSTRAINT onboarding_sessions_expiry_check;
+ALTER TABLE uptech.onboarding_sessions
+  VALIDATE CONSTRAINT onboarding_sessions_access_reason_check;
 
 ALTER TABLE uptech.workspace_domain_locators
   ADD COLUMN google_customer_id text COLLATE "C",
@@ -1363,6 +1389,79 @@ GRANT EXECUTE ON FUNCTION uptech.abort_google_workspace_bootstrap_v1(
   uuid, uptech.google_auth_hash32_v1, uuid
 ) TO uptech_api_runtime;
 
+-- Internal, fixed-shape append used only by the seven capability-bound Task 6
+-- routines. The request/action advisory lock makes a retried request idempotent
+-- without storing credential material in either audit sink.
+CREATE FUNCTION uptech.append_task6_audit_events_v1(
+  p_workspace_id uuid,
+  p_identity_id uuid,
+  p_action text,
+  p_target_type text,
+  p_target_id uuid,
+  p_outcome text,
+  p_request_id uuid,
+  p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+BEGIN
+  IF p_request_id IS NULL
+    OR p_action NOT IN (
+      'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_REQUESTED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT',
+      'GOOGLE_WORKSPACE_BOOTSTRAP_FINISHED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_REISSUED',
+      'ONBOARDING_CAPABILITY_REVOKED',
+      'WORKSPACE_ACCESS_REQUEST_SUBMITTED',
+      'WORKSPACE_ACCESS_REQUEST_DEDUPLICATED',
+      'WORKSPACE_ACCESS_REQUEST_READ'
+    )
+    OR p_outcome NOT IN ('SUCCEEDED','DENIED','FAILED')
+    OR pg_catalog.jsonb_typeof(p_metadata) <> 'object'
+    OR (p_metadata - ARRAY['result','reason_class']::text[]) <> '{}'::jsonb
+  THEN
+    RAISE EXCEPTION 'invalid Task 6 audit event' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'task6-audit:' || p_action || ':' || p_request_id::text, 0));
+
+  IF p_workspace_id IS NOT NULL THEN
+    INSERT INTO uptech.audit_events(
+      workspace_id,id,actor_kind,action,target_type,target_id,outcome,
+      request_id,metadata,occurred_at
+    ) SELECT p_workspace_id,pg_catalog.gen_random_uuid(),'SYSTEM',p_action,
+      p_target_type,p_target_id,p_outcome,p_request_id,p_metadata,
+      pg_catalog.clock_timestamp()
+    WHERE NOT EXISTS (
+      SELECT 1 FROM uptech.audit_events AS existing
+      WHERE existing.workspace_id = p_workspace_id
+        AND existing.request_id = p_request_id
+        AND existing.action = p_action
+    );
+  ELSE
+    INSERT INTO uptech.platform_audit_events(
+      id,identity_id,action,target_type,outcome,request_id,metadata,occurred_at
+    ) SELECT pg_catalog.gen_random_uuid(),p_identity_id,p_action,p_target_type,
+      p_outcome,p_request_id,p_metadata,pg_catalog.clock_timestamp()
+    WHERE NOT EXISTS (
+      SELECT 1 FROM uptech.platform_audit_events AS existing
+      WHERE existing.request_id = p_request_id
+        AND existing.action = p_action
+    );
+  END IF;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.append_task6_audit_events_v1(
+  uuid,uuid,text,text,uuid,text,uuid,jsonb
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
 CREATE FUNCTION uptech.read_google_workspace_bootstrap_status_v1(
   p_status_token_hash uptech.google_auth_hash32_v1,
   p_request_id uuid
@@ -1399,6 +1498,10 @@ BEGIN
       'DIRECTORY_BOOTSTRAP_SYNC_RETRY'
     ]::text[]
   THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      NULL,selected_capability.identity_id,'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP',NULL,'DENIED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DENIED'));
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
@@ -1406,10 +1509,18 @@ BEGIN
     OR (selected_capability.status = 'ACTIVE'
       AND selected_capability.expires_at <= observed_at)
   THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      NULL,selected_capability.identity_id,'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP',NULL,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','ONBOARDING_EXPIRED'));
     RETURN ROW('ONBOARDING_EXPIRED')::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
   IF selected_capability.status <> 'ACTIVE' THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      NULL,selected_capability.identity_id,'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP',NULL,'DENIED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DENIED'));
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
@@ -1435,6 +1546,10 @@ BEGIN
     AND receipt.workspace_id = selected_capability.resource_workspace_id;
 
   IF selected_attempt_id IS NULL THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      NULL,selected_capability.identity_id,'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+      'GOOGLE_WORKSPACE_BOOTSTRAP',NULL,'DENIED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DENIED'));
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
@@ -1460,6 +1575,11 @@ BEGIN
       AND generation.completed_at IS NOT NULL
       AND generation.fresh_until > observed_at
   ) THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_workspace_id,selected_capability.identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED','GOOGLE_WORKSPACE_BOOTSTRAP',
+      selected_attempt_id,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','READY'));
     RETURN ROW('READY')::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
@@ -1469,6 +1589,11 @@ BEGIN
     OR (selected_job.status = 'LEASED'
       AND selected_job.lease_expires_at > observed_at)
   ) THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_workspace_id,selected_capability.identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED','GOOGLE_WORKSPACE_BOOTSTRAP',
+      selected_attempt_id,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DIRECTORY_BOOTSTRAP_SYNC_PENDING'));
     RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_PENDING')
       ::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
@@ -1478,10 +1603,20 @@ BEGIN
     AND selected_job.lease_expires_at <= observed_at
     AND selected_job.attempt_count < selected_job.max_attempts
   THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_workspace_id,selected_capability.identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED','GOOGLE_WORKSPACE_BOOTSTRAP',
+      selected_attempt_id,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE'));
     RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE')
       ::uptech.google_workspace_bootstrap_status_result_v1;
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_workspace_id,selected_capability.identity_id,
+    'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED','GOOGLE_WORKSPACE_BOOTSTRAP',
+    selected_attempt_id,'SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object('result','DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED'));
   RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED')
     ::uptech.google_workspace_bootstrap_status_result_v1;
 END
@@ -1560,6 +1695,11 @@ BEGIN
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_retry_result_v1;
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_workspace_id,selected_capability.identity_id,
+    'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_REQUESTED','GOOGLE_WORKSPACE_BOOTSTRAP',
+    selected_attempt_id,'SUCCEEDED',p_request_id,'{}'::jsonb);
+
   SELECT job.* INTO selected_job
   FROM uptech.sync_jobs AS job
   WHERE job.workspace_id = selected_workspace_id
@@ -1582,6 +1722,11 @@ BEGIN
       AND generation.completed_at IS NOT NULL
       AND generation.fresh_until > observed_at
   ) THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_workspace_id,selected_capability.identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT','GOOGLE_WORKSPACE_BOOTSTRAP',
+      selected_attempt_id,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','READY'));
     RETURN ROW('READY')::uptech.google_workspace_bootstrap_retry_result_v1;
   END IF;
 
@@ -1591,6 +1736,11 @@ BEGIN
     OR (selected_job.status = 'LEASED'
       AND selected_job.lease_expires_at > observed_at)
   ) THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_workspace_id,selected_capability.identity_id,
+      'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT','GOOGLE_WORKSPACE_BOOTSTRAP',
+      selected_attempt_id,'SUCCEEDED',p_request_id,
+      pg_catalog.jsonb_build_object('result','DIRECTORY_BOOTSTRAP_SYNC_PENDING'));
     RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_PENDING')
       ::uptech.google_workspace_bootstrap_retry_result_v1;
   END IF;
@@ -1609,10 +1759,20 @@ BEGIN
       AND status = 'LEASED' AND lease_fence = selected_job.lease_fence
       AND lease_expires_at <= observed_at AND attempt_count < max_attempts;
     IF FOUND THEN
+      PERFORM uptech.append_task6_audit_events_v1(
+        selected_workspace_id,selected_capability.identity_id,
+        'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT','GOOGLE_WORKSPACE_BOOTSTRAP',
+        selected_attempt_id,'SUCCEEDED',p_request_id,
+        pg_catalog.jsonb_build_object('result','REQUEUED'));
       RETURN ROW('REQUEUED')::uptech.google_workspace_bootstrap_retry_result_v1;
     END IF;
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_workspace_id,selected_capability.identity_id,
+    'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT','GOOGLE_WORKSPACE_BOOTSTRAP',
+    selected_attempt_id,'SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object('result','DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED'));
   RETURN ROW('DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED')
     ::uptech.google_workspace_bootstrap_retry_result_v1;
 END
@@ -1727,6 +1887,11 @@ BEGIN
     RETURN ROW('DENIED')::uptech.google_workspace_bootstrap_finish_result_v1;
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_workspace_id,selected_capability.identity_id,
+    'GOOGLE_WORKSPACE_BOOTSTRAP_FINISHED','GOOGLE_WORKSPACE_BOOTSTRAP',
+    selected_attempt_id,'SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object('result','FINISHED'));
   RETURN ROW('FINISHED')::uptech.google_workspace_bootstrap_finish_result_v1;
 END
 $function$;
@@ -1949,6 +2114,11 @@ BEGIN
       ERRCODE = 'PGA01', MESSAGE = 'google login reservation expired';
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_workspace_id,selected_identity_id,
+    'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_REISSUED','GOOGLE_WORKSPACE_BOOTSTRAP',
+    selected_attempt_id,'SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object('result','REISSUED'));
   RETURN ROW('REISSUED', new_status_expires_at)
     ::uptech.google_workspace_bootstrap_reissue_result_v1;
 EXCEPTION
@@ -1988,6 +2158,10 @@ BEGIN
     SET status = 'REVOKED', revoked_at = observed_at
     WHERE id = selected_capability.id;
   END IF;
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_capability.resource_workspace_id,selected_capability.identity_id,
+    'ONBOARDING_CAPABILITY_REVOKED','ONBOARDING_CAPABILITY',NULL,
+    'SUCCEEDED',p_request_id,pg_catalog.jsonb_build_object('result','REVOKED'));
   RETURN ROW('REVOKED')::uptech.onboarding_capability_revoke_result_v1;
 END
 $function$;
@@ -2112,7 +2286,7 @@ DECLARE
   observed_at timestamptz := pg_catalog.clock_timestamp();
   selected_capability uptech.onboarding_sessions%ROWTYPE;
   selected_request uptech.workspace_access_requests%ROWTYPE;
-  fixed_reason_class constant text := 'USER_NOT_PROVISIONED';
+  request_was_inserted boolean := false;
 BEGIN
   IF p_capability_hash IS NULL OR p_request_id IS NULL THEN
     RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_submit_result_v1;
@@ -2129,6 +2303,10 @@ BEGIN
     AND pg_catalog.cardinality(capability.allowed_operations) = 2
     AND capability.allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
     AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND capability.access_request_reason_class IN (
+      'ORGANIZATION_ALREADY_REGISTERED','USER_NOT_PROVISIONED',
+      'ACCESS_MAPPING_CONFLICT','DIRECTORY_STALE'
+    )
     AND identity_row.status = 'ACTIVE'
     AND user_row.status = 'ACTIVE'
   FOR UPDATE OF capability;
@@ -2139,26 +2317,39 @@ BEGIN
 
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'workspace-access-request:' || selected_capability.resource_workspace_id::text || ':' ||
-    selected_capability.identity_id::text || ':' || fixed_reason_class, 0));
+    selected_capability.identity_id::text || ':' ||
+    selected_capability.access_request_reason_class, 0));
 
   INSERT INTO uptech.workspace_access_requests(
     workspace_id,id,identity_id,reason_class,status
   ) VALUES (
     selected_capability.resource_workspace_id,pg_catalog.gen_random_uuid(),
-    selected_capability.identity_id,fixed_reason_class,'PENDING'
+    selected_capability.identity_id,selected_capability.access_request_reason_class,'PENDING'
   ) ON CONFLICT (workspace_id,identity_id,reason_class) WHERE status = 'PENDING'
     DO NOTHING
   RETURNING * INTO selected_request;
+  request_was_inserted := FOUND;
 
   IF NOT FOUND THEN
     SELECT request_row.* INTO STRICT selected_request
     FROM uptech.workspace_access_requests AS request_row
     WHERE request_row.workspace_id = selected_capability.resource_workspace_id
       AND request_row.identity_id = selected_capability.identity_id
-      AND request_row.reason_class = fixed_reason_class
+      AND request_row.reason_class = selected_capability.access_request_reason_class
       AND request_row.status = 'PENDING';
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_capability.resource_workspace_id,selected_capability.identity_id,
+    CASE WHEN request_was_inserted
+      THEN 'WORKSPACE_ACCESS_REQUEST_SUBMITTED'
+      ELSE 'WORKSPACE_ACCESS_REQUEST_DEDUPLICATED'
+    END,
+    'WORKSPACE_ACCESS_REQUEST',selected_request.id,'SUCCEEDED',p_request_id,
+    pg_catalog.jsonb_build_object(
+      'result','PENDING',
+      'reason_class',selected_capability.access_request_reason_class
+    ));
   RETURN ROW('PENDING',selected_request.id,selected_request.status)
     ::uptech.workspace_access_request_submit_result_v1;
 END
@@ -2178,7 +2369,6 @@ DECLARE
   observed_at timestamptz := pg_catalog.clock_timestamp();
   selected_capability uptech.onboarding_sessions%ROWTYPE;
   selected_request uptech.workspace_access_requests%ROWTYPE;
-  fixed_reason_class constant text := 'USER_NOT_PROVISIONED';
 BEGIN
   IF p_capability_hash IS NULL OR p_request_id IS NULL THEN
     RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_read_result_v1;
@@ -2195,6 +2385,10 @@ BEGIN
     AND pg_catalog.cardinality(capability.allowed_operations) = 2
     AND capability.allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
     AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND capability.access_request_reason_class IN (
+      'ORGANIZATION_ALREADY_REGISTERED','USER_NOT_PROVISIONED',
+      'ACCESS_MAPPING_CONFLICT','DIRECTORY_STALE'
+    )
     AND identity_row.status = 'ACTIVE'
     AND user_row.status = 'ACTIVE';
 
@@ -2206,14 +2400,28 @@ BEGIN
   FROM uptech.workspace_access_requests AS request_row
   WHERE request_row.workspace_id = selected_capability.resource_workspace_id
     AND request_row.identity_id = selected_capability.identity_id
-    AND request_row.reason_class = fixed_reason_class
+    AND request_row.reason_class = selected_capability.access_request_reason_class
   ORDER BY (request_row.status = 'PENDING') DESC, request_row.created_at DESC, request_row.id DESC
   LIMIT 1;
 
   IF NOT FOUND THEN
+    PERFORM uptech.append_task6_audit_events_v1(
+      selected_capability.resource_workspace_id,selected_capability.identity_id,
+      'WORKSPACE_ACCESS_REQUEST_READ','WORKSPACE_ACCESS_REQUEST',NULL,
+      'DENIED',p_request_id,pg_catalog.jsonb_build_object(
+        'result','DENIED',
+        'reason_class',selected_capability.access_request_reason_class
+      ));
     RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_read_result_v1;
   END IF;
 
+  PERFORM uptech.append_task6_audit_events_v1(
+    selected_capability.resource_workspace_id,selected_capability.identity_id,
+    'WORKSPACE_ACCESS_REQUEST_READ','WORKSPACE_ACCESS_REQUEST',selected_request.id,
+    'SUCCEEDED',p_request_id,pg_catalog.jsonb_build_object(
+      'result',selected_request.status::text,
+      'reason_class',selected_capability.access_request_reason_class
+    ));
   RETURN ROW('FOUND',selected_request.id,selected_request.status)
     ::uptech.workspace_access_request_read_result_v1;
 END

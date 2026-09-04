@@ -117,6 +117,7 @@ BEGIN
   SELECT count(*) INTO missing_count
   FROM (VALUES
     ('onboarding_sessions','resource_workspace_id'),
+    ('onboarding_sessions','access_request_reason_class'),
     ('workspace_domain_locators','google_customer_id'),
     ('workspace_domain_locators','domain_kind'),
     ('workspace_domain_locators','provider_parent_domain'),
@@ -148,6 +149,7 @@ BEGIN
     ('onboarding_sessions_resource_workspace_fk','f'),
     ('onboarding_sessions_operations_check','c'),
     ('onboarding_sessions_expiry_check','c'),
+    ('onboarding_sessions_access_reason_check','c'),
     ('workspace_domain_locators_customer_shape_check','c'),
     ('workspace_domain_locators_workspace_customer_fk','f'),
     ('workspace_domain_locators_workspace_customer_domain_unique','u'),
@@ -485,6 +487,44 @@ BEGIN
       RAISE EXCEPTION 'bootstrap status entrypoint % lacks replacement-safe receipt/connector/job binding', object_oid::regprocedure;
     END IF;
   END LOOP;
+
+  FOREACH object_oid IN ARRAY ARRAY[
+    'uptech.read_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.retry_google_workspace_bootstrap_sync_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.finish_google_workspace_bootstrap_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.reissue_google_workspace_bootstrap_status_v1(uptech.google_auth_hash32_v1,uptech.google_verified_claims_assertion_v1,uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.revoke_onboarding_capability_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.submit_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid,
+    'uptech.read_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure::oid
+  ] LOOP
+    routine_definition := pg_catalog.pg_get_functiondef(object_oid);
+    IF pg_catalog.strpos(routine_definition, 'p_request_id') = 0
+      OR pg_catalog.strpos(routine_definition, 'audit_events') = 0
+    THEN
+      RAISE EXCEPTION 'Task 6 request-correlated routine % lacks an audit append', object_oid::regprocedure;
+    END IF;
+  END LOOP;
+
+  routine_definition := pg_catalog.pg_get_functiondef(
+    'uptech.submit_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure
+  );
+  IF pg_catalog.strpos(routine_definition, 'selected_capability.access_request_reason_class') = 0
+    OR pg_catalog.strpos(routine_definition, 'WORKSPACE_ACCESS_REQUEST_SUBMITTED') = 0
+    OR pg_catalog.strpos(routine_definition, 'WORKSPACE_ACCESS_REQUEST_DEDUPLICATED') = 0
+    OR pg_catalog.strpos(routine_definition, 'fixed_reason_class') <> 0
+  THEN
+    RAISE EXCEPTION 'access submission does not preserve server reason provenance and audit deduplication';
+  END IF;
+
+  routine_definition := pg_catalog.pg_get_functiondef(
+    'uptech.read_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)'::regprocedure
+  );
+  IF pg_catalog.strpos(routine_definition, 'selected_capability.access_request_reason_class') = 0
+    OR pg_catalog.strpos(routine_definition, 'WORKSPACE_ACCESS_REQUEST_READ') = 0
+    OR pg_catalog.strpos(routine_definition, 'fixed_reason_class') <> 0
+  THEN
+    RAISE EXCEPTION 'access read does not preserve server reason provenance and audit its result';
+  END IF;
 END
 $verify$;
 

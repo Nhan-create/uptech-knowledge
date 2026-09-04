@@ -141,6 +141,15 @@ before(async () => {
       ('92000000-0000-0000-0000-000000000003','92000000-0000-0000-0000-000000000002',decode(repeat('21',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
       ('92000000-0000-0000-0000-000000000013','92000000-0000-0000-0000-000000000012',decode(repeat('31',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes'),
       ('92000000-0000-0000-0000-000000000023','92000000-0000-0000-0000-000000000022',decode(repeat('41',32),'hex'),ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes');
+    INSERT INTO uptech.onboarding_sessions(
+      id,identity_id,token_hash,allowed_operations,expires_at,
+      resource_workspace_id,access_request_reason_class
+    ) VALUES (
+      '90000000-0000-0000-0000-000000000005','90000000-0000-0000-0000-000000000003',
+      decode(repeat('09',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
+      statement_timestamp()+interval '20 minutes','90000000-0000-0000-0000-000000000001',
+      'USER_NOT_PROVISIONED'
+    );
     RESET ROLE`);
 });
 
@@ -196,8 +205,8 @@ test("0009 adds bootstrap state without widening runtime table access", async ()
       EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='uptech.onboarding_sessions'::regclass
-          AND conname IN ('onboarding_sessions_operations_check','onboarding_sessions_expiry_check','onboarding_sessions_resource_workspace_fk')
-        GROUP BY conrelid HAVING count(*)=3 AND bool_and(convalidated)
+          AND conname IN ('onboarding_sessions_operations_check','onboarding_sessions_expiry_check','onboarding_sessions_resource_workspace_fk','onboarding_sessions_access_reason_check')
+        GROUP BY conrelid HAVING count(*)=4 AND bool_and(convalidated)
       ) AS onboarding_constraints
   `);
   assert.deepEqual(result.rows[0], {
@@ -310,16 +319,15 @@ test("Task 2 standalone verifier passes against the migrated disposable database
   await pool.query(await sql("db/verify/google_workspace_tenant_bootstrap.sql"));
 });
 
-test("0009 preserves a populated legacy access capability with its unique verified tenant binding", async () => {
-  const result = await pool.query("SELECT resource_workspace_id::text FROM uptech.onboarding_sessions WHERE id='90000000-0000-0000-0000-000000000004'");
-  assert.equal(result.rows[0]?.resource_workspace_id, "90000000-0000-0000-0000-000000000001");
+test("0009 fails closed legacy access capabilities that have no server reason provenance", async () => {
+  const result = await pool.query("SELECT count(*)::int AS count FROM uptech.onboarding_sessions WHERE id='90000000-0000-0000-0000-000000000004'");
+  assert.equal(result.rows[0]?.count, 0);
 });
 
 test("0009 safely reconciles unmatched, mixed, and duplicate legacy capabilities", async () => {
   const result = await pool.query("SELECT id::text,allowed_operations,resource_workspace_id::text FROM uptech.onboarding_sessions WHERE id IN ('90000000-0000-0000-0000-000000000014','90000000-0000-0000-0000-000000000015','90000000-0000-0000-0000-000000000016') ORDER BY id");
   assert.deepEqual(result.rows, [
     { id: '90000000-0000-0000-0000-000000000015', allowed_operations: ['FIRST_DOMAIN_CLAIM_READ'], resource_workspace_id: null },
-    { id: '90000000-0000-0000-0000-000000000016', allowed_operations: ['ACCESS_REQUEST_SUBMIT'], resource_workspace_id: '90000000-0000-0000-0000-000000000001' },
   ]);
 });
 
@@ -1083,6 +1091,24 @@ test("status and retry are capability-bound across job, generation, and tenant s
     expires_at=statement_timestamp()+interval '1 hour' WHERE token_hash=$1`, [statusTokenHash]));
   assert.deepEqual(await read(), { outcome: "DENIED" });
   assert.deepEqual(await retry(), { outcome: "DENIED" });
+
+  const audits = await pool.query(`SELECT action,outcome,request_id::text,metadata
+    FROM uptech.audit_events WHERE workspace_id=$1 AND request_id=$2
+      AND action IN (
+        'GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED',
+        'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_REQUESTED',
+        'GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT',
+        'GOOGLE_WORKSPACE_BOOTSTRAP_FINISHED'
+      ) ORDER BY action`, [workspaceId, requestId]);
+  assert.deepEqual(audits.rows.map((row) => row.action), [
+    "GOOGLE_WORKSPACE_BOOTSTRAP_FINISHED",
+    "GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_CHECKED",
+    "GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_REQUESTED",
+    "GOOGLE_WORKSPACE_BOOTSTRAP_SYNC_RETRY_RESULT",
+  ]);
+  assert.ok(audits.rows.every((row) => row.request_id === requestId &&
+    row.outcome === "SUCCEEDED" &&
+    !/(credential|token|hash|secret|authority|customer)/iu.test(JSON.stringify(row.metadata))));
 });
 
 test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed and replay-safe", async () => {
@@ -1223,15 +1249,17 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
   const wrongWorkspaceHash = hash32(0xf9);
   const wrongFamilyHash = hash32(0xfa);
   await asMigrationOwner((client) => client.query(`INSERT INTO uptech.onboarding_sessions(
-    id,identity_id,token_hash,allowed_operations,expires_at,resource_workspace_id
+    id,identity_id,token_hash,allowed_operations,expires_at,resource_workspace_id,
+    access_request_reason_class
   ) VALUES
     ('97200000-0000-4000-8000-000000000030','90000000-0000-0000-0000-000000000003',$1,
-      ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY'],statement_timestamp()+interval '1 hour',$4),
+      ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY'],statement_timestamp()+interval '1 hour',$4,NULL),
     ('97200000-0000-4000-8000-000000000031',$5,$2,
       ARRAY['DIRECTORY_BOOTSTRAP_STATUS_READ','DIRECTORY_BOOTSTRAP_SYNC_RETRY'],statement_timestamp()+interval '1 hour',
-      '90000000-0000-0000-0000-000000000001'),
+      '90000000-0000-0000-0000-000000000001',NULL),
     ('97200000-0000-4000-8000-000000000032',$5,$3,
-      ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes',$4)`,
+      ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes',$4,
+      'USER_NOT_PROVISIONED')`,
   [wrongIdentityHash, wrongWorkspaceHash, wrongFamilyHash, workspaceId, fixture.identityId]));
   for (const deniedHash of [wrongIdentityHash, wrongWorkspaceHash, wrongFamilyHash]) {
     assert.deepEqual(await readStatus(deniedHash), { outcome: "DENIED" });
@@ -1291,6 +1319,22 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
     newStatusTokenHash: hash32(0xf7),
     requestId: "97200000-0000-4000-8000-000000000017",
   })), { outcome: "DENIED" });
+
+  const audits = await pool.query(`SELECT action,outcome,request_id::text,metadata
+    FROM uptech.audit_events WHERE workspace_id=$1 AND (
+      (action='GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_REISSUED' AND request_id=$2) OR
+      (action='ONBOARDING_CAPABILITY_REVOKED' AND request_id IN ($3,$4))
+    ) ORDER BY request_id`, [workspaceId,
+    "97200000-0000-4000-8000-000000000010",
+    "97200000-0000-4000-8000-000000000014",
+    "97200000-0000-4000-8000-000000000015"]);
+  assert.deepEqual(audits.rows.map(({ action, outcome, request_id }) => ({ action, outcome, request_id })), [
+    { action: "GOOGLE_WORKSPACE_BOOTSTRAP_STATUS_REISSUED", outcome: "SUCCEEDED", request_id: "97200000-0000-4000-8000-000000000010" },
+    { action: "ONBOARDING_CAPABILITY_REVOKED", outcome: "SUCCEEDED", request_id: "97200000-0000-4000-8000-000000000014" },
+    { action: "ONBOARDING_CAPABILITY_REVOKED", outcome: "SUCCEEDED", request_id: "97200000-0000-4000-8000-000000000015" },
+  ]);
+  assert.ok(audits.rows.every((row) =>
+    !/(credential|token|hash|secret|authority|customer)/iu.test(JSON.stringify(row.metadata))));
 });
 
 test("access requests are exact-capability bound, concurrent-deduplicated, and grant no access", async () => {
@@ -1323,6 +1367,48 @@ test("access requests are exact-capability bound, concurrent-deduplicated, and g
     memberships: before.memberships, sessions: before.sessions,
   });
 
+  await asMigrationOwner((client) => client.query(`INSERT INTO uptech.onboarding_sessions(
+    id,identity_id,token_hash,allowed_operations,expires_at,resource_workspace_id,
+    access_request_reason_class
+  ) VALUES
+    ('97300000-0000-4000-8000-000000000030','90000000-0000-0000-0000-000000000003',decode(repeat('8b',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes','90000000-0000-0000-0000-000000000001','ACCESS_MAPPING_CONFLICT'),
+    ('97300000-0000-4000-8000-000000000031','90000000-0000-0000-0000-000000000003',decode(repeat('8c',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes','90000000-0000-0000-0000-000000000001','DIRECTORY_STALE'),
+    ('97300000-0000-4000-8000-000000000032','90000000-0000-0000-0000-000000000003',decode(repeat('8d',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes','90000000-0000-0000-0000-000000000001','ORGANIZATION_ALREADY_REGISTERED')`));
+  const reasonReceipts: Record<string, string> = {};
+  for (const [byte, reason, suffix] of [
+    [0x8b, "ACCESS_MAPPING_CONFLICT", "031"],
+    [0x8c, "DIRECTORY_STALE", "032"],
+    [0x8d, "ORGANIZATION_ALREADY_REGISTERED", "033"],
+  ] as const) {
+    const first = await repositoryCall((repository) => repository.submitAccessRequest({
+      statusTokenHash: hash32(byte), requestId: `97300000-0000-4000-8000-000000000${suffix}`,
+    }));
+    const duplicate = await repositoryCall((repository) => repository.submitAccessRequest({
+      statusTokenHash: hash32(byte), requestId: `97300000-0000-4000-8000-000000000${suffix}`,
+    }));
+    assert.ok(first.outcome === "PENDING" && duplicate.outcome === "PENDING");
+    assert.equal(first.requestId, duplicate.requestId);
+    if (first.outcome === "PENDING") reasonReceipts[reason] = first.requestId;
+  }
+  assert.equal(new Set(Object.values(reasonReceipts)).size, 3);
+  assert.deepEqual((await pool.query(`SELECT reason_class,count(*)::int AS count
+    FROM uptech.workspace_access_requests
+    WHERE workspace_id='90000000-0000-0000-0000-000000000001'
+      AND identity_id='90000000-0000-0000-0000-000000000003'
+    GROUP BY reason_class ORDER BY reason_class`)).rows, [
+    { reason_class: "ACCESS_MAPPING_CONFLICT", count: 1 },
+    { reason_class: "DIRECTORY_STALE", count: 1 },
+    { reason_class: "ORGANIZATION_ALREADY_REGISTERED", count: 1 },
+    { reason_class: "USER_NOT_PROVISIONED", count: 1 },
+  ]);
+  for (const reason of [null, "USER_SUSPENDED"] as const) {
+    await assert.rejects(asMigrationOwner((client) => client.query(`INSERT INTO uptech.onboarding_sessions(
+      id,identity_id,token_hash,allowed_operations,expires_at,resource_workspace_id,access_request_reason_class
+    ) VALUES (gen_random_uuid(),'90000000-0000-0000-0000-000000000003',decode(repeat('ee',32),'hex'),
+      ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],statement_timestamp()+interval '20 minutes',
+      '90000000-0000-0000-0000-000000000001',$1)`, [reason])), /onboarding_sessions_access_reason_check/u);
+  }
+
   for (const tokenByte of [0x16, 0x21, 0xfe]) {
     assert.deepEqual(await repositoryCall((repository) => repository.submitAccessRequest({
       statusTokenHash: hash32(tokenByte), requestId: "97300000-0000-4000-8000-000000000003",
@@ -1342,19 +1428,20 @@ test("access requests are exact-capability bound, concurrent-deduplicated, and g
       'GOOGLE','https://accounts.google.com','access-b-sub','user@access-b.example',true,
       'access-b.example',statement_timestamp());
     INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,
-      status,created_at,expires_at,revoked_at,resource_workspace_id) VALUES
+      status,created_at,expires_at,revoked_at,resource_workspace_id,
+      access_request_reason_class) VALUES
       ('97300000-0000-4000-8000-000000000013','97300000-0000-4000-8000-000000000012',
        decode(repeat('88',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
        'ACTIVE',statement_timestamp(),statement_timestamp()+interval '20 minutes',NULL,
-       '97300000-0000-4000-8000-000000000010'),
+       '97300000-0000-4000-8000-000000000010','USER_NOT_PROVISIONED'),
       ('97300000-0000-4000-8000-000000000014','97300000-0000-4000-8000-000000000012',
        decode(repeat('89',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
        'REVOKED',statement_timestamp(),statement_timestamp()+interval '20 minutes',statement_timestamp(),
-       '97300000-0000-4000-8000-000000000010'),
+       '97300000-0000-4000-8000-000000000010','USER_NOT_PROVISIONED'),
       ('97300000-0000-4000-8000-000000000015','97300000-0000-4000-8000-000000000012',
        decode(repeat('8a',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
        'ACTIVE',statement_timestamp()-interval '21 minutes',statement_timestamp()-interval '1 minute',NULL,
-       '97300000-0000-4000-8000-000000000010')`));
+       '97300000-0000-4000-8000-000000000010','USER_NOT_PROVISIONED')`));
   const tenantB = await repositoryCall((repository) => repository.submitAccessRequest({
     statusTokenHash: hash32(0x88), requestId: "97300000-0000-4000-8000-000000000016",
   }));
@@ -1377,6 +1464,20 @@ test("access requests are exact-capability bound, concurrent-deduplicated, and g
   assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
     statusTokenHash: hash32(0x09), requestId: "97300000-0000-4000-8000-000000000020",
   })), { outcome: "FOUND", requestId: receiptId, status: "FULFILLED" });
+
+  const audits = await pool.query(`SELECT action,count(*)::int AS count,
+      bool_and(request_id IS NOT NULL) AS correlated,
+      bool_and(metadata ? 'reason_class') AS has_reason,
+      bool_and(metadata::text !~* '(credential|token|hash|secret|authority|customer)') AS redacted
+    FROM uptech.audit_events
+    WHERE workspace_id='90000000-0000-0000-0000-000000000001'
+      AND action IN ('WORKSPACE_ACCESS_REQUEST_SUBMITTED','WORKSPACE_ACCESS_REQUEST_DEDUPLICATED','WORKSPACE_ACCESS_REQUEST_READ')
+    GROUP BY action ORDER BY action`);
+  assert.deepEqual(audits.rows, [
+    { action: "WORKSPACE_ACCESS_REQUEST_DEDUPLICATED", count: 4, correlated: true, has_reason: true, redacted: true },
+    { action: "WORKSPACE_ACCESS_REQUEST_READ", count: 3, correlated: true, has_reason: true, redacted: true },
+    { action: "WORKSPACE_ACCESS_REQUEST_SUBMITTED", count: 4, correlated: true, has_reason: true, redacted: true },
+  ]);
 });
 
 test("access-request routines expose only closed results to API runtime", async () => {
