@@ -62,6 +62,13 @@ export type BootstrapReissueStatusResult =
   | { readonly outcome: "REISSUED"; readonly statusExpiresAt: Date }
   | { readonly outcome: "DENIED" };
 export type BootstrapRevokeOutcome = "REVOKED" | "DENIED";
+export type WorkspaceAccessRequestStatus = "PENDING" | "FULFILLED" | "CANCELLED";
+export type WorkspaceAccessRequestSubmitResult =
+  | { readonly outcome: "PENDING"; readonly requestId: string; readonly status: "PENDING" }
+  | { readonly outcome: "DENIED" };
+export type WorkspaceAccessRequestReadResult =
+  | { readonly outcome: "FOUND"; readonly requestId: string; readonly status: WorkspaceAccessRequestStatus }
+  | { readonly outcome: "DENIED" };
 
 export type BootstrapStatusOutcome =
   | "DIRECTORY_BOOTSTRAP_SYNC_PENDING"
@@ -94,4 +101,6 @@ export interface GoogleWorkspaceBootstrapRepository {
   finish(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapFinishOutcome }>;
   reissueStatus(input: BootstrapReissueStatusInput): Promise<BootstrapReissueStatusResult>;
   revokeCapability(input: BootstrapStatusInput): Promise<{ readonly outcome: BootstrapRevokeOutcome }>;
+  submitAccessRequest(input: BootstrapStatusInput): Promise<WorkspaceAccessRequestSubmitResult>;
+  readAccessRequest(input: BootstrapStatusInput): Promise<WorkspaceAccessRequestReadResult>;
 }

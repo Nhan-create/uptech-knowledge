@@ -1259,3 +1259,109 @@ test("finish, fresh-OIDC status reissue, and exact capability revoke stay closed
     requestId: "97200000-0000-4000-8000-000000000017",
   })), { outcome: "DENIED" });
 });
+
+test("access requests are exact-capability bound, concurrent-deduplicated, and grant no access", async () => {
+  const repositoryCall = <T>(operation: (repository: ReturnType<typeof createGoogleWorkspaceBootstrapRepository>) => Promise<T>) =>
+    asApi((client) => operation(createGoogleWorkspaceBootstrapRepository(client as never)));
+  const submit = () => repositoryCall((repository) => repository.submitAccessRequest({
+    statusTokenHash: hash32(0x09), requestId: "97300000-0000-4000-8000-000000000001",
+  }));
+  const before = (await pool.query(`SELECT
+    (SELECT count(*)::int FROM uptech.workspace_memberships) AS memberships,
+    (SELECT count(*)::int FROM uptech.sessions) AS sessions`)).rows[0];
+  const submitted = await Promise.all(Array.from({ length: 8 }, submit));
+  assert.equal(new Set(submitted.map((result) => result.outcome === "PENDING" && result.requestId)).size, 1);
+  assert.ok(submitted.every((result) => result.outcome === "PENDING" && result.status === "PENDING"));
+  const receiptId = submitted[0]!.outcome === "PENDING" ? submitted[0]!.requestId : "";
+  assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
+    statusTokenHash: hash32(0x09), requestId: "97300000-0000-4000-8000-000000000002",
+  })), { outcome: "FOUND", requestId: receiptId, status: "PENDING" });
+  assert.deepEqual((await pool.query(`SELECT workspace_id::text,identity_id::text,reason_class,status,
+    (SELECT count(*)::int FROM uptech.workspace_access_requests WHERE workspace_id=$1 AND identity_id=$2) AS request_count,
+    (SELECT count(*)::int FROM uptech.workspace_memberships) AS memberships,
+    (SELECT count(*)::int FROM uptech.sessions) AS sessions
+    FROM uptech.workspace_access_requests WHERE id=$3`, [
+      "90000000-0000-0000-0000-000000000001",
+      "90000000-0000-0000-0000-000000000003", receiptId,
+    ])).rows[0], {
+    workspace_id: "90000000-0000-0000-0000-000000000001",
+    identity_id: "90000000-0000-0000-0000-000000000003",
+    reason_class: "USER_NOT_PROVISIONED", status: "PENDING", request_count: 1,
+    memberships: before.memberships, sessions: before.sessions,
+  });
+
+  for (const tokenByte of [0x16, 0x21, 0xfe]) {
+    assert.deepEqual(await repositoryCall((repository) => repository.submitAccessRequest({
+      statusTokenHash: hash32(tokenByte), requestId: "97300000-0000-4000-8000-000000000003",
+    })), { outcome: "DENIED" });
+    assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
+      statusTokenHash: hash32(tokenByte), requestId: "97300000-0000-4000-8000-000000000004",
+    })), { outcome: "DENIED" });
+  }
+
+  await asMigrationOwner((client) => client.query(`
+    INSERT INTO uptech.workspaces(workspace_id,status,google_customer_id)
+      VALUES ('97300000-0000-4000-8000-000000000010','ACTIVE','customer-access-b');
+    INSERT INTO uptech.users(id) VALUES ('97300000-0000-4000-8000-000000000011');
+    INSERT INTO uptech.identities(id,user_id,provider,issuer,provider_subject,email_claim,
+      email_verified,hosted_domain_claim,claims_observed_at)
+      VALUES ('97300000-0000-4000-8000-000000000012','97300000-0000-4000-8000-000000000011',
+      'GOOGLE','https://accounts.google.com','access-b-sub','user@access-b.example',true,
+      'access-b.example',statement_timestamp());
+    INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,
+      status,created_at,expires_at,revoked_at,resource_workspace_id) VALUES
+      ('97300000-0000-4000-8000-000000000013','97300000-0000-4000-8000-000000000012',
+       decode(repeat('88',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
+       'ACTIVE',statement_timestamp(),statement_timestamp()+interval '20 minutes',NULL,
+       '97300000-0000-4000-8000-000000000010'),
+      ('97300000-0000-4000-8000-000000000014','97300000-0000-4000-8000-000000000012',
+       decode(repeat('89',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
+       'REVOKED',statement_timestamp(),statement_timestamp()+interval '20 minutes',statement_timestamp(),
+       '97300000-0000-4000-8000-000000000010'),
+      ('97300000-0000-4000-8000-000000000015','97300000-0000-4000-8000-000000000012',
+       decode(repeat('8a',32),'hex'),ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT'],
+       'ACTIVE',statement_timestamp()-interval '21 minutes',statement_timestamp()-interval '1 minute',NULL,
+       '97300000-0000-4000-8000-000000000010')`));
+  const tenantB = await repositoryCall((repository) => repository.submitAccessRequest({
+    statusTokenHash: hash32(0x88), requestId: "97300000-0000-4000-8000-000000000016",
+  }));
+  assert.ok(tenantB.outcome === "PENDING" && tenantB.requestId !== receiptId);
+  assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
+    statusTokenHash: hash32(0x09), requestId: "97300000-0000-4000-8000-000000000017",
+  })), { outcome: "FOUND", requestId: receiptId, status: "PENDING" });
+  for (const tokenByte of [0x89, 0x8a]) {
+    assert.deepEqual(await repositoryCall((repository) => repository.submitAccessRequest({
+      statusTokenHash: hash32(tokenByte), requestId: "97300000-0000-4000-8000-000000000018",
+    })), { outcome: "DENIED" });
+    assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
+      statusTokenHash: hash32(tokenByte), requestId: "97300000-0000-4000-8000-000000000019",
+    })), { outcome: "DENIED" });
+  }
+
+  await asMigrationOwner((client) => client.query(`UPDATE uptech.workspace_access_requests
+    SET status='FULFILLED',fulfilled_at=statement_timestamp() WHERE workspace_id=$1 AND id=$2`,
+  ["90000000-0000-0000-0000-000000000001", receiptId]));
+  assert.deepEqual(await repositoryCall((repository) => repository.readAccessRequest({
+    statusTokenHash: hash32(0x09), requestId: "97300000-0000-4000-8000-000000000020",
+  })), { outcome: "FOUND", requestId: receiptId, status: "FULFILLED" });
+});
+
+test("access-request routines expose only closed results to API runtime", async () => {
+  for (const signature of [
+    "uptech.submit_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)",
+    "uptech.read_workspace_access_request_v1(uptech.google_auth_hash32_v1,uuid)",
+  ]) {
+    const row = (await pool.query(`SELECT p.prosecdef,p.provolatile,p.proconfig,
+      has_function_privilege('uptech_api_runtime',p.oid,'EXECUTE') AS api_execute,
+      has_function_privilege('uptech_worker_runtime',p.oid,'EXECUTE') AS worker_execute,
+      has_function_privilege('public',p.oid,'EXECUTE') AS public_execute
+      FROM pg_proc p WHERE p.oid=$1::regprocedure`, [signature])).rows[0];
+    assert.deepEqual(row, { prosecdef: true, provolatile: "v",
+      proconfig: ["search_path=pg_catalog, uptech"], api_execute: true,
+      worker_execute: false, public_execute: false }, signature);
+  }
+  assert.deepEqual((await pool.query(`SELECT
+    to_regtype('uptech.workspace_access_request_submit_result_v1') IS NOT NULL AS submit_result,
+    to_regtype('uptech.workspace_access_request_read_result_v1') IS NOT NULL AS read_result`)).rows[0],
+  { submit_result: true, read_result: true });
+});

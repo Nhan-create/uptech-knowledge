@@ -117,6 +117,26 @@ CREATE TYPE uptech.onboarding_capability_revoke_result_v1 AS (
   outcome uptech.onboarding_capability_revoke_outcome_v1
 );
 
+CREATE TYPE uptech.workspace_access_request_submit_outcome_v1 AS ENUM (
+  'PENDING', 'DENIED'
+);
+
+CREATE TYPE uptech.workspace_access_request_submit_result_v1 AS (
+  outcome uptech.workspace_access_request_submit_outcome_v1,
+  request_id uuid,
+  status uptech.workspace_access_request_status_v1
+);
+
+CREATE TYPE uptech.workspace_access_request_read_outcome_v1 AS ENUM (
+  'FOUND', 'DENIED'
+);
+
+CREATE TYPE uptech.workspace_access_request_read_result_v1 AS (
+  outcome uptech.workspace_access_request_read_outcome_v1,
+  request_id uuid,
+  status uptech.workspace_access_request_status_v1
+);
+
 CREATE FUNCTION uptech.onboarding_operations_are_unique_v1(p_values text[])
 RETURNS boolean
 LANGUAGE sql
@@ -2079,6 +2099,141 @@ REVOKE ALL ON uptech.google_workspace_bootstrap_attempts,
   uptech.google_workspace_bootstrap_receipts,
   uptech.workspace_access_requests
   FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+
+CREATE FUNCTION uptech.submit_workspace_access_request_v1(
+  p_capability_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.workspace_access_request_submit_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz := pg_catalog.clock_timestamp();
+  selected_capability uptech.onboarding_sessions%ROWTYPE;
+  selected_request uptech.workspace_access_requests%ROWTYPE;
+  fixed_reason_class constant text := 'USER_NOT_PROVISIONED';
+BEGIN
+  IF p_capability_hash IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_submit_result_v1;
+  END IF;
+
+  SELECT capability.* INTO selected_capability
+  FROM uptech.onboarding_sessions AS capability
+  JOIN uptech.identities AS identity_row ON identity_row.id = capability.identity_id
+  JOIN uptech.users AS user_row ON user_row.id = identity_row.user_id
+  WHERE capability.token_hash = p_capability_hash
+    AND capability.status = 'ACTIVE'
+    AND capability.expires_at > observed_at
+    AND capability.resource_workspace_id IS NOT NULL
+    AND pg_catalog.cardinality(capability.allowed_operations) = 2
+    AND capability.allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND identity_row.status = 'ACTIVE'
+    AND user_row.status = 'ACTIVE'
+  FOR UPDATE OF capability;
+
+  IF NOT FOUND THEN
+    RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_submit_result_v1;
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'workspace-access-request:' || selected_capability.resource_workspace_id::text || ':' ||
+    selected_capability.identity_id::text || ':' || fixed_reason_class, 0));
+
+  INSERT INTO uptech.workspace_access_requests(
+    workspace_id,id,identity_id,reason_class,status
+  ) VALUES (
+    selected_capability.resource_workspace_id,pg_catalog.gen_random_uuid(),
+    selected_capability.identity_id,fixed_reason_class,'PENDING'
+  ) ON CONFLICT (workspace_id,identity_id,reason_class) WHERE status = 'PENDING'
+    DO NOTHING
+  RETURNING * INTO selected_request;
+
+  IF NOT FOUND THEN
+    SELECT request_row.* INTO STRICT selected_request
+    FROM uptech.workspace_access_requests AS request_row
+    WHERE request_row.workspace_id = selected_capability.resource_workspace_id
+      AND request_row.identity_id = selected_capability.identity_id
+      AND request_row.reason_class = fixed_reason_class
+      AND request_row.status = 'PENDING';
+  END IF;
+
+  RETURN ROW('PENDING',selected_request.id,selected_request.status)
+    ::uptech.workspace_access_request_submit_result_v1;
+END
+$function$;
+
+CREATE FUNCTION uptech.read_workspace_access_request_v1(
+  p_capability_hash uptech.google_auth_hash32_v1,
+  p_request_id uuid
+)
+RETURNS uptech.workspace_access_request_read_result_v1
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path TO pg_catalog, uptech
+AS $function$
+DECLARE
+  observed_at timestamptz := pg_catalog.clock_timestamp();
+  selected_capability uptech.onboarding_sessions%ROWTYPE;
+  selected_request uptech.workspace_access_requests%ROWTYPE;
+  fixed_reason_class constant text := 'USER_NOT_PROVISIONED';
+BEGIN
+  IF p_capability_hash IS NULL OR p_request_id IS NULL THEN
+    RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_read_result_v1;
+  END IF;
+
+  SELECT capability.* INTO selected_capability
+  FROM uptech.onboarding_sessions AS capability
+  JOIN uptech.identities AS identity_row ON identity_row.id = capability.identity_id
+  JOIN uptech.users AS user_row ON user_row.id = identity_row.user_id
+  WHERE capability.token_hash = p_capability_hash
+    AND capability.status = 'ACTIVE'
+    AND capability.expires_at > observed_at
+    AND capability.resource_workspace_id IS NOT NULL
+    AND pg_catalog.cardinality(capability.allowed_operations) = 2
+    AND capability.allowed_operations @> ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND capability.allowed_operations <@ ARRAY['ACCESS_REQUEST_READ','ACCESS_REQUEST_SUBMIT']::text[]
+    AND identity_row.status = 'ACTIVE'
+    AND user_row.status = 'ACTIVE';
+
+  IF NOT FOUND THEN
+    RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_read_result_v1;
+  END IF;
+
+  SELECT request_row.* INTO selected_request
+  FROM uptech.workspace_access_requests AS request_row
+  WHERE request_row.workspace_id = selected_capability.resource_workspace_id
+    AND request_row.identity_id = selected_capability.identity_id
+    AND request_row.reason_class = fixed_reason_class
+  ORDER BY (request_row.status = 'PENDING') DESC, request_row.created_at DESC, request_row.id DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN ROW('DENIED',NULL,NULL)::uptech.workspace_access_request_read_result_v1;
+  END IF;
+
+  RETURN ROW('FOUND',selected_request.id,selected_request.status)
+    ::uptech.workspace_access_request_read_result_v1;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION uptech.submit_workspace_access_request_v1(
+  uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.submit_workspace_access_request_v1(
+  uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
+
+REVOKE ALL ON FUNCTION uptech.read_workspace_access_request_v1(
+  uptech.google_auth_hash32_v1, uuid
+) FROM PUBLIC, uptech_api_runtime, uptech_worker_runtime;
+GRANT EXECUTE ON FUNCTION uptech.read_workspace_access_request_v1(
+  uptech.google_auth_hash32_v1, uuid
+) TO uptech_api_runtime;
 
 CREATE TYPE uptech.google_workspace_bootstrap_start_admission_outcome_v1 AS ENUM (
   'ADMITTED', 'RATE_LIMITED', 'DENIED'

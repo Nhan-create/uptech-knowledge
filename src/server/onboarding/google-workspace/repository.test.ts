@@ -205,6 +205,47 @@ test("finish, reissue, and revoke fail closed on malformed inputs and result sha
   }), BootstrapCommitUnknownError);
 });
 
+test("access request submit and read use only closed v1 capability routines", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+  const receiptId = "10000000-0000-4000-8000-000000000004";
+  const submitFake = fakePool([{ outcome: "PENDING", request_id: receiptId, status: "PENDING" }]);
+  const submitRepository = createGoogleWorkspaceBootstrapRepository(submitFake.pool as never);
+  assert.deepEqual(await submitRepository.submitAccessRequest({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "PENDING", requestId: receiptId, status: "PENDING" });
+  assert.match(submitFake.calls[0]!.text, /submit_workspace_access_request_v1/u);
+  assert.deepEqual(submitFake.calls[0]!.values, [Buffer.from(hash(9)), requestId]);
+
+  const readFake = fakePool([{ outcome: "FOUND", request_id: receiptId, status: "FULFILLED" }]);
+  const readRepository = createGoogleWorkspaceBootstrapRepository(readFake.pool as never);
+  assert.deepEqual(await readRepository.readAccessRequest({
+    statusTokenHash: hash(9), requestId,
+  }), { outcome: "FOUND", requestId: receiptId, status: "FULFILLED" });
+  assert.match(readFake.calls[0]!.text, /read_workspace_access_request_v1/u);
+});
+
+test("access request repository rejects malformed input and leaky or open result rows", async () => {
+  const requestId = "10000000-0000-4000-8000-000000000003";
+  const receiptId = "10000000-0000-4000-8000-000000000004";
+  for (const [method, rows] of [
+    ["submitAccessRequest", [{ outcome: "FULFILLED", request_id: receiptId, status: "FULFILLED" }]],
+    ["submitAccessRequest", [{ outcome: "PENDING", request_id: receiptId, status: "PENDING", workspace_id: "leak" }]],
+    ["readAccessRequest", [{ outcome: "FOUND", request_id: receiptId, status: "UNKNOWN" }]],
+    ["readAccessRequest", [{ outcome: "DENIED", request_id: receiptId, status: null }]],
+  ] as const) {
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool([...rows] as QueryResultRow[]).pool as never);
+    await assert.rejects((repository[method] as (value: never) => Promise<unknown>)({
+      statusTokenHash: hash(9), requestId,
+    } as never), BootstrapCommitUnknownError);
+  }
+  for (const method of ["submitAccessRequest", "readAccessRequest"] as const) {
+    const repository = createGoogleWorkspaceBootstrapRepository(fakePool([{ outcome: "DENIED", request_id: null, status: null }]).pool as never);
+    await assert.rejects((repository[method] as (value: never) => Promise<unknown>)({
+      statusTokenHash: new Uint8Array(31), requestId,
+    } as never), BootstrapCommitUnknownError);
+  }
+});
+
 test("query and result-shape failures are secret-safe unknown errors", async () => {
   for (const rows of [new Error(`database leaked ${secret}`), [{ outcome: "DENIED", status_expires_at: new Date() }]]) {
     const fake = fakePool(rows as QueryResultRow[] | Error);

@@ -9,6 +9,8 @@ import type {
   BootstrapRevokeOutcome,
   BootstrapRetryOutcome,
   BootstrapStatusOutcome,
+  WorkspaceAccessRequestReadResult,
+  WorkspaceAccessRequestSubmitResult,
   GoogleWorkspaceBootstrapRepository,
   VerifiedGoogleWorkspaceDomain,
 } from "./types.ts";
@@ -25,6 +27,8 @@ export type {
   BootstrapRetryOutcome,
   BootstrapStatusInput,
   BootstrapStatusOutcome,
+  WorkspaceAccessRequestReadResult,
+  WorkspaceAccessRequestSubmitResult,
   GoogleWorkspaceBootstrapRepository,
   VerifiedGoogleWorkspaceDomain,
 } from "./types.ts";
@@ -108,6 +112,18 @@ FROM uptech.revoke_onboarding_capability_v1(
   $1::uptech.google_auth_hash32_v1,$2::uuid
 ) AS result`;
 
+const SUBMIT_ACCESS_REQUEST_SQL = `SELECT result.outcome::text AS outcome,
+  result.request_id::text AS request_id,result.status::text AS status
+FROM uptech.submit_workspace_access_request_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
+const READ_ACCESS_REQUEST_SQL = `SELECT result.outcome::text AS outcome,
+  result.request_id::text AS request_id,result.status::text AS status
+FROM uptech.read_workspace_access_request_v1(
+  $1::uptech.google_auth_hash32_v1,$2::uuid
+) AS result`;
+
 function bytes(value: Uint8Array): Buffer { return Buffer.from(value); }
 
 function compositeField(value: string | null): string {
@@ -175,6 +191,32 @@ export function createGoogleWorkspaceBootstrapRepository(
     }
     const row = one((await pool.query(sql, [bytes(input.statusTokenHash), input.requestId])).rows as QueryResultRow[]);
     return { outcome: outcomeOnly(row, allowed) as T };
+  });
+  const accessRequestOperation = <T extends "PENDING" | "FOUND">(
+    sql: string,
+    expectedSuccess: T,
+    input: import("./types.ts").BootstrapStatusInput,
+  ) => unknownBoundary(async (): Promise<
+    T extends "PENDING" ? WorkspaceAccessRequestSubmitResult : WorkspaceAccessRequestReadResult
+  > => {
+    if (!(input.statusTokenHash instanceof Uint8Array) || input.statusTokenHash.byteLength !== 32 ||
+        !CANONICAL_UUID.test(input.requestId)) {
+      throw new BootstrapCommitUnknownError();
+    }
+    const row = one((await pool.query(sql, [bytes(input.statusTokenHash), input.requestId])).rows as QueryResultRow[]);
+    if (Object.keys(row).length !== 3) throw new BootstrapCommitUnknownError();
+    if (row.outcome === "DENIED" && row.request_id === null && row.status === null) {
+      return { outcome: "DENIED" } as (T extends "PENDING"
+        ? WorkspaceAccessRequestSubmitResult : WorkspaceAccessRequestReadResult);
+    }
+    if (row.outcome !== expectedSuccess || typeof row.request_id !== "string" ||
+        !CANONICAL_UUID.test(row.request_id) ||
+        !["PENDING", "FULFILLED", "CANCELLED"].includes(String(row.status)) ||
+        (expectedSuccess === "PENDING" && row.status !== "PENDING")) {
+      throw new BootstrapCommitUnknownError();
+    }
+    return { outcome: expectedSuccess, requestId: row.request_id, status: row.status } as
+      (T extends "PENDING" ? WorkspaceAccessRequestSubmitResult : WorkspaceAccessRequestReadResult);
   });
   const implementation: GoogleWorkspaceBootstrapRepository = {
     prepare: (input) => unknownBoundary(async () => {
@@ -250,6 +292,8 @@ export function createGoogleWorkspaceBootstrapRepository(
       return { outcome: "REISSUED", statusExpiresAt: new Date(row.status_expires_at.getTime()) };
     }),
     revokeCapability: (input) => statusOperation(REVOKE_CAPABILITY_SQL, ["REVOKED", "DENIED"] as const, input),
+    submitAccessRequest: (input) => accessRequestOperation(SUBMIT_ACCESS_REQUEST_SQL, "PENDING", input),
+    readAccessRequest: (input) => accessRequestOperation(READ_ACCESS_REQUEST_SQL, "FOUND", input),
   };
   return Object.freeze(implementation);
 }
