@@ -15,9 +15,9 @@ const secret = "gcp-sm:v1:top-secret-reference" as SecretReference;
 const claims = {
   issuer: "https://accounts.google.com" as const,
   providerSubject: "bootstrap-commit-sub",
-  normalizedEmail: "owner@commit.example",
+  normalizedEmail: "owner@tenant-a.example",
   emailVerified: true as const,
-  hostedDomain: "commit.example",
+  hostedDomain: "tenant-a.example",
   issuedAtEpochSeconds: 1_893_456_000,
   expiresAtEpochSeconds: 1_893_459_600,
   audienceConfigurationKey: "GOOGLE_WEB_LOGIN_V1" as const,
@@ -92,16 +92,16 @@ test("complete serializes verified domains and strictly parses PROVISIONING", as
   const result = await repository.complete({
     attemptId: "10000000-0000-0000-0000-000000000001",
     sourceTokenHash: hash(1), statusTokenHash: hash(2),
-    customerId: "C0123", customerDomain: "example.com",
-    providerSubject: "google-sub", hostedDomain: "example.com",
-    verifiedDomains: [{ normalizedDomain: "example.com", domainKind: "PRIMARY", providerParentDomain: null }],
+    customerId: "C0123", customerDomain: "tenant-a.example",
+    providerSubject: "google-sub", hostedDomain: "tenant-a.example",
+    verifiedDomains: [{ normalizedDomain: "tenant-a.example", domainKind: "PRIMARY", providerParentDomain: null }],
     credentialReference: secret,
     authorizedScopes: ["scope-a"],
     requestId: "10000000-0000-0000-0000-000000000003",
   });
   assert.deepEqual(result, { outcome: "PROVISIONING", statusExpiresAt: expiry });
   assert.match(fake.calls[0]!.text, /complete_google_workspace_bootstrap_v1/);
-  assert.equal(fake.calls[0]!.values[7], '{"(example.com,PRIMARY,)"}');
+  assert.equal(fake.calls[0]!.values[7], '{"(tenant-a.example,PRIMARY,)"}');
   assert.equal(fake.calls[0]!.values[8], secret);
 });
 
@@ -252,8 +252,8 @@ test("query and result-shape failures are secret-safe unknown errors", async () 
     const repository = createGoogleWorkspaceBootstrapRepository(fake.pool as never);
     await assert.rejects(repository.complete({
       attemptId: "10000000-0000-0000-0000-000000000001", sourceTokenHash: hash(1), statusTokenHash: hash(2),
-      customerId: "C", customerDomain: "example.com", providerSubject: "sub", hostedDomain: "example.com",
-      verifiedDomains: [{ normalizedDomain: "example.com", domainKind: "PRIMARY", providerParentDomain: null }],
+      customerId: "C", customerDomain: "tenant-a.example", providerSubject: "sub", hostedDomain: "tenant-a.example",
+      verifiedDomains: [{ normalizedDomain: "tenant-a.example", domainKind: "PRIMARY", providerParentDomain: null }],
       credentialReference: secret, authorizedScopes: [], requestId: "10000000-0000-0000-0000-000000000003",
     }), (error: unknown) => {
       assert.ok(error instanceof BootstrapCommitUnknownError);

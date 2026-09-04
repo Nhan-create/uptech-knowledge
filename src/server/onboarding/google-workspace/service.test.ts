@@ -32,11 +32,11 @@ function fixture(overrides: Record<string, unknown> = {}) {
     customerId: "C0123",
     directoryUserCustomerId: "C0123",
     directoryUserActive: true as const,
-    primaryDomain: "company.example",
-    verifiedDomains: [{ normalizedDomain: "company.example", kind: "PRIMARY" as const, providerParentDomain: null, verified: true as const }],
+    primaryDomain: "tenant-a.example",
+    verifiedDomains: [{ normalizedDomain: "tenant-a.example", kind: "PRIMARY" as const, providerParentDomain: null, verified: true as const }],
     providerSubject: "google-sub",
-    normalizedEmail: "owner@company.example",
-    hostedDomain: "company.example",
+    normalizedEmail: "owner@tenant-a.example",
+    hostedDomain: "tenant-a.example",
     refreshToken,
     grantedScopes: [...GOOGLE_DIRECTORY_READ_ONLY_SCOPES],
     isAdmin: true,
@@ -48,7 +48,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     async authenticate(input: unknown) {
       this.calls.push(input);
       calls.push("authenticate");
-      return { identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@company.example", hostedDomain: "company.example", identityActive: true, userActive: true };
+      return { identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@tenant-a.example", hostedDomain: "tenant-a.example", identityActive: true, userActive: true };
     },
   };
   const provider = {
@@ -178,8 +178,8 @@ test("service refuses a composition without an operational reporter", () => {
 test("every invalid provider proof is denied before prepare, secret creation, or completion", async () => {
   const invalid = [
     ["CONSENT_ACCOUNT_MISMATCH", { providerSubject: "other" }],
-    ["CONSENT_ACCOUNT_MISMATCH", { normalizedEmail: "other@company.example" }],
-    ["CONSENT_ACCOUNT_MISMATCH", { hostedDomain: "other.example" }],
+    ["CONSENT_ACCOUNT_MISMATCH", { normalizedEmail: "other@tenant-a.example" }],
+    ["CONSENT_ACCOUNT_MISMATCH", { hostedDomain: "tenant-b.example" }],
     ["SUPER_ADMIN_REQUIRED", { isAdmin: false, isDelegatedAdmin: false }],
     ["DELEGATED_ADMIN_UNSUPPORTED", { isAdmin: false, isDelegatedAdmin: true }],
     ["GOOGLE_ORGANIZATION_MISMATCH", { directoryUserCustomerId: "other" }],
@@ -223,8 +223,8 @@ test("secret creation failure aborts PREPARED and remains redacted", async () =>
 test("inactive source identity is rejected before exchanging or storing provider credentials", async () => {
   const started = await initiated();
   started.f.sourceAuthority.authenticate = async () => ({
-    identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@company.example",
-    hostedDomain: "company.example", identityActive: false, userActive: true,
+    identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@tenant-a.example",
+    hostedDomain: "tenant-a.example", identityActive: false, userActive: true,
   });
   await assert.rejects(started.f.service.callback({
     onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,
@@ -238,14 +238,14 @@ test("inactive user and callback source identity mismatches are rejected before 
   const changes = [
     { userActive: false },
     { providerSubject: "different-sub" },
-    { normalizedEmail: "different@company.example" },
-    { hostedDomain: "different.example" },
+    { normalizedEmail: "different@tenant-a.example" },
+    { hostedDomain: "tenant-b.example" },
   ];
   for (const change of changes) {
     const started = await initiated();
     started.f.sourceAuthority.authenticate = async () => ({
-      identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@company.example",
-      hostedDomain: "company.example", identityActive: true, userActive: true, ...change,
+      identityId: IDENTITY_ID, providerSubject: "google-sub", normalizedEmail: "owner@tenant-a.example",
+      hostedDomain: "tenant-a.example", identityActive: true, userActive: true, ...change,
     });
     await assert.rejects(started.f.service.callback({
       onboardingCredential: SOURCE, callbackSearch: `?code=ok&state=${started.transaction.state}`,

@@ -11,8 +11,8 @@ const digest = new Uint8Array(32).fill(0x5a);
 const validRow = {
   identity_id: "550e8400-e29b-41d4-a716-446655440000",
   provider_subject: "google-subject-1",
-  normalized_email: "owner@example.com",
-  hosted_domain: "example.com",
+  normalized_email: "owner@tenant-a.example",
+  hosted_domain: "tenant-a.example",
   identity_active: true,
   user_active: true,
 };
@@ -78,8 +78,8 @@ test("source authority accepts a masked miss and rejects every non-scalar or mal
   for (const result of [
     [validRow, validRow],
     [{ ...validRow, workspace_id: "must-not-cross-boundary" }],
-    [{ ...validRow, normalized_email: "Owner@example.com" }],
-    [{ ...validRow, hosted_domain: "other.example" }],
+    [{ ...validRow, normalized_email: "Owner@tenant-a.example" }],
+    [{ ...validRow, hosted_domain: "tenant-b.example" }],
     [{ ...validRow, identity_active: false }],
   ] satisfies QueryResultRow[][]) {
     await assert.rejects(

@@ -27,7 +27,7 @@ function activeInspection(operations: unknown = RECOVERY_OPERATION_FAMILIES.BOOT
 function fixture(outcome: unknown = "DIRECTORY_BOOTSTRAP_SYNC_PENDING") {
   const calls: unknown[] = [];
   const dependencies: ProvisioningPageModelDependencies = {
-    loadConfig: () => ({ databaseUrl: "postgresql://db.example/uptech", sessionPepper: PEPPER }),
+    loadConfig: () => ({ databaseUrl: "postgresql://tenant-a.example/uptech", sessionPepper: PEPPER }),
     getPool: () => ({ query: async () => ({ rows: [] }) } as never),
     inspectAuthority: async () => activeInspection(),
     createRepository: () => ({
@@ -149,7 +149,7 @@ test("every non-exact onboarding operation family and uncertain inspection fails
 test("configuration, pool, inspection, repository failures and malformed results expose Contact only", async () => {
   const failures: Array<(dependencies: ProvisioningPageModelDependencies) => void> = [
     (d) => { d.loadConfig = () => { throw new Error("secret config"); }; },
-    (d) => { d.loadConfig = () => ({ databaseUrl: "postgresql://db.example/uptech", sessionPepper: Buffer.alloc(31) }); },
+    (d) => { d.loadConfig = () => ({ databaseUrl: "postgresql://tenant-a.example/uptech", sessionPepper: Buffer.alloc(31) }); },
     (d) => { d.getPool = () => { throw new Error("secret database"); }; },
     (d) => { d.inspectAuthority = async () => { throw new Error("secret inspection"); }; },
     (d) => { d.createRepository = () => ({ readStatus: async () => { throw new Error("secret row"); } }); },
@@ -175,7 +175,7 @@ test("serialized public models contain no raw authority, credential, infrastruct
   const f = fixture({ outcome: "READY" });
   const model = await resolveProvisioningPageModel(headers(), f.dependencies);
   const serialized = JSON.stringify(model);
-  for (const forbidden of [RAW, "postgresql://", "evil.example", "secret config", "secret row"]) {
+  for (const forbidden of [RAW, "postgresql://", "tenant-b.example", "secret config", "secret row"]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
   const keys = new Set<string>();

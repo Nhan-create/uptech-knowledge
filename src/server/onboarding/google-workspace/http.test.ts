@@ -19,7 +19,7 @@ import {
   type BootstrapStatusDependencies,
 } from "./http.ts";
 
-const APP_ORIGIN = "https://knowledge.uptech.example";
+const APP_ORIGIN = "https://tenant-a.example";
 const REQUEST_ID = "10000000-0000-4000-8000-000000000005";
 const ONBOARDING = issueOpaqueProof();
 const STATUS = issueOpaqueProof();
@@ -263,7 +263,7 @@ test("setup POST rejects missing or duplicate authority, setup/session coexisten
     startRequest(`__Host-uptech_onboarding=${ONBOARDING}; ${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=${SETUP}`),
     startRequest(`__Host-uptech_onboarding=${ONBOARDING}; __Host-uptech_session=${issueOpaqueProof()}`),
     startRequest(undefined, { authorization: "Bearer browser-authority" }),
-    startRequest(undefined, { origin: "https://evil.example" }),
+    startRequest(undefined, { origin: "https://tenant-b.example" }),
     startRequest(undefined, { "sec-fetch-site": "same-site" }),
     startRequest(undefined, { "x-csrf-token": issueOpaqueProof() }),
     new Request(`${APP_ORIGIN}/api/v1/onboarding/google-workspace/transactions`, {
@@ -288,7 +288,7 @@ test("setup POST rejects missing or duplicate authority, setup/session coexisten
 test("setup POST refuses non-exact Google authorization destinations", async () => {
   for (const authorizationUrl of [
     new URL("http://accounts.google.com/o/oauth2/v2/auth"),
-    new URL("https://accounts.google.com.evil.example/o/oauth2/v2/auth"),
+    new URL("https://tenant-b.example/o/oauth2/v2/auth"),
     new URL("https://accounts.google.com/o/oauth2/v2/auth/extra"),
   ]) {
     const f = fixture();
@@ -388,12 +388,12 @@ test("callback rejects malformed cookies and arbitrary or overlong Google query 
 test("callback failures expose only an allowlisted code and server request UUID", async () => {
   const f = fixture();
   f.service.callback = async () => {
-    throw Object.assign(new Error("provider said secret-domain.example token=leak"), { code: "SUPER_ADMIN_REQUIRED" });
+    throw Object.assign(new Error("provider said tenant-b.example token=leak"), { code: "SUPER_ADMIN_REQUIRED" });
   };
   const response = await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(callbackRequest());
   const location = new URL(response.headers.get("location")!);
   assert.equal(location.href, `${APP_ORIGIN}/login?error=SUPER_ADMIN_REQUIRED&request_id=${REQUEST_ID}`);
-  assert.equal(JSON.stringify([...response.headers]).includes("secret-domain"), false);
+  assert.equal(JSON.stringify([...response.headers]).includes("tenant-b.example"), false);
   assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${GOOGLE_WORKSPACE_SETUP_COOKIE_NAME}=;`)));
   assertSafe(response);
 });
@@ -589,7 +589,7 @@ test("sync retry accepts only bodyless same-origin status authority and maps req
   assertSafe(response);
 
   for (const request of [
-    recoveryRequest("sync-retry", { headers: { origin: "https://evil.example" } }),
+    recoveryRequest("sync-retry", { headers: { origin: "https://tenant-b.example" } }),
     recoveryRequest("sync-retry", { headers: { "sec-fetch-site": "same-site" } }),
     recoveryRequest("sync-retry", { headers: { "x-csrf-token": issueOpaqueProof() } }),
     recoveryRequest("sync-retry", { body: JSON.stringify({ job_id: "caller-controlled" }) }),
@@ -870,7 +870,7 @@ test("finish and logout reject wrong-CSRF and hostile native forms before reposi
     { headers: { "x-csrf-token": proof } },
     { suffix: "?workspace_id=caller" },
     { suffix: "#fragment" },
-    { headers: { origin: "https://evil.example" } },
+    { headers: { origin: "https://tenant-b.example" } },
     { headers: { "sec-fetch-site": "same-site" } },
     { headers: { authorization: "Bearer caller" } },
     { headers: { "content-type": "text/plain" } },
@@ -972,7 +972,7 @@ test("onboarding logout rejects invalid caller authority before repository work"
     capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_onboarding=${STATUS}` }),
     capabilityRequest("logout", { cookie: `__Host-uptech_onboarding=${STATUS}; __Host-uptech_session=${issueOpaqueProof()}` }),
     capabilityRequest("logout", { headers: { authorization: "Bearer caller-authority" } }),
-    capabilityRequest("logout", { headers: { origin: "https://evil.example" } }),
+    capabilityRequest("logout", { headers: { origin: "https://tenant-b.example" } }),
     capabilityRequest("logout", { headers: { "x-csrf-token": issueOpaqueProof() } }),
     capabilityRequest("logout", { query: "?workspace_id=caller-controlled" }),
     capabilityRequest("logout", { body: JSON.stringify({ reason: "caller-controlled" }) }),
