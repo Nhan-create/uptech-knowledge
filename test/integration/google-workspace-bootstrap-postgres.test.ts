@@ -118,14 +118,9 @@ type ExecutableSqlToken = {
   readonly value: string;
 };
 
-const VERIFIER_PROHIBITED_ROUTINES = new Set([
-  "read_google_workspace_bootstrap_status_v1",
-  "retry_google_workspace_bootstrap_sync_v1",
-  "finish_google_workspace_bootstrap_v1",
-  "reissue_google_workspace_bootstrap_status_v1",
-  "revoke_onboarding_capability_v1",
-  "submit_workspace_access_request_v1",
-  "read_workspace_access_request_v1",
+const VERIFIER_PURE_ROUTINES = new Set([
+  "directory_scopes_are_supported_v1",
+  "normalize_google_workspace_verified_domains_v1",
 ]);
 
 function executableSqlTokens(source: string): ExecutableSqlToken[] {
@@ -236,10 +231,23 @@ function verifierSafetyViolations(source: string): string[] {
     if (token.kind === "word" && (token.value === "execute" || token.value === "call")) {
       violations.add(`executable ${token.value.toUpperCase()}`);
     }
-    if ((token.kind === "word" || token.kind === "quoted-identifier")
-      && VERIFIER_PROHIBITED_ROUTINES.has(token.value)
-      && tokens[index + 1]?.value === "(") {
-      violations.add(`prohibited routine ${token.value}`);
+    const isIdentifier = token.kind === "word" || token.kind === "quoted-identifier";
+    const isTypeCast = tokens[index - 1]?.value === ":" && tokens[index - 2]?.value === ":";
+    const isCastType = tokens[index - 1]?.value === "as";
+    if (isIdentifier && token.value === "uptech" && tokens[index + 1]?.value === ".") {
+      const routine = tokens[index + 2];
+      const isExecutableCall = (routine?.kind === "word" || routine?.kind === "quoted-identifier")
+        && tokens[index + 3]?.value === "(";
+      if (isExecutableCall && !isTypeCast && !isCastType
+        && !VERIFIER_PURE_ROUTINES.has(routine.value)) {
+        violations.add(`non-pure UPTECH routine ${routine.value}`);
+      }
+    }
+    const isUnqualifiedVersionedCall = isIdentifier && /_v[0-9]+$/u.test(token.value)
+      && tokens[index + 1]?.value === "(" && tokens[index - 1]?.value !== ".";
+    if (isUnqualifiedVersionedCall && !isTypeCast && !isCastType
+      && !VERIFIER_PURE_ROUTINES.has(token.value)) {
+      violations.add(`non-pure unqualified routine ${token.value}`);
     }
   }
   return [...violations];
@@ -755,6 +763,11 @@ test("bootstrap verifier safety scanner rejects executable mutations without cat
     "DO E'BEGIN EXECUTE ''SELECT 1''; END';",
     "SELECT uptech.retry_google_workspace_bootstrap_sync_v1(NULL, NULL);",
     "DO $$ DECLARE result record; BEGIN result := uptech.reissue_google_workspace_bootstrap_status_v1(NULL, NULL, NULL, NULL); END $$;",
+    "SELECT uptech.prepare_google_workspace_bootstrap_v1(NULL, NULL, NULL, NULL, NULL);",
+    "DO $$ BEGIN PERFORM uptech.complete_google_workspace_bootstrap_v1(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL); END $$;",
+    "DO $$ DECLARE result record; BEGIN result := \"uptech\"/*separator*/.\"admit_google_workspace_bootstrap_start_v1\"(NULL, NULL); END $$;",
+    "SELECT \"uptech\" . publish_people_sync_generation_v1(NULL, NULL, NULL, NULL, NULL, NULL);",
+    "SET search_path = uptech; SELECT complete_google_workspace_bootstrap_v1(NULL, NULL);",
     "CALL uptech.some_dynamic_mutator();",
     "DO $$ BEGIN EXECUTE 'SELECT 1'; END $$;",
     "COPY uptech.sessions TO STDOUT;",
@@ -786,6 +799,12 @@ test("bootstrap verifier safety scanner rejects executable mutations without cat
     "DO $body$ BEGIN IF pg_catalog.strpos(definition, 'INSERT INTO uptech.sessions') <> 0 THEN NULL; END IF; END $body$;",
     "DO $body$ BEGIN IF pg_catalog.strpos(definition, $needle$DELETE FROM uptech.sessions$needle$) <> 0 THEN NULL; END IF; END $body$;",
     "DO $$ BEGIN PERFORM uptech.normalize_google_workspace_verified_domains_v1(NULL, NULL); END $$;",
+    "SELECT \"uptech\"/*pure*/.\"directory_scopes_are_supported_v1\"(NULL);",
+    "SELECT NULL::uptech.some_bounded_type_v1(32);",
+    "SELECT CAST(NULL AS uptech.some_bounded_type_v1(32));",
+    "SELECT 'uptech.complete_google_workspace_bootstrap_v1(uuid)'::regprocedure;",
+    "SELECT workspace_row.status FROM uptech.workspaces AS workspace_row;",
+    "SELECT pg_catalog.to_regprocedure('uptech.prepare_google_workspace_bootstrap_v1(uuid)');",
   ];
   for (const specimen of safeSpecimens) {
     assert.deepEqual(verifierSafetyViolations(specimen), [], specimen);
