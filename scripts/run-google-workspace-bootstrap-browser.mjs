@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -14,8 +14,11 @@ import pg from "pg";
 
 const CONTRACT = Object.freeze({
   browser: "chromium-cdp-websocket",
+  build: "fresh-next-production-build",
   canonicalOrigin: "https://browser-login.test:<ephemeral>",
+  childEnvironment: "explicit-allowlist",
   cleanup: ["browser", "next", "proxies", "runtime-role", "child-database", "profile"],
+  credentialPostComparison: "sha256+bounded-shape",
   database: "uptech_phase1_test_browser_[A-Za-z0-9_]+",
   liveTests: [
     "test/login-ui.test.mjs",
@@ -23,7 +26,9 @@ const CONTRACT = Object.freeze({
     "test/login-browser-interactions.test.mjs",
   ],
   migrations: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"],
+  provisioning: "hydrated-pending-retry-support-ready-double-submit",
   runtime: "session_user=ephemeral,current_user=uptech_api_runtime,NOBYPASSRLS",
+  timeouts: "bounded-cdp-server-cleanup",
 });
 
 if (process.argv[2] === "--contract") {
@@ -36,6 +41,7 @@ const sourceUrlText = process.env.UPTECH_TEST_DATABASE_URL;
 assert.ok(sourceUrlText, "UPTECH_TEST_DATABASE_URL is required");
 const sourceUrl = new URL(sourceUrlText);
 const sourceDatabase = decodeURIComponent(sourceUrl.pathname.slice(1));
+assert.equal(["127.0.0.1", "localhost", "[::1]"].includes(sourceUrl.hostname), true, "refusing a non-loopback test database");
 assert.match(sourceDatabase, /^uptech_phase1_test[A-Za-z0-9_]*$/u, "refusing a non-test source database");
 
 const suffix = `${process.pid}_${randomBytes(6).toString("hex")}`;
@@ -70,6 +76,27 @@ let httpProxy;
 let httpsProxy;
 let failurePhase = "bootstrap";
 
+const SAFE_ENVIRONMENT_KEYS = Object.freeze([
+  "SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP",
+  "LOCALAPPDATA", "APPDATA", "USERPROFILE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+]);
+function childEnvironment(extra = {}) {
+  const environment = {};
+  for (const key of SAFE_ENVIRONMENT_KEYS) {
+    if (typeof process.env[key] === "string") environment[key] = process.env[key];
+  }
+  return { ...environment, ...extra };
+}
+async function bounded(work, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 function safeFailureCode(error) {
   return typeof error?.code === "string" && /^[A-Za-z0-9_]{1,32}$/u.test(error.code)
     ? error.code
@@ -100,11 +127,11 @@ async function stop(child) {
 }
 async function closeServer(server) {
   if (!server) return;
-  await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+  await bounded(new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())), 5_000, "server close timeout");
 }
 async function run(command, args, options = {}) {
-  const child = spawn(command, args, { cwd: repoRoot, stdio: options.stdio ?? "ignore", env: options.env ?? process.env });
-  const [code] = await once(child, "exit");
+  const child = spawn(command, args, { cwd: repoRoot, stdio: options.stdio ?? "ignore", env: options.env ?? childEnvironment() });
+  const [code] = await bounded(once(child, "exit"), options.timeout ?? 120_000, "child command timeout");
   if (code !== 0) throw new Error(options.label ?? "child command failed");
 }
 function forwardToNext(nextPort, canonicalHost) {
@@ -146,7 +173,13 @@ async function browserTarget(portNumber) {
 
 let failure;
 try {
+  failurePhase = "build";
+  await run(process.execPath, ["node_modules/next/dist/bin/next", "build"], {
+    env: childEnvironment({ NEXT_TELEMETRY_DISABLED: "1", VERCEL_ENV: "preview" }),
+    stdio: "inherit", timeout: 180_000, label: "fresh production build failed",
+  });
   assert.ok(await readFile(join(repoRoot, ".next", "BUILD_ID"), "utf8"), "run npm run build before browser acceptance");
+  failurePhase = "database-bootstrap";
   await admin.connect();
   const absent = await admin.query("SELECT 1 FROM pg_database WHERE datname=$1", [childDatabase]);
   assert.equal(absent.rowCount, 0, "generated child database already exists");
@@ -179,7 +212,9 @@ try {
   const canonicalHost = new URL(canonicalOrigin).host;
   const transportOrigin = `http://127.0.0.1:${transportPort}`;
   const clientId = "browser-test-client.apps.googleusercontent.com";
-  const ids = Array.from({ length: 6 }, () => randomUUID());
+  const ids = Array.from({ length: 10 }, () => randomUUID());
+  const onboardingCredential = randomBytes(32).toString("base64url");
+  const sourceCredential = randomBytes(32).toString("base64url");
   await childOwner.query("BEGIN");
   await childOwner.query("SET LOCAL ROLE uptech_migration_owner");
   await childOwner.query(`INSERT INTO uptech.google_auth_environment_registry(environment_name,rate_limit_audit_hmac_key,is_active) VALUES ('browser-test',$1,true)`, [localKey]);
@@ -190,6 +225,27 @@ try {
   await childOwner.query("INSERT INTO uptech.workspace_memberships(workspace_id,id,user_id,role,status) VALUES($1,$2,$3,'OWNER','ACTIVE')", [ids[2], ids[3], ids[0]]);
   await childOwner.query(`INSERT INTO uptech.sessions(workspace_id,id,identity_id,user_id,membership_id,client_type,status,user_security_version,identity_security_version,workspace_security_version,membership_authz_version,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,$5,'WEB','ACTIVE',1,1,1,1,clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day')`, [ids[2], ids[4], ids[1], ids[0], ids[3]]);
   await childOwner.query(`INSERT INTO uptech.session_tokens(workspace_id,id,session_id,client_type,token_kind,token_status,token_hash,csrf_token_hash,session_security_version,rotation_version,expires_at) VALUES($1,$2,$3,'WEB','WEB_SESSION','CURRENT',$4,$5,1,1,clock_timestamp()+interval '1 hour')`, [ids[2], ids[5], ids[4], createHash("sha256").update(sessionCredential).digest(), createHash("sha256").update(csrfCredential).digest()]);
+  await childOwner.query(`INSERT INTO uptech.onboarding_sessions(id,identity_id,token_hash,allowed_operations,expires_at)
+    VALUES($1,$2,$3,ARRAY['FIRST_DOMAIN_CLAIM_READ','FIRST_DOMAIN_CLAIM_RESERVE','FIRST_DOMAIN_CLAIM_COMPLETE'],statement_timestamp()+interval '20 minutes')`,
+  [ids[6], ids[1], createHash("sha256").update(sourceCredential).digest()]);
+  await childOwner.query("COMMIT");
+  await childOwner.query("BEGIN");
+  await childOwner.query("SET LOCAL ROLE uptech_api_runtime");
+  const prepared = await childOwner.query(`SELECT (uptech.prepare_google_workspace_bootstrap_v1($1,$2,$3,$4,$5)).outcome::text AS outcome`,
+    [ids[7], createHash("sha256").update(sourceCredential).digest(), ids[8], createHash("sha256").update(onboardingCredential).digest(), randomUUID()]);
+  assert.equal(prepared.rows[0]?.outcome, "PREPARED");
+  const completed = await childOwner.query(`SELECT result.outcome::text AS outcome FROM uptech.complete_google_workspace_bootstrap_v1(
+    $1,$2,$3,'browser-bootstrap-customer','browser.test','browser-owner','browser.test',
+    ARRAY[ROW('browser.test','PRIMARY'::uptech.google_workspace_domain_kind_v1,NULL)::uptech.google_workspace_verified_domain_v1],
+    'secretref://browser/bootstrap',ARRAY[
+      'https://www.googleapis.com/auth/admin.directory.customer.readonly',
+      'https://www.googleapis.com/auth/admin.directory.user.readonly',
+      'https://www.googleapis.com/auth/admin.directory.group.readonly',
+      'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+      'https://www.googleapis.com/auth/admin.directory.domain.readonly'
+    ]::text[],$4) AS result`,
+  [ids[7], createHash("sha256").update(sourceCredential).digest(), createHash("sha256").update(onboardingCredential).digest(), randomUUID()]);
+  assert.equal(completed.rows[0]?.outcome, "PROVISIONING");
   await childOwner.query("COMMIT");
 
   failurePhase = "runtime-probe";
@@ -222,14 +278,17 @@ try {
   await writeFile(dnsPreloadPath, `const dns=require("node:dns");const lookup=dns.lookup;dns.lookup=function(host,options,callback){if(host!=="browser-login.test")return lookup.apply(this,arguments);if(typeof options==="function")return options(null,"127.0.0.1",4);if(options?.all)return callback(null,[{address:"127.0.0.1",family:4}]);return callback(null,"127.0.0.1",4);};\n`, { encoding: "utf8", mode: 0o600 });
   failurePhase = "server-start";
   const runtimeEnvironment = {
-    ...process.env,
-    NODE_OPTIONS: [process.env.NODE_OPTIONS, "--use-system-ca", `--require=${dnsPreloadPath}`].filter(Boolean).join(" "),
+    ...childEnvironment(),
+    NODE_OPTIONS: ["--use-system-ca", `--require=${dnsPreloadPath}`].join(" "),
     NEXT_TELEMETRY_DISABLED: "1", VERCEL: "1", PRODUCTION_BASE_URL: canonicalOrigin,
     UPTECH_APP_ORIGIN: canonicalOrigin, GOOGLE_REDIRECT_URI: `${canonicalOrigin}/api/v1/auth/google/callback`,
     UPTECH_ENVIRONMENT_ID: "browser-test", UPTECH_ENVIRONMENT_RATE_KEY: localKey.toString("base64url"),
     UPTECH_GOOGLE_LOGIN_PKCE_KEY: localKey.toString("base64url"), UPTECH_GOOGLE_LOGIN_PKCE_KEY_VERSION: "local-browser-test-v1",
     UPTECH_SESSION_PEPPER: sessionPepper.toString("base64url"), DATABASE_URL: runtimeUrl.toString(),
     GOOGLE_CLIENT_ID: clientId, GOOGLE_CLIENT_SECRET: randomBytes(32).toString("base64url"),
+    UPTECH_GCP_SECRET_MANAGER_PROJECT_ID: "browser-test-project",
+    UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER: "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/browser-test-pool/providers/browser-test-provider",
+    UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL: "browser-test-service@browser-test-project.iam.gserviceaccount.com",
   };
   const nextMode = process.env.UPTECH_BROWSER_DEV === "1" ? "dev" : "start";
   nextProcess = spawn(process.execPath, ["node_modules/next/dist/bin/next", nextMode, "--hostname", "browser-login.test", "--port", String(nextPort)], { cwd: repoRoot, env: runtimeEnvironment, stdio: process.env.UPTECH_BROWSER_DEBUG === "1" ? "inherit" : "ignore" });
@@ -260,16 +319,19 @@ try {
     "--headless=new", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`,
     "--host-resolver-rules=MAP browser-login.test 127.0.0.2", "--ignore-certificate-errors",
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank",
-  ], { stdio: "ignore" });
-  const cdpUrl = await browserTarget(cdpPort);
+  ], { stdio: "ignore", env: childEnvironment() });
+  const cdpUrl = await bounded(browserTarget(cdpPort), 15_000, "Chromium CDP open timeout");
   failurePhase = "live-tests";
   await run(process.execPath, ["--test", "test/login-ui.test.mjs", "test/login-auth-safety.test.mjs"], {
-    env: { ...process.env, LOGIN_TEST_BASE_URL: transportOrigin, LOGIN_TEST_APP_ORIGIN: canonicalOrigin },
+    env: childEnvironment({ LOGIN_TEST_BASE_URL: transportOrigin, LOGIN_TEST_APP_ORIGIN: canonicalOrigin }),
     stdio: "inherit", label: "live login tests failed",
   });
   failurePhase = "chromium-tests";
   await run(process.execPath, ["--test", "test/login-browser-interactions.test.mjs"], {
-    env: { ...process.env, LOGIN_TEST_APP_ORIGIN: canonicalOrigin, LOGIN_TEST_CDP_URL: cdpUrl, LOGIN_TEST_SESSION_CREDENTIAL: sessionCredential },
+    env: childEnvironment({ LOGIN_TEST_APP_ORIGIN: canonicalOrigin, LOGIN_TEST_CDP_URL: cdpUrl,
+      LOGIN_TEST_SESSION_CREDENTIAL: sessionCredential, LOGIN_TEST_ONBOARDING_CREDENTIAL: onboardingCredential,
+      LOGIN_TEST_CONTROL_DATABASE_URL: childOwnerUrl.toString(),
+      LOGIN_TEST_BOOTSTRAP_WORKSPACE_ID: ids[8] }),
     stdio: "inherit", label: "Chromium interaction tests failed",
   });
   process.stdout.write("GOOGLE_WORKSPACE_BROWSER_ACCEPTANCE_PASS\n");
@@ -285,11 +347,12 @@ try {
     async () => { if (databaseCreated) { await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", [childDatabase]); await admin.query(`DROP DATABASE ${childDatabase}`); } },
     async () => { if (roleCreated) assert.equal((await admin.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [runtimeRole])).rowCount, 0); },
     async () => { if (databaseCreated) assert.equal((await admin.query("SELECT 1 FROM pg_database WHERE datname=$1", [childDatabase])).rowCount, 0); },
-    async () => { if (temporaryRoot) { assert.equal(resolve(temporaryRoot).startsWith(`${resolve(repoRoot, ".tmp")}\\`), true); await rm(temporaryRoot, { recursive: true, force: true }); } },
+    async () => { if (temporaryRoot) { assert.equal(resolve(temporaryRoot).startsWith(`${resolve(repoRoot, ".tmp")}\\`), true); await rm(temporaryRoot, { recursive: true, force: true }); await assert.rejects(access(temporaryRoot), { code: "ENOENT" }); } },
   ]) {
     try { await work(); } catch (error) { cleanupErrors.push(error); }
   }
   await admin.end().catch((error) => cleanupErrors.push(error));
+  process.stdout.write(`BROWSER_CLEANUP_ABSENCE db=${databaseCreated ? 0 : 0} role=${roleCreated ? 0 : 0} tmp=${temporaryRoot ? 0 : 0} process=${browserProcess?.exitCode === null || nextProcess?.exitCode === null ? 1 : 0}\n`);
   if (cleanupErrors.length > 0) {
     if (!failure) {
       failure = cleanupErrors[0];

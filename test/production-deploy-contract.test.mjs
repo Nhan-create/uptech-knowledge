@@ -424,8 +424,11 @@ test("browser harness owns a disposable Chromium and NOBYPASSRLS acceptance boun
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(result.stdout), {
     browser: "chromium-cdp-websocket",
+    build: "fresh-next-production-build",
     canonicalOrigin: "https://browser-login.test:<ephemeral>",
+    childEnvironment: "explicit-allowlist",
     cleanup: ["browser", "next", "proxies", "runtime-role", "child-database", "profile"],
+    credentialPostComparison: "sha256+bounded-shape",
     database: "uptech_phase1_test_browser_[A-Za-z0-9_]+",
     liveTests: [
       "test/login-ui.test.mjs",
@@ -433,6 +436,19 @@ test("browser harness owns a disposable Chromium and NOBYPASSRLS acceptance boun
       "test/login-browser-interactions.test.mjs",
     ],
     migrations: ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"],
+    provisioning: "hydrated-pending-retry-support-ready-double-submit",
     runtime: "session_user=ephemeral,current_user=uptech_api_runtime,NOBYPASSRLS",
+    timeouts: "bounded-cdp-server-cleanup",
   });
+});
+
+test("browser harness rejects a remote database before any acceptance work", () => {
+  const result = spawnSync(process.execPath, [browserHarnessPath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, UPTECH_TEST_DATABASE_URL: "postgresql://test-user:test-password@db.example/uptech_phase1_test_remote" },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /refusing a non-loopback test database/);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /test-password/);
 });
