@@ -20,4 +20,4 @@
 
 ## Commit
 
-- Pending at report creation; populated by the task commit recorded in Git history.
+- Implementation commit: `0e790e4` (`feat(auth): resolve login recovery server-side`).
