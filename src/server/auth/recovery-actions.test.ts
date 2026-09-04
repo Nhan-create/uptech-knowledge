@@ -26,6 +26,30 @@ function resolve(state: RecoveryState, authenticatedAuthority: RecoveryAuthority
   return resolveRecoveryActions({ state, authority: authenticatedAuthority });
 }
 
+function invalidAuthorityVectors(family: keyof typeof RECOVERY_OPERATION_FAMILIES): readonly unknown[] {
+  const expected = RECOVERY_OPERATION_FAMILIES[family];
+  const otherFamily = family === "FIRST_DOMAIN"
+    ? RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST
+    : RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN;
+  return [
+    null,
+    Object.freeze({}),
+    Object.freeze({ operations: expected }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING" }),
+    Object.freeze({ kind: "OTHER", operations: expected }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: null }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: {} }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: expected.slice(0, 1) }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [expected[0], expected[0], ...expected.slice(2)] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected].reverse() }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected, "ACCESS_REQUEST_READ"] as readonly RecoveryOperation[] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [expected[0], otherFamily[0]] }),
+    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: ["UNKNOWN_OPERATION"] }),
+    Object.freeze({ authenticated: true, operations: expected }),
+  ];
+}
+
 const CASES = [
   ["PERSONAL_GOOGLE_ACCOUNT", ["SWITCH_GOOGLE_ACCOUNT", "OPEN_ENTERPRISE_LOGIN_HELP"], null],
   ["UNKNOWN_WORKSPACE", ["START_ORGANIZATION_SETUP", "SWITCH_GOOGLE_ACCOUNT"], FIRST_DOMAIN],
@@ -75,23 +99,7 @@ test("each privileged family rejects every non-exact authority shape", () => {
     ["BOOTSTRAP_STATUS", "DIRECTORY_BOOTSTRAP_SYNC_FAILED_RETRYABLE", "RETRY_DIRECTORY_SYNC", "CONTACT_UPTECH"],
   ] as const satisfies readonly (readonly [keyof typeof RECOVERY_OPERATION_FAMILIES, RecoveryState, string, string])[];
   for (const [family, state, privilegedAction, safeAction] of cases) {
-    const expected = RECOVERY_OPERATION_FAMILIES[family];
-    const otherFamily = family === "FIRST_DOMAIN" ? RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST : RECOVERY_OPERATION_FAMILIES.FIRST_DOMAIN;
-    const invalidAuthorities: readonly unknown[] = [
-      null,
-      Object.freeze({}),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING" }),
-      Object.freeze({ kind: "OTHER", operations: expected }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: null }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: {} }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: expected.slice(0, -1) }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected.slice(0, -1), expected[0]] }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected].reverse() }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [...expected, "ACCESS_REQUEST_READ"] as readonly RecoveryOperation[] }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: otherFamily }),
-      Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: ["UNKNOWN_OPERATION"] }),
-    ];
-    for (const invalid of invalidAuthorities) {
+    for (const invalid of invalidAuthorityVectors(family)) {
       const actions = resolve(state, invalid as RecoveryAuthority | null).map((action) => action.id);
       assert.equal(actions.includes(privilegedAction), false, `${family}: ${JSON.stringify(invalid)}`);
       assert.deepEqual(actions, [safeAction], family);
@@ -100,17 +108,16 @@ test("each privileged family rejects every non-exact authority shape", () => {
 });
 
 test("exit onboarding requires a recognized exact authenticated onboarding family", () => {
-  for (const authority of [FIRST_DOMAIN, ACCESS_REQUEST, BOOTSTRAP_STATUS]) {
+  const validAuthorities = [FIRST_DOMAIN, ACCESS_REQUEST, BOOTSTRAP_STATUS];
+  for (const authority of validAuthorities) {
     assert.deepEqual(resolve("DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", authority).map((action) => action.id), ["CONTACT_UPTECH", "EXIT_ONBOARDING"]);
   }
-  for (const invalid of [
-    null,
-    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: [] }),
-    Object.freeze({ kind: "AUTHENTICATED_ONBOARDING", operations: ["UNKNOWN_OPERATION"] }),
-    Object.freeze({ kind: "UNAUTHENTICATED_ONBOARDING", operations: RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST }),
-    Object.freeze({ authenticated: true, operations: RECOVERY_OPERATION_FAMILIES.ACCESS_REQUEST }),
-  ]) {
-    assert.deepEqual(resolve("DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", invalid as RecoveryAuthority | null).map((action) => action.id), ["CONTACT_UPTECH"]);
+  for (const family of ["FIRST_DOMAIN", "ACCESS_REQUEST", "BOOTSTRAP_STATUS"] as const) {
+    for (const invalid of invalidAuthorityVectors(family)) {
+      const actions = resolve("DIRECTORY_BOOTSTRAP_SYNC_FAILED_SUPPORT_REQUIRED", invalid as RecoveryAuthority | null).map((action) => action.id);
+      assert.equal(actions.includes("EXIT_ONBOARDING"), false, `${family}: ${JSON.stringify(invalid)}`);
+      assert.deepEqual(actions, ["CONTACT_UPTECH"], family);
+    }
   }
 });
 
