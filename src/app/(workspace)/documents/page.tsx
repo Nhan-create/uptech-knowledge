@@ -10,6 +10,8 @@ import { getKnowledgeReadAdapter } from "@/features/knowledge/get-read-adapter";
 
 export const metadata: Metadata = { title: "Tài liệu" };
 
+export const dynamic = "force-dynamic";
+
 export default async function DocumentsPage({
   searchParams,
 }: {
@@ -41,16 +43,24 @@ export default async function DocumentsPage({
     ...parsedInput,
     spaceId: legacySpaceId ?? parsedInput.spaceId,
   };
-  const [spaces, outcome] = await Promise.all([
+  const [spaces, outcome, allOutcome] = await Promise.all([
     adapter.listSpaces(),
     adapter.listDocuments(input),
+    adapter.listDocuments({ query: "" }),
   ]);
+  const allDocs = allOutcome.kind === "ready" ? allOutcome.documents : [];
+  const totalDocumentCount = allDocs.length;
+  const readyDocumentCount = allDocs.filter((d) => d.processing.kind === "ready").length;
+  const totalChunkCount = allDocs.reduce((sum, d) => sum + (d.chunkCount ?? 1), 0);
 
   return (
     <DocumentLibraryScreen
       input={input}
       outcome={outcome}
       spaces={spaces}
+      totalDocumentCount={totalDocumentCount}
+      readyDocumentCount={readyDocumentCount}
+      totalChunkCount={totalChunkCount}
       legacyLinkUnavailable={legacyLinkUnavailable}
     />
   );

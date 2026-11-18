@@ -31,14 +31,14 @@ export function AdminScaffold({ children }: { children: ReactNode }) {
     <WorkspacePage>
       <aside
         aria-label="Giới hạn của bản mẫu quản trị"
-        className="flex items-start gap-3 rounded-xl border border-amber-900/70 bg-amber-950/30 p-4 text-sm text-amber-100"
+        className="flex items-start gap-3 rounded-2xl border border-[#F6D59B] bg-[#FFF9EF] p-4 text-sm text-[#323B4D]"
       >
         <ShieldAlert
           aria-hidden="true"
-          className="mt-0.5 size-5 shrink-0 text-amber-400"
+          className="mt-0.5 size-5 shrink-0 text-[#924D05]"
         />
         <p className="leading-6">
-          <span className="font-semibold text-amber-200">
+          <span className="font-semibold text-[#924D05]">
             Khu vực quản trị · fixture UI.
           </span>{" "}
           Việc mở URL này không xác nhận vai trò hay quyền quản trị. Sản phẩm thật
@@ -60,10 +60,10 @@ export function AdminScaffold({ children }: { children: ReactNode }) {
                     href={item.href}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "flex min-h-11 items-center gap-2 rounded-lg border px-3 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
+                      "flex min-h-11 items-center gap-2 rounded-xl border px-3.5 text-sm font-semibold transition-colors",
                       active
-                        ? "border-blue-700 bg-blue-950/45 text-blue-200"
-                        : "border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-700 hover:text-slate-200",
+                        ? "border-[#1B44FF] bg-[#EEF1FF] text-[#1635C7]"
+                        : "border-[#0D1321]/10 bg-white text-[#323B4D] hover:border-[#C8D2FF] hover:text-[#0D1321]",
                     )}
                   >
                     <Icon aria-hidden="true" className="size-4 shrink-0" />

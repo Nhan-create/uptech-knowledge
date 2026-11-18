@@ -1,454 +1,794 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   AlignLeft,
+  BookmarkPlus,
   Check,
-  ClipboardCheck,
+  CheckCircle2,
+  Copy,
+  Download,
+  Eye,
   FileChartColumn,
   GitCompareArrows,
   Languages,
   ListChecks,
+  Loader2,
   Mail,
   PencilLine,
   Play,
   RotateCcw,
-  Settings2,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
+
+import { usePreferences } from "@/components/preferences/PreferencesProvider";
 import { Badge, Card } from "@/components/ui";
-import { cn } from "@/lib/utils";
-import { IconTile } from "@/components/workspace/WorkspacePrimitives";
 import {
   UtilitySourceConfigurator,
-  utilitySources,
-  type UtilitySourceId,
+  type UtilityInputMode,
 } from "@/components/workspace/UtilitySourceConfigurator";
+import { IconTile, type IconTone } from "@/components/workspace/WorkspacePrimitives";
+import type { DocumentSummaryView, SpaceSummaryView } from "@/features/knowledge/model";
+import { cn } from "@/lib/utils";
 
-type UtilityId =
-  | "summary"
-  | "translate"
-  | "checklist"
-  | "report"
-  | "email"
-  | "compare";
+type UtilityTaskId = "summary" | "checklist" | "translate" | "report" | "email";
 
-type Tool = {
-  id: UtilityId;
-  title: string;
-  description: string;
-  input: string;
+type UtilityToolDef = Readonly<{
+  id: UtilityTaskId;
   icon: LucideIcon;
-  tone: "blue" | "violet" | "emerald" | "amber" | "slate";
-  minSources: number;
-  maxSources: number;
-  allowedSourceIds?: UtilitySourceId[];
-};
+  tone: IconTone;
+  vi: { title: string; subtitle: string; badge: string };
+  en: { title: string; subtitle: string; badge: string };
+}>;
 
-const tools: Tool[] = [
+const UTILITY_TOOLS: readonly UtilityToolDef[] = [
   {
     id: "summary",
-    title: "Tóm tắt",
-    description: "Rút ý chính thành bản nháp ngắn, luôn ghi nhãn nguồn fixture.",
-    input: "Đúng 1 nguồn fixture",
     icon: AlignLeft,
     tone: "blue",
-    minSources: 1,
-    maxSources: 1,
-  },
-  {
-    id: "translate",
-    title: "Dịch thuật",
-    description: "Chuẩn bị bản dịch mẫu để người dùng kiểm tra thuật ngữ.",
-    input: "1 nguồn · đích tiếng Anh fixture",
-    icon: Languages,
-    tone: "violet",
-    minSources: 1,
-    maxSources: 1,
+    vi: {
+      title: "Tóm tắt điều hành",
+      subtitle: "Cô đọng ý chính, số liệu, SLA & hạn mốc quan trọng.",
+      badge: "Nhanh",
+    },
+    en: {
+      title: "Executive Summary",
+      subtitle: "Distill key points, metrics, SLAs, and deadlines.",
+      badge: "Fast",
+    },
   },
   {
     id: "checklist",
-    title: "Checklist",
-    description: "Chuyển nội dung nguồn thành danh sách việc cần rà soát.",
-    input: "1–3 nguồn fixture",
     icon: ListChecks,
     tone: "emerald",
-    minSources: 1,
-    maxSources: 3,
+    vi: {
+      title: "Checklist hành động",
+      subtitle: "Chuyển quy trình thành từng đầu việc có thể tick kiểm tra.",
+      badge: "Thực thi",
+    },
+    en: {
+      title: "Action Checklist",
+      subtitle: "Turn policies into checkable action items.",
+      badge: "Tasks",
+    },
+  },
+  {
+    id: "translate",
+    icon: Languages,
+    tone: "violet",
+    vi: {
+      title: "Dịch thuật chuẩn ngữ cảnh",
+      subtitle: "Dịch giữ nguyên thuật ngữ, cấu trúc và số liệu gốc.",
+      badge: "Đa ngôn ngữ",
+    },
+    en: {
+      title: "Accurate Translation",
+      subtitle: "Preserve domain terminology, structure, and figures.",
+      badge: "Multilingual",
+    },
   },
   {
     id: "report",
-    title: "Báo cáo",
-    description: "Tạo cấu trúc báo cáo nội bộ mẫu có phát hiện và đề xuất.",
-    input: "1 nguồn · mẫu đầu ra fixture",
     icon: FileChartColumn,
     tone: "amber",
-    minSources: 1,
-    maxSources: 1,
+    vi: {
+      title: "Báo cáo phân tích",
+      subtitle: "Tạo bản brief 4 phần: Bối cảnh, Phát hiện, Rủi ro & Đề xuất.",
+      badge: "Cấu trúc",
+    },
+    en: {
+      title: "Structured Report",
+      subtitle: "Context, findings, risks, and concrete recommendations.",
+      badge: "Brief",
+    },
   },
   {
     id: "email",
-    title: "Email",
-    description: "Soạn email nháp để chỉnh sửa; không gửi ra bên ngoài.",
-    input: "1 nguồn · người đọc fixture",
     icon: Mail,
     tone: "blue",
-    minSources: 1,
-    maxSources: 1,
-  },
-  {
-    id: "compare",
-    title: "So sánh",
-    description: "Đối chiếu hai phiên bản quy trình fixture bằng chữ lẫn ký hiệu.",
-    input: "Đúng 2 phiên bản bàn giao fixture",
-    icon: GitCompareArrows,
-    tone: "violet",
-    minSources: 2,
-    maxSources: 2,
-    allowedSourceIds: ["handover-v21", "handover-v22"],
+    vi: {
+      title: "Soạn Email nội bộ",
+      subtitle: "Viết email sẵn sàng gửi với tiêu đề và hành động rõ ràng.",
+      badge: "Giao tiếp",
+    },
+    en: {
+      title: "Draft Workplace Email",
+      subtitle: "Ready-to-edit email with crisp subject and next steps.",
+      badge: "Comms",
+    },
   },
 ];
 
-type UtilitySource = (typeof utilitySources)[number];
+const TARGET_LANGUAGES = [
+  "English",
+  "Tiếng Việt",
+  "日本語 (Japanese)",
+  "한국어 (Korean)",
+];
 
-const sourceNotes: Record<
-  UtilitySourceId,
-  { vietnamese: string; english: string }
-> = {
-  "handover-v21": {
-    vietnamese:
-      "Fixture 2.1 mô tả bước chuẩn bị hồ sơ, kiểm tra tài sản và chốt đầu việc bàn giao.",
-    english:
-      "Fixture 2.1 describes document preparation, asset review, and confirmation of handover actions.",
-  },
-  "handover-v22": {
-    vietnamese:
-      "Fixture 2.2 bổ sung bước rà soát quyền truy cập và người phụ trách cho đầu việc còn mở.",
-    english:
-      "Fixture 2.2 adds access review and an owner for each outstanding handover action.",
-  },
-  "hr-handbook": {
-    vietnamese:
-      "Cẩm nang fixture mô tả kênh phối hợp, đầu mối hỗ trợ và bước xác nhận thông tin nội bộ.",
-    english:
-      "The handbook fixture describes coordination channels, support contacts, and internal information checks.",
-  },
-};
+const QUICK_INSTRUCTIONS = {
+  vi: [
+    "Tập trung vào thời hạn, SLA & người phụ trách",
+    "Viết ngắn gọn dưới 180 chữ để đọc nhanh",
+    "Giọng văn trang trọng gửi Ban quản lý",
+  ],
+  en: [
+    "Focus on deadlines, SLAs & owners",
+    "Keep under 180 words for quick scanning",
+    "Executive tone for leadership review",
+  ],
+} as const;
 
-function createDraft(toolId: UtilityId, sources: UtilitySource[]) {
-  const [primarySource, secondarySource] = sources;
+type UtilityApiSuccess = Readonly<{
+  ok: true;
+  task: UtilityTaskId;
+  model: string;
+  title: string;
+  output: string;
+  takeaways: readonly string[];
+  sourcesUsed: ReadonlyArray<{
+    documentId: string | null;
+    title: string;
+    spaceName: string | null;
+  }>;
+  disclaimer: string;
+}>;
 
-  if (!primarySource) return "";
+type UtilityWorkbenchProps = Readonly<{
+  documents: readonly DocumentSummaryView[];
+  spaces: readonly SpaceSummaryView[];
+}>;
 
-  const primaryNote = sourceNotes[primarySource.id];
-  const sourceLabel = `[Nguồn fixture: ${primarySource.title}]`;
+export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
+  const { locale } = usePreferences();
+  const readyDocuments = documents.filter((doc) => doc.processing.kind === "ready");
 
-  switch (toolId) {
-    case "summary":
-      return `${primaryNote.vietnamese}\n\n${sourceLabel}\nBản nháp cần được đối chiếu lại với chính fixture đã chọn trước khi sử dụng.`;
-    case "translate":
-      return `Fixture translation — ${primarySource.title}\n\n${primaryNote.english}\n\n[Fixture source: ${primarySource.title}]\nTerminology requires human review before use.`;
-    case "checklist":
-      return `${sources
-        .map(
-          (source) =>
-            `□ Rà soát ${source.title}: ${sourceNotes[source.id].vietnamese}`,
-        )
-        .join("\n")}\n\n□ Xác nhận người phụ trách và thời hạn\n□ Đối chiếu từng mục với các nguồn fixture đã chọn`;
-    case "report":
-      return `1. Nguồn fixture\n${primarySource.title}\n\n2. Phát hiện minh họa\n${primaryNote.vietnamese}\n\n3. Đề xuất rà soát\nĐối chiếu phát hiện với nguồn fixture và xác nhận người có thẩm quyền trước khi dùng.`;
-    case "email":
-      return `Tiêu đề: [Bản nháp fixture] Nội dung cần rà soát từ ${primarySource.title}\n\nChào anh/chị,\n\nMình gửi ghi chú minh họa từ nguồn đã chọn: ${primaryNote.vietnamese}\n\nVui lòng kiểm tra lại fixture trước mọi hành động tiếp theo.\n\nTrân trọng,`;
-    case "compare":
-      if (!secondarySource) return "";
-      return `NGUỒN A · ${primarySource.title}\n${primaryNote.vietnamese}\n\nNGUỒN B · ${secondarySource.title}\n${sourceNotes[secondarySource.id].vietnamese}\n\nĐỐI CHIẾU FIXTURE\nKhác biệt trên được mô phỏng từ đúng hai phiên bản đã chọn; cần đối chiếu tài liệu gốc và không được xem là kết luận pháp lý.`;
-  }
-}
-
-export function UtilityWorkbench() {
-  const [activeTool, setActiveTool] = useState<UtilityId>("summary");
-  const [selectedSourceIds, setSelectedSourceIds] = useState<UtilitySourceId[]>(
-    [],
+  const [activeTool, setActiveTool] = useState<UtilityTaskId>("summary");
+  const [inputMode, setInputMode] = useState<UtilityInputMode>(
+    readyDocuments.length > 0 ? "library" : "paste",
   );
-  const [draft, setDraft] = useState<string | null>(null);
-  const [reviewed, setReviewed] = useState(false);
-  const [statusMessage, setStatusMessage] = useState(
-    "Chưa chạy tác vụ demo. Hãy chọn nguồn fixture hợp lệ.",
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>(
+    readyDocuments[0] ? [readyDocuments[0].id] : [],
   );
+  const [pastedTitle, setPastedTitle] = useState("");
+  const [pastedText, setPastedText] = useState("");
+  const [targetLanguage, setTargetLanguage] = useState("English");
+  const [customInstruction, setCustomInstruction] = useState("");
+
+  const [isRunning, setIsRunning] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [result, setResult] = useState<UtilityApiSuccess | null>(null);
+  const [editableOutput, setEditableOutput] = useState("");
+  const [viewMode, setViewMode] = useState<"rendered" | "edit">("rendered");
+  const [copied, setCopied] = useState(false);
+  const [checkedLines, setCheckedLines] = useState<Record<number, boolean>>({});
+  const [savingCards, setSavingCards] = useState(false);
+  const [savedCardsCount, setSavedCardsCount] = useState<number | null>(null);
 
   const selectedTool =
-    tools.find((tool) => tool.id === activeTool) ?? tools[0];
-  const sourceSelectionIsValid =
-    selectedSourceIds.length >= selectedTool.minSources &&
-    selectedSourceIds.length <= selectedTool.maxSources;
-  const selectedSources = utilitySources.filter((source) =>
-    selectedSourceIds.includes(source.id),
-  );
+    UTILITY_TOOLS.find((item) => item.id === activeTool) ?? UTILITY_TOOLS[0];
 
-  function selectTool(tool: Tool) {
-    if (tool.id === activeTool) return;
-    setActiveTool(tool.id);
-    setSelectedSourceIds([]);
-    setDraft(null);
-    setReviewed(false);
-    setStatusMessage(
-      `Đã chọn tác vụ ${tool.title}. Hãy chọn nguồn fixture phù hợp.`,
-    );
+  const hasValidLibrary =
+    inputMode === "library" && selectedDocIds.length > 0;
+  const hasValidPaste =
+    inputMode === "paste" && pastedText.trim().length >= 15;
+  const canRun = (hasValidLibrary || hasValidPaste) && !isRunning;
+
+  async function handleRunUtility() {
+    if (!canRun) return;
+    setIsRunning(true);
+    setErrorMessage(null);
+    setSavedCardsCount(null);
+    setCheckedLines({});
+
+    try {
+      const response = await fetch("/api/v1/workspace/utility", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task: activeTool,
+          documentIds: inputMode === "library" ? selectedDocIds : [],
+          pastedTitle: inputMode === "paste" ? pastedTitle : "",
+          pastedText: inputMode === "paste" ? pastedText : "",
+          targetLanguage: activeTool === "translate" ? targetLanguage : undefined,
+          customInstruction: customInstruction.trim() || undefined,
+          locale,
+        }),
+      });
+      const payload = (await response.json()) as
+        | UtilityApiSuccess
+        | { error?: { message?: string } };
+
+      if (!response.ok || !("ok" in payload)) {
+        const msg =
+          "error" in payload && payload.error?.message
+            ? payload.error.message
+            : locale === "en"
+              ? "Failed to run AI utility."
+              : "Không thể chạy tiện ích AI.";
+        setErrorMessage(msg);
+        return;
+      }
+
+      setResult(payload);
+      setEditableOutput(payload.output);
+      setViewMode("rendered");
+    } catch {
+      setErrorMessage(
+        locale === "en"
+          ? "Network connection error while calling AI."
+          : "Lỗi kết nối mạng khi gọi máy chủ AI.",
+      );
+    } finally {
+      setIsRunning(false);
+    }
   }
 
-  function updateSources(ids: UtilitySourceId[]) {
-    setSelectedSourceIds(ids);
-    setReviewed(false);
-    setStatusMessage(
-      `Đã chọn ${ids.length} nguồn fixture cho tác vụ ${selectedTool.title}.`,
-    );
+  async function handleCopyOutput() {
+    if (!editableOutput) return;
+    try {
+      await navigator.clipboard.writeText(editableOutput);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked in non-HTTPS context
+    }
   }
 
-  function runDemo() {
-    if (!sourceSelectionIsValid) return;
-    setDraft(createDraft(activeTool, selectedSources));
-    setReviewed(false);
-    setStatusMessage(
-      `Đã tạo bản nháp fixture cho tác vụ ${selectedTool.title}. Chưa có dữ liệu nào được lưu hoặc gửi.`,
-    );
+  function handleDownloadMarkdown() {
+    if (!editableOutput) return;
+    const blob = new Blob([editableOutput], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `uptech-${activeTool}-${new Date().toISOString().slice(0, 10)}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
-  function resetDraft() {
-    setDraft(createDraft(activeTool, selectedSources));
-    setReviewed(false);
-    setStatusMessage("Đã đặt lại nội dung về bản nháp fixture ban đầu.");
+  async function handleSaveToKnowledgeCard() {
+    if (!result || savingCards || savedCardsCount !== null) return;
+    setSavingCards(true);
+    try {
+      const firstDoc =
+        inputMode === "library" && selectedDocIds[0]
+          ? readyDocuments.find((d) => d.id === selectedDocIds[0])
+          : undefined;
+      const summaryText =
+        result.takeaways.length > 0
+          ? result.takeaways.join(" • ")
+          : editableOutput.slice(0, 400);
+
+      const response = await fetch("/api/v1/workspace/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "manual",
+          kind: activeTool === "checklist" ? "rule" : "decision",
+          title: result.title,
+          summary: summaryText,
+          rationale:
+            locale === "en"
+              ? `Saved from AI Utility (${selectedTool.en.title})`
+              : `Lưu từ Tiện ích AI (${selectedTool.vi.title})`,
+          spaceId: firstDoc?.space.id ?? spaces[0]?.id ?? "spc_8f2a01",
+          sourceDocumentId: firstDoc?.id ?? null,
+          sourceDocumentName:
+            firstDoc?.name ??
+            (pastedTitle.trim() || result.sourcesUsed[0]?.title || null),
+        }),
+      });
+      if (response.ok) {
+        setSavedCardsCount(1);
+      }
+    } finally {
+      setSavingCards(false);
+    }
   }
 
-  function changeConfiguration() {
-    setDraft(null);
-    setReviewed(false);
-    setStatusMessage(
-      "Đã quay lại bước cấu hình. Lựa chọn nguồn fixture được giữ lại.",
-    );
-  }
-
-  function toggleReviewed() {
-    setReviewed((current) => !current);
-    setStatusMessage(
-      reviewed
-        ? "Đã bỏ đánh dấu rà soát cho bản nháp fixture."
-        : "Đã đánh dấu bản nháp fixture là đã rà soát trong phiên này.",
-    );
+  function toggleChecklistLine(lineIndex: number) {
+    setCheckedLines((prev) => ({
+      ...prev,
+      [lineIndex]: !prev[lineIndex],
+    }));
   }
 
   return (
-    <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.72fr)] xl:items-start">
-      <section
-        aria-labelledby="utility-tools-heading"
-        className="min-w-0 space-y-6"
-      >
+    <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.92fr)] xl:items-start">
+      {/* Left column: Tool + Source + Options */}
+      <section aria-labelledby="utility-tools-heading" className="min-w-0 space-y-6">
         <div>
-          <h2 id="utility-tools-heading" className="text-lg font-semibold text-white">
-            1. Chọn tác vụ mẫu
+          <h2 id="utility-tools-heading" className="text-base font-bold text-[#0D1321]">
+            {locale === "en" ? "1. Choose AI task" : "1. Chọn tác vụ AI"}
           </h2>
-          <p className="mt-1 text-sm leading-5 text-slate-400">
-            Chuyển tác vụ sẽ xóa cấu hình và bản nháp đang mở trong phiên này.
-          </p>
-        </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          {tools.map((tool) => (
-            <button
-              key={tool.id}
-              type="button"
-              aria-pressed={activeTool === tool.id}
-              onClick={() => selectTool(tool)}
-              className={cn(
-                "group min-h-48 rounded-2xl border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
-                activeTool === tool.id
-                  ? "border-blue-600 bg-blue-950/35 shadow-lg shadow-blue-950/20"
-                  : "border-slate-800 bg-slate-900/70 hover:border-slate-700 hover:bg-slate-900",
-              )}
+          <div className="mt-3 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+            {UTILITY_TOOLS.map((tool) => {
+              const selected = activeTool === tool.id;
+              const labels = tool[locale];
+              return (
+                <button
+                  key={tool.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => {
+                    setActiveTool(tool.id);
+                    setErrorMessage(null);
+                  }}
+                  className={cn(
+                    "group flex flex-col justify-between rounded-2xl border p-3.5 text-left transition-all",
+                    selected
+                      ? "border-[#1B44FF] bg-[#F4F6FF] shadow-[0_10px_24px_-12px_rgba(27,68,255,0.28)]"
+                      : "border-[#0D1321]/10 bg-white hover:border-[#C8D2FF]",
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <IconTile icon={tool.icon} tone={tool.tone} className="size-8 rounded-xl" />
+                    {selected ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#1B44FF] px-2 py-0.5 text-[10px] font-semibold [color:#FFFFFF]">
+                        <Check aria-hidden="true" className="size-3" />
+                        {locale === "en" ? "Active" : "Đang chọn"}
+                      </span>
+                    ) : (
+                      <Badge variant="neutral" size="sm">
+                        {labels.badge}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="mt-2.5">
+                    <h3 className="text-sm font-bold text-[#0D1321]">{labels.title}</h3>
+                    <p className="mt-1 text-xs leading-5 text-[#505A6E]">{labels.subtitle}</p>
+                  </div>
+                </button>
+              );
+            })}
+
+            <Link
+              href="/documents/compare"
+              className="group flex flex-col justify-between rounded-2xl border border-dashed border-[#0D1321]/16 bg-[#FAF9FB] p-3.5 text-left transition-all hover:border-[#1B44FF] hover:bg-[#F4F6FF]"
             >
-              <div className="flex items-start justify-between gap-4">
-                <IconTile icon={tool.icon} tone={tool.tone} />
-                {activeTool === tool.id ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-700 bg-blue-950 px-2 py-1 text-[11px] font-semibold text-blue-300">
-                    <Check aria-hidden="true" className="size-3" />
-                    Đang chọn
-                  </span>
-                ) : (
-                  <Badge variant="neutral" size="sm">
-                    Fixture
-                  </Badge>
-                )}
+              <div className="flex items-start justify-between gap-2">
+                <IconTile icon={GitCompareArrows} tone="violet" className="size-8 rounded-xl" />
+                <Badge variant="info" size="sm">
+                  Diff
+                </Badge>
               </div>
-              <h3 className="mt-5 font-semibold text-white">{tool.title}</h3>
-              <p className="mt-2 text-sm leading-6 text-slate-400">
-                {tool.description}
-              </p>
-              <p className="mt-4 text-xs text-slate-400">Đầu vào: {tool.input}</p>
-            </button>
-          ))}
-        </div>
-
-        {draft === null ? (
-          <div className="space-y-4">
-            <UtilitySourceConfigurator
-              selectedIds={selectedSourceIds}
-              minSources={selectedTool.minSources}
-              maxSources={selectedTool.maxSources}
-              allowedSourceIds={selectedTool.allowedSourceIds}
-              onChange={updateSources}
-            />
-            <button
-              type="button"
-              onClick={runDemo}
-              disabled={!sourceSelectionIsValid}
-              aria-describedby="utility-run-note"
-              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
-            >
-              <Play aria-hidden="true" className="size-4" />
-              Chạy demo cục bộ
-            </button>
-            <p id="utility-run-note" className="text-xs leading-5 text-slate-400">
-              Nút chỉ tạo nội dung fixture trong trình duyệt; không gọi AI, API hay
-              kiểm tra quyền thật.
-            </p>
-          </div>
-        ) : (
-          <Card className="p-4 sm:p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-semibold text-white">Cấu hình đã chạy</p>
-                <p className="mt-1 text-xs leading-5 text-slate-400">
-                  {selectedSources.length} nguồn fixture · {selectedTool.title}
+              <div className="mt-2.5">
+                <h3 className="text-sm font-bold text-[#0D1321]">
+                  {locale === "en" ? "Compare 2 Documents" : "So sánh 2 tài liệu"}
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-[#505A6E]">
+                  {locale === "en"
+                    ? "Open side-by-side Diff workspace for two Ready versions."
+                    : "Đối chiếu điểm thêm, sửa và xóa giữa hai phiên bản."}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={changeConfiguration}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 text-sm font-semibold text-slate-300 transition-colors hover:border-blue-700 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-              >
-                <Settings2 aria-hidden="true" className="size-4" />
-                Đổi cấu hình
-              </button>
-            </div>
-          </Card>
-        )}
-      </section>
-
-      <section
-        aria-labelledby="draft-heading"
-        className="min-w-0 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-black/20 xl:sticky xl:top-24"
-      >
-        <header className="flex flex-col gap-3 border-b border-slate-800 p-5 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex min-w-0 items-start gap-3">
-            <IconTile icon={PencilLine} tone="blue" />
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-400">
-                3. Bản nháp và rà soát
-              </p>
-              <h2 id="draft-heading" className="mt-1 font-semibold text-white">
-                {selectedTool.title} · Kết quả fixture
-              </h2>
-            </div>
+            </Link>
           </div>
-          <Badge
-            variant={
-              draft === null ? "neutral" : reviewed ? "success" : "warning"
-            }
-            dot={draft !== null}
-          >
-            {draft === null
-              ? "Chưa chạy"
-              : reviewed
-                ? "Đã rà soát"
-                : "Chờ rà soát"}
-          </Badge>
-        </header>
+        </div>
 
-        <div className="p-5">
-          {draft === null ? (
-            <div className="flex min-h-72 flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950/45 px-5 py-10 text-center">
-              <IconTile icon={Settings2} tone="slate" className="size-12" />
-              <h3 className="mt-4 font-semibold text-white">Chưa có bản nháp</h3>
-              <p className="mt-1 max-w-sm text-sm leading-6 text-slate-400">
-                Chọn đủ nguồn fixture ở bước 2 rồi chạy demo để tạo nội dung có thể
-                chỉnh sửa.
-              </p>
-            </div>
-          ) : (
-            <>
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-            <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
-              <span className="text-xs font-medium text-slate-400">
-                Nguồn fixture:
-              </span>
-              {selectedSources.map((source) => (
-                <span
-                  key={source.id}
-                  className="max-w-full rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300"
-                >
-                  {source.title}
-                </span>
-              ))}
-            </div>
+        {/* Step 2: Source selection */}
+        <Card className="p-5">
+          <h2 className="text-base font-bold text-[#0D1321]">
+            {locale === "en" ? "2. Select input source" : "2. Chọn dữ liệu đầu vào"}
+          </h2>
+          <p className="mt-1 text-xs leading-5 text-[#505A6E]">
+            {locale === "en"
+              ? "Pick 1–5 Ready documents from your workspace or paste raw text directly."
+              : "Chọn tối đa 5 tài liệu Sẵn sàng trong Thư viện hoặc dán trực tiếp văn bản bạn cần xử lý."}
+          </p>
 
-            <label htmlFor="utility-draft" className="mt-3 block text-xs font-semibold text-slate-400">
-              Nội dung bản nháp
-            </label>
-            <textarea
-              id="utility-draft"
-              value={draft}
-              onChange={(event) => {
-                setDraft(event.target.value);
-                setReviewed(false);
-                setStatusMessage(
-                  "Nội dung fixture đã thay đổi; trạng thái rà soát được đặt lại.",
-                );
-              }}
-              rows={12}
-              className="mt-2 min-h-72 w-full resize-y rounded-lg border border-slate-700 bg-slate-900 p-3 text-base leading-7 text-slate-200 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 sm:text-sm"
-              aria-describedby="draft-safety-note"
+          <div className="mt-4">
+            <UtilitySourceConfigurator
+              locale={locale}
+              documents={readyDocuments}
+              spaces={spaces}
+              inputMode={inputMode}
+              onChangeInputMode={setInputMode}
+              selectedDocIds={selectedDocIds}
+              onChangeDocIds={setSelectedDocIds}
+              pastedTitle={pastedTitle}
+              onChangePastedTitle={setPastedTitle}
+              pastedText={pastedText}
+              onChangePastedText={setPastedText}
             />
           </div>
 
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+          {/* Step 3: Task options */}
+          <div className="mt-5 space-y-3 border-t border-[#0D1321]/8 pt-4">
+            {activeTool === "translate" ? (
+              <div>
+                <p className="text-xs font-semibold text-[#323B4D]">
+                  {locale === "en" ? "Target language" : "Ngôn ngữ đích"}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {TARGET_LANGUAGES.map((lang) => (
+                    <button
+                      key={lang}
+                      type="button"
+                      onClick={() => setTargetLanguage(lang)}
+                      className={cn(
+                        "rounded-full border px-3 py-1 text-xs font-semibold transition-colors",
+                        targetLanguage === lang
+                          ? "border-[#1B44FF] bg-[#EEF1FF] text-[#1635C7]"
+                          : "border-[#0D1321]/10 bg-white text-[#505A6E] hover:text-[#0D1321]",
+                      )}
+                    >
+                      {lang}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div>
+              <label
+                htmlFor="utility-custom-instruction"
+                className="block text-xs font-semibold text-[#323B4D]"
+              >
+                {locale === "en"
+                  ? "Custom instructions (optional)"
+                  : "Yêu cầu bổ sung cho AI (tuỳ chọn)"}
+              </label>
+              <input
+                id="utility-custom-instruction"
+                type="text"
+                value={customInstruction}
+                onChange={(e) => setCustomInstruction(e.target.value)}
+                placeholder={
+                  locale === "en"
+                    ? "E.g., Emphasize compliance risks and highlight owners..."
+                    : "Ví dụ: Nhấn mạnh các mốc SLA và trách nhiệm từng phòng ban..."
+                }
+                className="mt-1.5 h-10 w-full rounded-xl border border-[#0D1321]/12 bg-white px-3 text-sm text-[#0D1321] outline-none placeholder:text-[#505A6E] focus:border-[#1B44FF]"
+              />
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {QUICK_INSTRUCTIONS[locale].map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => setCustomInstruction(chip)}
+                    className="rounded-full bg-[#F3F4F8] px-2.5 py-1 text-[11px] font-medium text-[#505A6E] transition-colors hover:bg-[#EEF1FF] hover:text-[#1635C7]"
+                  >
+                    + {chip}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {errorMessage ? (
+              <p
+                role="alert"
+                className="rounded-xl border border-[#F5C6C3] bg-[#FFF5F5] px-3.5 py-2.5 text-xs font-medium text-[#B32018]"
+              >
+                {errorMessage}
+              </p>
+            ) : null}
+
             <button
               type="button"
-              onClick={toggleReviewed}
-              className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+              onClick={handleRunUtility}
+              disabled={!canRun}
+              className="glean-btn glean-btn-cobalt mt-2 w-full justify-center py-3 text-sm disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <ClipboardCheck aria-hidden="true" className="size-4" />
-              {reviewed ? "Bỏ đánh dấu đã rà soát" : "Đánh dấu đã rà soát"}
-            </button>
-            <button
-              type="button"
-              onClick={resetDraft}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 text-sm font-semibold text-slate-300 transition-colors hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              <RotateCcw aria-hidden="true" className="size-4" />
-              Đặt lại bản nháp
+              {isRunning ? (
+                <>
+                  <Loader2 aria-hidden="true" className="size-4 animate-spin" />
+                  <span>
+                    {locale === "en"
+                      ? `Running ${selectedTool.en.title} with AI...`
+                      : `Đang chạy ${selectedTool.vi.title} bằng AI...`}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Play aria-hidden="true" className="size-4" />
+                  <span>
+                    {locale === "en"
+                      ? `Run ${selectedTool.en.title}`
+                      : `Chạy ${selectedTool.vi.title}`}
+                  </span>
+                </>
+              )}
             </button>
           </div>
+        </Card>
+      </section>
 
-          <p
-            id="draft-safety-note"
-            className="mt-4 flex items-start gap-2 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-xs leading-5 text-amber-200"
-          >
-            <Sparkles aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            Đây là nội dung fixture cục bộ. Các thao tác không lưu, không gửi
-            email, không xuất bản, không tạo công việc và không xác nhận quyền truy
-            cập.
-          </p>
-            </>
-          )}
-          <p
-            className="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {statusMessage}
-          </p>
-        </div>
+      {/* Right column: Live AI Output Studio */}
+      <section aria-labelledby="utility-output-heading" className="min-w-0 xl:sticky xl:top-24">
+        <Card className="overflow-hidden border-[#0D1321]/10 bg-white">
+          <header className="flex flex-wrap items-center justify-between gap-2 border-b border-[#0D1321]/8 bg-[#FAF9FB] px-5 py-3.5">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-[#505A6E]">
+                {locale === "en" ? "AI Output Canvas" : "Kết quả Tiện ích AI"}
+              </p>
+              <h2 id="utility-output-heading" className="truncate text-sm font-bold text-[#0D1321]">
+                {result ? result.title : selectedTool[locale].title}
+              </h2>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {result ? (
+                <Badge variant="success" size="sm">
+                  {locale === "en" ? "Completed" : "Hoàn tất"}
+                </Badge>
+              ) : (
+                <Badge variant={isRunning ? "warning" : "neutral"} size="sm">
+                  {isRunning
+                    ? locale === "en"
+                      ? "Processing"
+                      : "Đang xử lý"
+                    : locale === "en"
+                      ? "Ready"
+                      : "Sẵn sàng"}
+                </Badge>
+              )}
+            </div>
+          </header>
+
+          <div className="p-5">
+            {!result ? (
+              <div className="flex min-h-80 flex-col items-center justify-center rounded-2xl border border-dashed border-[#0D1321]/14 bg-[#FAF9FB] px-6 py-12 text-center">
+                <IconTile icon={Sparkles} tone="blue" className="size-12" />
+                <h3 className="mt-4 text-base font-bold text-[#0D1321]">
+                  {locale === "en" ? "Output will appear here" : "Bản kết quả AI sẽ hiển thị tại đây"}
+                </h3>
+                <p className="mt-1.5 max-w-sm text-xs leading-6 text-[#505A6E]">
+                  {locale === "en"
+                    ? "Choose a utility on the left, select Ready library documents or paste text, then click Run to generate a grounded result."
+                    : "Chọn tác vụ bên trái, chọn tài liệu Thư viện hoặc dán văn bản trực tiếp rồi bấm Chạy để hệ thống AI xử lý dữ liệu thật."}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Action Toolbar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#0D1321]/8 pb-3">
+                  <div className="inline-flex rounded-full border border-[#0D1321]/10 bg-[#F3F4F8] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("rendered")}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold",
+                        viewMode === "rendered"
+                          ? "bg-white text-[#0D1321] shadow-xs"
+                          : "text-[#505A6E]",
+                      )}
+                    >
+                      <Eye aria-hidden="true" className="size-3.5" />
+                      <span>{locale === "en" ? "Formatted" : "Xem đẹp"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("edit")}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold",
+                        viewMode === "edit"
+                          ? "bg-white text-[#0D1321] shadow-xs"
+                          : "text-[#505A6E]",
+                      )}
+                    >
+                      <PencilLine aria-hidden="true" className="size-3.5" />
+                      <span>{locale === "en" ? "Edit" : "Chỉnh sửa"}</span>
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleCopyOutput}
+                      className="glean-btn glean-btn-secondary glean-btn-sm"
+                    >
+                      {copied ? (
+                        <Check aria-hidden="true" className="size-3.5 text-[#137333]" />
+                      ) : (
+                        <Copy aria-hidden="true" className="size-3.5" />
+                      )}
+                      <span>
+                        {copied
+                          ? locale === "en"
+                            ? "Copied"
+                            : "Đã chép"
+                          : locale === "en"
+                            ? "Copy"
+                            : "Sao chép"}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDownloadMarkdown}
+                      className="glean-btn glean-btn-secondary glean-btn-sm"
+                    >
+                      <Download aria-hidden="true" className="size-3.5" />
+                      <span>.md</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleRunUtility}
+                      disabled={isRunning}
+                      title={locale === "en" ? "Regenerate" : "Tạo lại"}
+                      className="glean-btn glean-btn-secondary glean-btn-sm"
+                    >
+                      <RotateCcw aria-hidden="true" className="size-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Content body */}
+                {viewMode === "edit" ? (
+                  <textarea
+                    aria-label={locale === "en" ? "Editable AI result" : "Nội dung chỉnh sửa"}
+                    value={editableOutput}
+                    onChange={(e) => setEditableOutput(e.target.value)}
+                    rows={14}
+                    className="w-full resize-y rounded-xl border border-[#0D1321]/14 bg-[#FAF9FB] p-3.5 text-sm leading-6 text-[#0D1321] outline-none focus:border-[#1B44FF]"
+                  />
+                ) : (
+                  <div className="max-h-[460px] space-y-2 overflow-y-auto rounded-xl border border-[#0D1321]/8 bg-[#FAF9FB] p-4 text-sm leading-6 text-[#1E2534]">
+                    {editableOutput.split(/\r?\n/u).map((line, index) => {
+                      const trimmed = line.trim();
+                      if (!trimmed) return <div key={index} className="h-1.5" />;
+                      if (trimmed.startsWith("### ")) {
+                        return (
+                          <h4 key={index} className="pt-2 text-sm font-bold text-[#0D1321]">
+                            {trimmed.slice(4)}
+                          </h4>
+                        );
+                      }
+                      if (trimmed.startsWith("## ") || trimmed.startsWith("# ")) {
+                        const headingText = trimmed.replace(/^#+\s*/u, "");
+                        return (
+                          <h3 key={index} className="pt-2 text-base font-bold text-[#0D1321]">
+                            {headingText}
+                          </h3>
+                        );
+                      }
+                      const checkboxMatch = trimmed.match(/^(?:-|\*)\s*\[( |x|X)\]\s*(.+)$/u);
+                      if (checkboxMatch) {
+                        const isChecked =
+                          checkedLines[index] ?? checkboxMatch[1]?.toLowerCase() === "x";
+                        return (
+                          <button
+                            key={index}
+                            type="button"
+                            onClick={() => toggleChecklistLine(index)}
+                            className="flex w-full items-start gap-2.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-white"
+                          >
+                            <span
+                              className={cn(
+                                "mt-1 inline-flex size-4 shrink-0 items-center justify-center rounded border",
+                                isChecked
+                                  ? "border-[#137333] bg-[#137333] [color:#FFFFFF]"
+                                  : "border-[#0D1321]/25 bg-white",
+                              )}
+                            >
+                              {isChecked ? <Check className="size-3" /> : null}
+                            </span>
+                            <span
+                              className={cn(
+                                "text-sm leading-6",
+                                isChecked && "text-[#505A6E] line-through",
+                              )}
+                            >
+                              {checkboxMatch[2]}
+                            </span>
+                          </button>
+                        );
+                      }
+                      if (/^(?:-|\*)\s+/u.test(trimmed)) {
+                        return (
+                          <p key={index} className="flex items-start gap-2 pl-1">
+                            <span className="mt-2 size-1.5 shrink-0 rounded-full bg-[#1B44FF]" />
+                            <span>{trimmed.replace(/^(?:-|\*)\s+/u, "")}</span>
+                          </p>
+                        );
+                      }
+                      return <p key={index}>{trimmed}</p>;
+                    })}
+                  </div>
+                )}
+
+                {/* Key Takeaways + 1-click Save to Knowledge Card */}
+                {result.takeaways.length > 0 ? (
+                  <div className="rounded-xl border border-[#C8D2FF] bg-[#F4F6FF] p-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-bold text-[#1635C7]">
+                        {locale === "en"
+                          ? "Key takeaways extracted"
+                          : "Điểm cốt lõi rút ra"}
+                      </p>
+                      {savedCardsCount ? (
+                        <Link
+                          href="/knowledge"
+                          className="inline-flex items-center gap-1 rounded-full bg-[#E6F4EA] px-3 py-1 text-xs font-semibold text-[#137333]"
+                        >
+                          <CheckCircle2 aria-hidden="true" className="size-3.5" />
+                          <span>
+                            {locale === "en" ? "Saved to Knowledge Cards →" : "Đã lưu sang Thẻ tri thức →"}
+                          </span>
+                        </Link>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleSaveToKnowledgeCard}
+                          disabled={savingCards}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-[#0B1220] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#172136] disabled:opacity-50"
+                        >
+                          <BookmarkPlus aria-hidden="true" className="size-3.5" />
+                          <span>
+                            {savingCards
+                              ? locale === "en"
+                                ? "Saving..."
+                                : "Đang lưu..."
+                              : locale === "en"
+                                ? "Save as Knowledge Card"
+                                : "Lưu thành Thẻ tri thức"}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    <ul className="mt-2 space-y-1 text-xs leading-5 text-[#323B4D]">
+                      {result.takeaways.map((bullet, idx) => (
+                        <li key={idx}>• {bullet}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {/* Sources & grounding footer */}
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[#505A6E]">
+                  <span className="font-semibold text-[#323B4D]">
+                    {locale === "en" ? "Sources used:" : "Nguồn sử dụng:"}
+                  </span>
+                  {result.sourcesUsed.map((source, i) =>
+                    source.documentId ? (
+                      <Link
+                        key={`${source.documentId}-${i}`}
+                        href={`/documents/${source.documentId}`}
+                        className="rounded-full border border-[#0D1321]/10 bg-white px-2.5 py-0.5 font-medium text-[#1635C7] hover:underline"
+                      >
+                        {source.title}
+                      </Link>
+                    ) : (
+                      <span
+                        key={i}
+                        className="rounded-full border border-[#0D1321]/10 bg-white px-2.5 py-0.5 font-medium"
+                      >
+                        {source.title}
+                      </span>
+                    ),
+                  )}
+                </div>
+
+                <p className="text-[11px] leading-5 text-[#505A6E]">{result.disclaimer}</p>
+              </div>
+            )}
+          </div>
+        </Card>
       </section>
     </div>
   );

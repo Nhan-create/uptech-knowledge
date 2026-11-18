@@ -17,7 +17,7 @@ export function SettingsLauncher({ className = "" }: SettingsLauncherProps) {
     <button
       type="button"
       onClick={(event) => requestPreferencesOpen(event.currentTarget)}
-      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 text-sm font-semibold text-blue-300 transition-colors hover:border-blue-600 hover:bg-blue-950/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${className}`}
+      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[#0D1321]/14 bg-white px-4 text-sm font-semibold text-[#1635C7] transition-colors hover:border-[#1B44FF] hover:bg-[#EEF1FF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B44FF] ${className}`}
     >
       <Settings2 aria-hidden="true" className="size-4" />
       {label}

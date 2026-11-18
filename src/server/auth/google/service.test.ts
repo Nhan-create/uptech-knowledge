@@ -112,6 +112,7 @@ class FakeRepository implements GoogleLoginRepository {
   completeError: Error | undefined;
   rejectUnboundError: Error | undefined;
   rejectBoundError: Error | undefined;
+  syncProfileClaims?: GoogleLoginRepository["syncProfileClaims"];
 
   private transaction: BeginGoogleLoginInput | undefined;
   private completionHandleHash: Uint8Array | undefined;
@@ -1170,4 +1171,34 @@ test("invalid request identifiers are rejected before any side effect", async ()
     rejectBound: 0,
   });
   assert.equal(harness.oidc.createCalls.length, 0);
+});
+
+test("normal callback syncs verified display name and picture without failing login when sync throws", async () => {
+  const synced: Array<{
+    readonly credentialHash: Uint8Array;
+    readonly displayName: string | null;
+    readonly pictureUrl: string | null;
+  }> = [];
+  const harness = createHarness();
+  harness.repository.syncProfileClaims = async (input) => {
+    synced.push(input);
+  };
+
+  const result = await callbackWithStartedTransaction(harness);
+  assert.equal(result.outcome, "NORMAL");
+  if (result.outcome !== "NORMAL") assert.fail("expected normal");
+  assert.equal(synced.length, 1);
+  assert.equal(synced[0]?.displayName, "UPTECH Member");
+  assert.equal(synced[0]?.pictureUrl, "https://lh3.googleusercontent.com/member");
+  assert.equal(
+    Buffer.from(synced[0]!.credentialHash).toString("hex"),
+    hashCredential(result.sessionCredential),
+  );
+
+  const resilientHarness = createHarness();
+  resilientHarness.repository.syncProfileClaims = async () => {
+    throw new Error("routine unavailable");
+  };
+  const resilientResult = await callbackWithStartedTransaction(resilientHarness);
+  assert.equal(resilientResult.outcome, "NORMAL");
 });

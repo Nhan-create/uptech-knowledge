@@ -144,7 +144,10 @@ function render(
   requestId: string | null,
 ): LoginPageModel {
   const selectedActions = state === null
-    ? Object.freeze([RECOVERY_ACTION_DESCRIPTORS.START_NORMAL_LOGIN])
+    ? Object.freeze([
+        RECOVERY_ACTION_DESCRIPTORS.START_NORMAL_LOGIN,
+        RECOVERY_ACTION_DESCRIPTORS.REGISTER_ORGANIZATION,
+      ])
     : resolveRecoveryActions({ state, authority });
   const actions = requestId === null
     ? Object.freeze(selectedActions.filter((action) => action.id !== "COPY_REQUEST_ID"))

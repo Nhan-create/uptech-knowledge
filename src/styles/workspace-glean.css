@@ -1,0 +1,572 @@
+/* ============================================================================
+   UPTECH Knowledge — Glean Daylight Design System (Scoped to Workspace & AppShell)
+   Leaves root landing (/), public pages, /login, /setup, and /help untouched.
+   ============================================================================ */
+
+.uptech-glean-shell {
+  --glean-font-sans: var(--font-glean-sans, "Manrope", "Segoe UI", system-ui, sans-serif);
+  --glean-font-mono: var(--font-glean-mono, "IBM Plex Mono", ui-monospace, Consolas, monospace);
+
+  --glean-bg-canvas: #faf9fb;
+  --glean-bg-nav: rgba(255, 255, 255, 0.92);
+  --glean-surface: #ffffff;
+  --glean-surface-subtle: #f3f4f8;
+  --glean-surface-hover: #f7f8fc;
+
+  --glean-navy: #0b1220;
+  --glean-navy-hover: #172136;
+
+  --glean-ink: #0d1321;
+  --glean-ink-secondary: #323b4d;
+  --glean-ink-muted: #505a6e;
+
+  --glean-border: rgba(13, 19, 33, 0.09);
+  --glean-border-strong: rgba(13, 19, 33, 0.16);
+
+  --glean-blue: #1b44ff;
+  --glean-blue-hover: #1436d6;
+  --glean-soft: #eef1ff;
+  --glean-soft-border: #c8d2ff;
+  --glean-blue-ink: #1635c7;
+
+  --glean-official-bg: #e7f7ef;
+  --glean-official-ink: #076944;
+  --glean-fresh-bg: #ecf2ff;
+  --glean-fresh-ink: #1945c2;
+  --glean-review-bg: #fff3de;
+  --glean-review-ink: #924d05;
+  --glean-danger-bg: #fdecec;
+  --glean-danger-ink: #b32018;
+
+  --glean-shadow-card:
+    0 12px 24px -6px rgba(11, 18, 32, 0.1),
+    0 4px 10px -2px rgba(11, 18, 32, 0.05);
+  --glean-shadow-dock: 0 10px 24px -4px rgba(11, 18, 32, 0.12);
+  --glean-shadow-float: 0 18px 36px -6px rgba(11, 18, 32, 0.18);
+
+  --glean-radius-sm: 10px;
+  --glean-radius-md: 16px;
+  --glean-radius-lg: 22px;
+  --glean-radius-xl: 28px;
+
+  /* Prevent root theme inversion from altering Glean daylight workspace surfaces */
+  --bg-canvas: var(--glean-bg-canvas);
+  --bg-surface: var(--glean-surface);
+  --bg-elevated: var(--glean-surface);
+  --bg-subtle: var(--glean-surface-subtle);
+  --border-subtle: var(--glean-border);
+  --border-default: var(--glean-border-strong);
+  --border-focus: var(--glean-blue);
+  --text-primary: var(--glean-ink);
+  --text-secondary: var(--glean-ink-secondary);
+  --text-muted: var(--glean-ink-muted);
+
+  color-scheme: light;
+  min-height: 100dvh;
+  overflow-x: clip;
+  background-color: var(--glean-bg-canvas);
+  color: var(--glean-ink);
+  font-family: var(--glean-font-sans);
+  caret-color: var(--glean-blue);
+}
+
+/* Override global html[data-theme="light"] slate inversion inside the shell so daylight palette stays predictable */
+html[data-theme="light"] .uptech-glean-shell,
+html[data-theme="dark"] .uptech-glean-shell {
+  background-color: var(--glean-bg-canvas);
+  color: var(--glean-ink);
+}
+
+.uptech-glean-shell ::selection {
+  background-color: #dce3ff;
+  color: #0d1e7a;
+}
+
+.uptech-glean-shell :focus-visible {
+  outline: 2px solid var(--glean-blue);
+  outline-offset: 2px;
+}
+
+.uptech-glean-shell .chat-composer-textarea:focus-visible {
+  outline: none;
+}
+
+.glean-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.glean-mono {
+  font-family: var(--glean-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- Midnight Announcement Strip ---------------- */
+.glean-announce-bar {
+  background: linear-gradient(90deg, #090d16 0%, #101a36 55%, #090d16 100%);
+  color: #f4f6fc;
+  padding: 9px 44px 9px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 0.8125rem;
+  position: relative;
+}
+
+.glean-announce-link {
+  color: #a9bfff;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.glean-announce-link:hover {
+  color: #ffffff;
+}
+
+/* ---------------- Sticky Clean White Pill Topnav ---------------- */
+.glean-topnav {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background-color: var(--glean-bg-nav);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--glean-border);
+  padding: 10px 24px;
+}
+
+.glean-topnav-inner {
+  max-width: 1260px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.glean-topnav-add {
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 639px) {
+  .glean-announce-bar {
+    padding: 7px 38px 7px 14px;
+    font-size: 0.75rem;
+    gap: 4px 10px;
+  }
+
+  .glean-topnav {
+    padding: 10px 14px;
+  }
+
+  .glean-topnav-inner {
+    gap: 10px;
+  }
+
+  .glean-topnav-add {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    gap: 0;
+  }
+}
+
+.glean-nav-pill {
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--glean-ink-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+@media (min-width: 1440px) {
+  .glean-nav-pill {
+    padding: 0 12px;
+    font-size: 0.875rem;
+  }
+}
+
+.glean-nav-pill:hover {
+  background-color: var(--glean-surface-subtle);
+  color: var(--glean-ink);
+}
+
+.glean-nav-pill[aria-current="page"] {
+  background-color: var(--glean-soft);
+  color: var(--glean-blue-ink);
+  font-weight: 600;
+}
+
+/* ---------------- Obsidian Navy / Electric Cobalt Buttons ---------------- */
+.glean-btn {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.875rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: background-color 140ms ease, transform 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.glean-btn-sm {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.8125rem;
+}
+
+.glean-btn-navy {
+  background-color: var(--glean-navy);
+  color: #ffffff;
+}
+
+.glean-btn-navy:hover:not(:disabled) {
+  background-color: var(--glean-navy-hover);
+  color: #ffffff;
+}
+
+.glean-btn-cobalt {
+  background-color: var(--glean-blue);
+  color: #ffffff;
+}
+
+.glean-btn-cobalt:hover:not(:disabled) {
+  background-color: var(--glean-blue-hover);
+  color: #ffffff;
+}
+
+.glean-btn-secondary {
+  background-color: var(--glean-surface);
+  border-color: var(--glean-border-strong);
+  color: var(--glean-ink);
+}
+
+.glean-btn-secondary:hover:not(:disabled) {
+  background-color: var(--glean-surface-subtle);
+  color: var(--glean-ink);
+}
+
+.glean-btn-ghost {
+  background: transparent;
+  color: var(--glean-ink-secondary);
+}
+
+.glean-btn-ghost:hover:not(:disabled) {
+  background-color: var(--glean-surface-subtle);
+  color: var(--glean-ink);
+}
+
+/* ---------------- Floating Left Capsule Rail Dock ---------------- */
+.glean-floating-dock {
+  position: fixed;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 35;
+  background-color: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glean-border);
+  border-radius: 18px;
+  padding: 8px 6px;
+  box-shadow: var(--glean-shadow-dock);
+}
+
+.glean-dock-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: var(--glean-ink-muted);
+  display: grid;
+  place-items: center;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.glean-dock-btn:hover {
+  background-color: var(--glean-surface-subtle);
+  color: var(--glean-ink);
+}
+
+.glean-dock-btn[aria-current="page"] {
+  background-color: var(--glean-navy);
+  color: #ffffff;
+}
+
+/* ---------------- Chat Full-Viewport Flex Shell ---------------- */
+.uptech-glean-shell--chat {
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+@media (max-height: 580px) {
+  .glean-floating-dock {
+    display: none;
+  }
+
+  .uptech-glean-shell--chat .glean-topnav {
+    padding-top: 7px;
+    padding-bottom: 7px;
+  }
+
+  .chat-composer-footnote {
+    display: none;
+  }
+}
+
+@media (max-width: 1279px) {
+  body:has(.uptech-glean-shell--chat) .settings-menu-position [data-testid="settings-menu-trigger"] {
+    display: none;
+  }
+}
+
+/* ---------------- Main Canvas Container ---------------- */
+.glean-main-canvas {
+  max-width: 1180px;
+  min-width: 0;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 24px 96px;
+}
+
+.glean-main-canvas--chat {
+  flex: 1 1 0%;
+  min-height: 0;
+  max-width: 1520px;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 10px;
+}
+
+@media (min-width: 640px) {
+  .glean-main-canvas--chat {
+    padding: 12px 16px 14px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .glean-main-canvas {
+    padding: 32px 32px 96px 84px;
+  }
+
+  .glean-main-canvas--chat {
+    max-width: 1540px;
+    padding: 14px 76px 16px;
+  }
+}
+
+/* ---------------- Hero Iridescent Cobalt-Sky Wave Showcase ---------------- */
+.glean-hero-stage {
+  position: relative;
+  border-radius: var(--glean-radius-xl);
+  overflow: hidden;
+  padding: 34px 28px;
+  background: linear-gradient(135deg, #dde6ff 0%, #c7d7fe 28%, #e0e7ff 52%, #bae6fd 78%, #fde2e4 100%);
+}
+
+.glean-product-window {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 920px;
+  min-width: 0;
+  margin: 0 auto;
+  background-color: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: var(--glean-radius-lg);
+  box-shadow: var(--glean-shadow-card);
+  overflow: hidden;
+  text-align: left;
+}
+
+.glean-cite-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--glean-font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 1px 7px;
+  margin: 0 2px;
+  border-radius: 999px;
+  border: 1px solid var(--glean-soft-border);
+  background-color: var(--glean-soft);
+  color: var(--glean-blue-ink);
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.glean-cite-chip:hover {
+  background-color: var(--glean-blue);
+  border-color: var(--glean-blue);
+  color: #ffffff;
+}
+
+/* ---------------- 2x2 Bento Showcase Art Panels ---------------- */
+.glean-art-cobalt {
+  background: linear-gradient(145deg, #eef2ff 0%, #e0e7ff 50%, #dbeafe 100%);
+}
+
+.glean-art-peach {
+  background: linear-gradient(145deg, #fff5f2 0%, #fde8e8 55%, #f3e8ff 100%);
+}
+
+.glean-art-sky {
+  background: linear-gradient(145deg, #ecfeff 0%, #e0f2fe 55%, #eef2ff 100%);
+}
+
+.glean-art-lavender {
+  background: linear-gradient(145deg, #f5f3ff 0%, #ede9fe 55%, #eff6ff 100%);
+}
+
+.glean-mini-row {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 11px 13px;
+  border-radius: var(--glean-radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  transition: transform 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.glean-mini-row > span:first-child {
+  min-width: 0;
+  flex: 1 1 0%;
+}
+
+.glean-mini-row:hover {
+  transform: translateY(-1px);
+  background-color: #ffffff;
+  box-shadow: 0 6px 14px -6px rgba(11, 18, 32, 0.14);
+}
+
+/* ---------------- Midnight Obsidian Metrics & Governance Band ---------------- */
+.glean-trust-band {
+  background: linear-gradient(145deg, #090d16 0%, #111a30 100%);
+  color: #f4f6fc;
+  border-radius: var(--glean-radius-xl);
+}
+
+/* Explicitly preserve light text inside dark navy pills/bands even when root theme is light */
+html[data-theme="light"] .uptech-glean-shell .glean-on-dark,
+html[data-theme="light"] .uptech-glean-shell .glean-btn-navy,
+html[data-theme="light"] .uptech-glean-shell .glean-btn-cobalt,
+html[data-theme="light"] .uptech-glean-shell .glean-announce-bar,
+html[data-theme="light"] .uptech-glean-shell .glean-trust-band,
+html[data-theme="light"] .uptech-glean-shell .glean-dock-btn[aria-current="page"] {
+  color: #ffffff;
+}
+
+.glean-surface-card {
+  background-color: var(--glean-surface);
+  border: 1px solid var(--glean-border);
+  border-radius: var(--glean-radius-md);
+}
+
+@media (max-width: 640px) {
+  .glean-topnav {
+    padding: 10px 14px;
+  }
+
+  .glean-main-canvas {
+    padding: 18px 14px 88px;
+  }
+
+  .glean-hero-stage {
+    padding: 18px 14px;
+    border-radius: var(--glean-radius-lg);
+  }
+}
+
+/* ---------------- Scoped Daylight Adapter for Remaining Legacy Forms Inside AppShell ---------------- */
+.uptech-glean-shell .bg-slate-900\/75,
+.uptech-glean-shell .bg-slate-900\/80,
+.uptech-glean-shell .bg-slate-900\/70,
+.uptech-glean-shell .bg-slate-900\/60,
+.uptech-glean-shell .bg-slate-900\/55,
+.uptech-glean-shell .bg-slate-900\/50,
+.uptech-glean-shell .bg-slate-900 {
+  background-color: #ffffff;
+}
+
+.uptech-glean-shell .bg-slate-950,
+.uptech-glean-shell .bg-slate-950\/70,
+.uptech-glean-shell .bg-slate-950\/50,
+.uptech-glean-shell .bg-slate-950\/40 {
+  background-color: #faf9fb;
+}
+
+.uptech-glean-shell .bg-slate-800 {
+  background-color: #f3f4f8;
+}
+
+.uptech-glean-shell .border-slate-800,
+.uptech-glean-shell .border-slate-800\/80,
+.uptech-glean-shell .border-slate-700 {
+  border-color: rgba(13, 19, 33, 0.12);
+}
+
+.uptech-glean-shell .bg-blue-950,
+.uptech-glean-shell .bg-blue-950\/60,
+.uptech-glean-shell .bg-blue-950\/50,
+.uptech-glean-shell .bg-blue-950\/40,
+.uptech-glean-shell .bg-blue-950\/30 {
+  background-color: #eef1ff;
+}
+
+.uptech-glean-shell .border-blue-800\/60,
+.uptech-glean-shell .border-blue-700 {
+  border-color: #c8d2ff;
+}
+
+.uptech-glean-shell .bg-amber-950\/30,
+.uptech-glean-shell .bg-amber-950\/25,
+.uptech-glean-shell .bg-amber-950\/20 {
+  background-color: #fff9ef;
+}
+
+.uptech-glean-shell .border-amber-900\/60 {
+  border-color: #f6d59b;
+}
+
+.uptech-glean-shell :is(.text-white, .text-slate-100, .text-slate-200):not(.glean-on-dark):not(.glean-btn-navy):not(.glean-btn-navy *):not(.glean-btn-cobalt):not(.glean-btn-cobalt *):not(.glean-announce-bar *):not(.glean-trust-band *):not([class*="bg-[#1B44FF]"]):not([class*="bg-[#0B1220]"]):not([class*="bg-blue-6"]) {
+  color: #0d1321;
+}
+
+.uptech-glean-shell :is(.text-slate-300, .text-slate-400):not(.glean-trust-band *):not(.glean-announce-bar *) {
+  color: #505a6e;
+}
+
+.uptech-glean-shell :is(.text-blue-200, .text-blue-300, .text-blue-400) {
+  color: #1635c7;
+}
+
+.uptech-glean-shell :is(.text-amber-100, .text-amber-200, .text-amber-300) {
+  color: #924d05;
+}

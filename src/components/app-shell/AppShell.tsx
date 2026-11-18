@@ -1,722 +1,422 @@
 "use client";
 
-import {
-  Bell,
-  BookOpen,
-  Building2,
-  CircleHelp,
-  Files,
-  LayoutDashboard,
-  Menu,
-  MessageSquareText,
-  Search as SearchIcon,
-  ShieldCheck,
-  Sparkles,
-  UserRound,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import "@/styles/workspace-glean.css";
+
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { usePathname } from "next/navigation";
+import { Bell, Menu, Plus, Search, Sparkles, UserRound, X } from "lucide-react";
 
-import Logo from "@/components/Logo";
 import { usePreferences } from "@/components/preferences/PreferencesProvider";
-import { requestPreferencesClose } from "@/components/preferences/preferences-events";
-import type { Locale } from "@/lib/preferences";
+import { getProfileInitials, type UserProfileSnapshot } from "@/lib/user-profile";
 import { cn } from "@/lib/utils";
+import { CommandPaletteModal, QuickCopilotLauncher } from "./AppShellOverlays";
+import {
+  APP_SHELL_COPY,
+  getPrimaryNavItems,
+  getSecondaryNavItems,
+  isNavItemActive,
+  type NavItem,
+} from "./nav-config";
 
-type AppShellProps = Readonly<{
-  children: ReactNode;
-}>;
-
-type NavigationItem = Readonly<{
-  href: string;
-  label: Readonly<Record<Locale, string>>;
-  description: Readonly<Record<Locale, string>>;
-  icon: LucideIcon;
-}>;
-
-type AppShellCopy = Readonly<{
-  prototype: string;
-  demoSpace: string;
-  currentWorkspace: string;
-  workspace: string;
-  demoData: string;
-  primaryNavigation: string;
-  prototypeInterface: string;
-  prototypeDescription: string;
-  appNavigation: string;
-  dashboardLink: string;
-  closeNavigation: string;
-  navigationMenu: string;
-  closeMenu: string;
-  openNavigation: string;
-  globalSearch: string;
-  searchPlaceholder: string;
-  notifications: string;
-  help: string;
-  profile: string;
-  skipNavigation: string;
-}>;
-
-const appShellCopy: Readonly<Record<Locale, AppShellCopy>> = {
-  vi: {
-    prototype: "Bản mẫu",
-    demoSpace: "Không gian minh hoạ",
-    currentWorkspace: "Không gian làm việc hiện tại",
-    workspace: "Không gian làm việc",
-    demoData: "Dữ liệu mẫu",
-    primaryNavigation: "Điều hướng chính",
-    prototypeInterface: "Giao diện thử nghiệm",
-    prototypeDescription:
-      "Nội dung và trạng thái đang hiển thị chỉ dùng để minh hoạ UI.",
-    appNavigation: "Thanh điều hướng ứng dụng",
-    dashboardLink: "UPTECH Knowledge — về Tổng quan",
-    closeNavigation: "Đóng menu điều hướng",
-    navigationMenu: "Menu điều hướng",
-    closeMenu: "Đóng menu",
-    openNavigation: "Mở menu điều hướng",
-    globalSearch: "Tìm kiếm toàn cục — phím tắt Ctrl hoặc Command K",
-    searchPlaceholder: "Tìm trong không gian...",
-    notifications: "Mở thông báo",
-    help: "Mở trợ giúp",
-    profile: "Mở hồ sơ An Nguyễn — dữ liệu mẫu",
-    skipNavigation: "Bỏ qua điều hướng",
-  },
-  en: {
-    prototype: "Prototype",
-    demoSpace: "Demo workspace",
-    currentWorkspace: "Current workspace",
-    workspace: "Workspace",
-    demoData: "Demo data",
-    primaryNavigation: "Primary navigation",
-    prototypeInterface: "Prototype interface",
-    prototypeDescription:
-      "The content and states shown here are for UI demonstration only.",
-    appNavigation: "Application navigation",
-    dashboardLink: "UPTECH Knowledge — go to Overview",
-    closeNavigation: "Close navigation menu",
-    navigationMenu: "Navigation menu",
-    closeMenu: "Close menu",
-    openNavigation: "Open navigation menu",
-    globalSearch: "Global search — keyboard shortcut Control or Command K",
-    searchPlaceholder: "Search this workspace...",
-    notifications: "Open notifications",
-    help: "Open help",
-    profile: "Open An Nguyen's profile — demo data",
-    skipNavigation: "Skip navigation",
-  },
-};
-
-const navigationItems: readonly NavigationItem[] = [
-  {
-    href: "/dashboard",
-    label: { vi: "Tổng quan", en: "Overview" },
-    description: { vi: "Hoạt động và lối tắt", en: "Activity and shortcuts" },
-    icon: LayoutDashboard,
-  },
-  {
-    href: "/chat",
-    label: { vi: "Trợ lý AI", en: "AI assistant" },
-    description: { vi: "Hỏi đáp cùng nguồn trích dẫn", en: "Answers with citations" },
-    icon: MessageSquareText,
-  },
-  {
-    href: "/search",
-    label: { vi: "Tìm kiếm", en: "Search" },
-    description: { vi: "Khám phá tri thức nội bộ", en: "Explore internal knowledge" },
-    icon: SearchIcon,
-  },
-  {
-    href: "/documents",
-    label: { vi: "Tài liệu", en: "Documents" },
-    description: { vi: "Thư viện và không gian tri thức", en: "Library and knowledge spaces" },
-    icon: Files,
-  },
-  {
-    href: "/knowledge",
-    label: { vi: "Thẻ tri thức", en: "Knowledge cards" },
-    description: {
-      vi: "Cards & Packs · bản mẫu",
-      en: "Cards & Packs · prototype",
-    },
-    icon: BookOpen,
-  },
-  {
-    href: "/utility",
-    label: { vi: "Tiện ích AI", en: "AI utilities" },
-    description: { vi: "Tóm tắt, dịch và soạn nội dung", en: "Summarize, translate, and draft" },
-    icon: Sparkles,
-  },
-];
-
-const focusableSelector = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
-
-function isActivePath(pathname: string, href: string) {
-  return pathname === href || pathname.startsWith(`${href}/`);
-}
-
-function PrototypeBadge({
-  compact = false,
-  copy,
-}: {
-  compact?: boolean;
-  copy: AppShellCopy;
-}) {
+function GleanBrandMark() {
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded-full border border-violet-400/25 bg-violet-400/10 font-semibold uppercase tracking-[0.12em] text-violet-200",
-        compact ? "px-2 py-1 text-[10px]" : "px-2.5 py-1 text-xs",
-      )}
-    >
-      {copy.prototype}
+    <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-lg bg-[#1B44FF] [color:#FFFFFF]">
+      <Sparkles aria-hidden="true" className="size-3.5" />
     </span>
   );
 }
 
-function WorkspaceContext({
-  compact = false,
-  copy,
-}: {
-  compact?: boolean;
-  copy: AppShellCopy;
-}) {
-  if (compact) {
-    return (
-      <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-slate-100">
-          UPTECH Knowledge
-        </p>
-        <p className="truncate text-xs text-slate-400">{copy.demoSpace}</p>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="flex min-w-0 items-center gap-3"
-      aria-label={copy.currentWorkspace}
-    >
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-blue-400/20 bg-blue-500/10 text-blue-200">
-        <Building2 className="size-5" aria-hidden="true" />
-      </span>
-      <span className="min-w-0">
-        <span className="block text-xs font-medium text-slate-400">
-          {copy.workspace}
-        </span>
-        <span className="mt-0.5 flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-semibold text-slate-100">
-            UPTECH Knowledge
-          </span>
-          <span className="shrink-0 rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300">
-            {copy.demoData}
-          </span>
-        </span>
-      </span>
-    </div>
-  );
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
 }
 
-function PrimaryNavigation({
-  pathname,
-  onNavigate,
-  labelledBy,
-  locale,
-  copy,
-}: {
-  pathname: string;
-  onNavigate?: () => void;
-  labelledBy: string;
-  locale: Locale;
-  copy: AppShellCopy;
-}) {
-  return (
-    <nav aria-labelledby={labelledBy}>
-      <p
-        id={labelledBy}
-        className="mb-2 px-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400"
-      >
-        {copy.primaryNavigation}
-      </p>
-      <ul className="space-y-1.5">
-        {navigationItems.map((item) => {
-          const active = isActivePath(pathname, item.href);
-          const Icon = item.icon;
-
-          return (
-            <li key={item.href}>
-              <Link
-                href={item.href}
-                aria-current={active ? "page" : undefined}
-                onClick={onNavigate}
-                className={cn(
-                  "group relative flex min-h-12 items-center gap-3 overflow-hidden rounded-xl px-3 py-2.5 text-slate-300 transition-[background-color,color,box-shadow] duration-150",
-                  "hover:bg-slate-800/70 hover:text-white active:bg-slate-800",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
-                  active &&
-                    "bg-gradient-to-r from-blue-500/20 to-violet-500/10 text-slate-100 shadow-[inset_0_0_0_1px_rgba(96,165,250,0.22)]",
-                )}
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-transparent",
-                    active && "bg-blue-400 shadow-[0_0_10px_rgba(96,165,250,0.75)]",
-                  )}
-                />
-                <span
-                  className={cn(
-                    "flex size-9 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors duration-150 group-hover:text-blue-200",
-                    active && "bg-blue-400/10 text-blue-200",
-                  )}
-                >
-                  <Icon className="size-5" strokeWidth={1.8} aria-hidden="true" />
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold">
-                    {item.label[locale]}
-                  </span>
-                  <span
-                    className={cn(
-                      "mt-0.5 block truncate text-xs text-slate-400 transition-colors duration-150 group-hover:text-slate-300",
-                      active && "text-slate-400",
-                    )}
-                  >
-                    {item.description[locale]}
-                  </span>
-                </span>
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
-    </nav>
-  );
-}
-
-function PrototypeNotice({ copy }: { copy: AppShellCopy }) {
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3.5">
-      <div className="flex gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-violet-400/10 text-violet-200">
-          <ShieldCheck className="size-4.5" aria-hidden="true" />
-        </span>
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-slate-200">
-            {copy.prototypeInterface}
-          </p>
-          <p className="mt-1 text-xs leading-5 text-slate-400">
-            {copy.prototypeDescription}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Sidebar({
-  pathname,
-  locale,
-  copy,
-}: {
-  pathname: string;
-  locale: Locale;
-  copy: AppShellCopy;
-}) {
-  return (
-    <aside
-      className="sticky top-0 z-20 hidden h-dvh w-72 shrink-0 flex-col border-r border-slate-800/80 bg-slate-950/90 px-4 py-5 shadow-[18px_0_60px_-32px_rgba(30,64,175,0.45)] backdrop-blur-xl xl:flex"
-      aria-label={copy.appNavigation}
-    >
-      <div className="flex min-h-11 items-center justify-between gap-3 px-2">
-        <Link
-          href="/dashboard"
-          className="flex min-h-11 min-w-0 items-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
-          aria-label={copy.dashboardLink}
-        >
-          <Logo className="max-w-32" />
-        </Link>
-        <PrototypeBadge compact copy={copy} />
-      </div>
-
-      <div className="mt-7 min-h-0 flex-1 overflow-y-auto pb-4">
-        <PrimaryNavigation
-          pathname={pathname}
-          labelledBy="desktop-primary-navigation"
-          locale={locale}
-          copy={copy}
-        />
-      </div>
-
-      <PrototypeNotice copy={copy} />
-    </aside>
-  );
-}
-
-function MobileDrawer({
-  open,
-  pathname,
-  onClose,
-  drawerRef,
-  locale,
-  copy,
-}: {
-  open: boolean;
-  pathname: string;
-  onClose: () => void;
-  drawerRef: React.RefObject<HTMLElement | null>;
-  locale: Locale;
-  copy: AppShellCopy;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 xl:hidden">
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default bg-slate-950/80 backdrop-blur-sm"
-        aria-label={copy.closeNavigation}
-        tabIndex={-1}
-        onClick={onClose}
-      />
-      <aside
-        id="mobile-navigation-drawer"
-        ref={drawerRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={copy.navigationMenu}
-        className="animate-fade-in relative flex h-dvh w-[min(88vw,21rem)] flex-col border-r border-blue-400/15 bg-slate-950 px-4 py-4 shadow-[24px_0_80px_-24px_rgba(37,99,235,0.55)]"
-      >
-        <div className="flex min-h-12 items-center justify-between gap-3 px-1">
-          <Link
-            href="/dashboard"
-            onClick={onClose}
-            className="flex min-h-11 min-w-0 items-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
-            aria-label={copy.dashboardLink}
-          >
-            <Logo className="max-w-32" />
-          </Link>
-          <button
-            data-drawer-close
-            type="button"
-            onClick={onClose}
-            className="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-xl text-slate-300 transition-colors duration-150 hover:bg-slate-800 hover:text-white active:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-            aria-label={copy.closeMenu}
-          >
-            <X className="size-5" aria-hidden="true" />
-          </button>
-        </div>
-
-        <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-3.5">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-200">
-              <Building2 className="size-5" aria-hidden="true" />
-            </span>
-            <WorkspaceContext compact copy={copy} />
-          </div>
-          <PrototypeBadge compact copy={copy} />
-        </div>
-
-        <div className="mt-5 min-h-0 flex-1 overflow-y-auto pb-4">
-          <PrimaryNavigation
-            pathname={pathname}
-            onNavigate={onClose}
-            labelledBy="mobile-primary-navigation"
-            locale={locale}
-            copy={copy}
-          />
-        </div>
-
-        <PrototypeNotice copy={copy} />
-      </aside>
-    </div>
-  );
-}
-
-function IconAction({
-  href,
-  label,
+export default function AppShell({
   children,
-  active = false,
-}: {
-  href: string;
-  label: string;
+  userProfile,
+}: Readonly<{
   children: ReactNode;
-  active?: boolean;
-}) {
-  return (
-    <Link
-      href={href}
-      aria-label={label}
-      title={label}
-      className={cn(
-        "relative flex size-11 shrink-0 items-center justify-center rounded-xl border border-transparent text-slate-400 transition-[background-color,border-color,color] duration-150",
-        "hover:border-slate-700 hover:bg-slate-800/80 hover:text-slate-100 active:bg-slate-800",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
-        active && "border-blue-400/20 bg-blue-500/10 text-blue-200",
-      )}
-    >
-      {children}
-    </Link>
-  );
-}
-
-function Topbar({
-  pathname,
-  drawerOpen,
-  onOpenDrawer,
-  menuButtonRef,
-  copy,
-}: {
-  pathname: string;
-  drawerOpen: boolean;
-  onOpenDrawer: () => void;
-  menuButtonRef: React.RefObject<HTMLButtonElement | null>;
-  copy: AppShellCopy;
-}) {
-  return (
-    <header className="sticky top-0 z-30 flex min-h-16 items-center border-b border-slate-800/80 bg-slate-950/82 px-3 backdrop-blur-xl sm:px-5 lg:min-h-[72px] lg:px-6">
-      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-        <button
-          ref={menuButtonRef}
-          type="button"
-          onClick={onOpenDrawer}
-          className="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-xl text-slate-300 transition-colors duration-150 hover:bg-slate-800 hover:text-white active:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 xl:hidden"
-          aria-label={copy.openNavigation}
-          aria-haspopup="dialog"
-          aria-expanded={drawerOpen}
-          aria-controls="mobile-navigation-drawer"
-        >
-          <Menu className="size-5" aria-hidden="true" />
-        </button>
-
-        <div className="hidden min-w-0 xl:block">
-          <WorkspaceContext copy={copy} />
-        </div>
-        <div className="min-w-0 xl:hidden">
-          <WorkspaceContext compact copy={copy} />
-        </div>
-      </div>
-
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-        <Link
-          href="/search"
-          aria-label={copy.globalSearch}
-          className={cn(
-            "mr-0 flex size-11 items-center justify-center rounded-xl border border-slate-700/80 bg-slate-900/80 text-slate-400 transition-[background-color,border-color,color,box-shadow] duration-150",
-            "hover:border-blue-400/35 hover:bg-slate-800 hover:text-slate-100 active:bg-slate-800",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
-            "md:mr-1 md:w-64 md:justify-start md:gap-2.5 md:px-3.5 xl:w-80",
-            isActivePath(pathname, "/search") &&
-              "border-blue-400/30 bg-blue-500/10 text-blue-100",
-          )}
-        >
-          <SearchIcon className="size-4.5 shrink-0" aria-hidden="true" />
-          <span className="hidden min-w-0 flex-1 truncate text-left text-sm md:block">
-            {copy.searchPlaceholder}
-          </span>
-          <kbd className="hidden shrink-0 rounded-md border border-slate-700 bg-slate-950 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-slate-400 md:inline-flex">
-            Ctrl K
-          </kbd>
-        </Link>
-
-        <IconAction href="/notifications" label={copy.notifications}>
-          <Bell className="size-5" strokeWidth={1.8} aria-hidden="true" />
-        </IconAction>
-        <IconAction href="/utility#tro-giup" label={copy.help}>
-          <CircleHelp className="size-5" strokeWidth={1.8} aria-hidden="true" />
-        </IconAction>
-        <Link
-          href="/profile"
-          aria-label={copy.profile}
-          className="group flex min-h-11 shrink-0 items-center gap-2 rounded-xl border border-transparent p-1.5 text-left transition-[background-color,border-color] duration-150 hover:border-slate-700 hover:bg-slate-800/80 active:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 sm:pr-2.5"
-        >
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-violet-500 text-white shadow-[0_6px_18px_-8px_rgba(96,165,250,0.9)]">
-            <UserRound className="size-4" aria-hidden="true" />
-          </span>
-          <span className="hidden min-w-0 sm:block">
-            <span className="block max-w-24 truncate text-xs font-semibold text-slate-100">
-              An Nguyễn
-            </span>
-            <span className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
-              {copy.demoData}
-            </span>
-          </span>
-        </Link>
-      </div>
-    </header>
-  );
-}
-
-export default function AppShell({ children }: AppShellProps) {
+  userProfile?: UserProfileSnapshot | null;
+}>) {
   const pathname = usePathname();
-  const router = useRouter();
+  const isChatRoute = pathname.startsWith("/chat");
   const { locale } = usePreferences();
-  const copy = appShellCopy[locale];
-  const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const drawerRef = useRef<HTMLElement>(null);
-  const [drawerState, setDrawerState] = useState({
-    open: false,
-    pathname: "",
-  });
-  const drawerOpen = drawerState.open && drawerState.pathname === pathname;
+  const copy = APP_SHELL_COPY[locale];
+  const primaryItems = getPrimaryNavItems(locale);
+  const secondaryItems = getSecondaryNavItems(locale);
+  const allPaletteItems: NavItem[] = [...primaryItems, ...secondaryItems];
 
-  const openDrawer = useCallback(() => {
-    requestPreferencesClose();
-    setDrawerState({ open: true, pathname });
+  const [announceVisible, setAnnounceVisible] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/v1/workspace/notifications", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { unreadCount?: unknown } | null) => {
+        if (active && data && typeof data.unreadCount === "number") {
+          setUnreadNotifications(data.unreadCount);
+        }
+      })
+      .catch(() => undefined);
+
+    function handleSync(event: Event) {
+      const custom = event as CustomEvent<{ unreadCount?: number }>;
+      if (typeof custom.detail?.unreadCount === "number") {
+        setUnreadNotifications(custom.detail.unreadCount);
+      }
+    }
+    window.addEventListener("uptech:notifications-updated", handleSync);
+    return () => {
+      active = false;
+      window.removeEventListener("uptech:notifications-updated", handleSync);
+    };
   }, [pathname]);
 
-  const closeDrawer = useCallback(() => {
-    setDrawerState((current) => ({ ...current, open: false }));
+  const profileInitials = getProfileInitials(userProfile?.fullName);
+  const profileTitle = userProfile?.fullName
+    ? `${copy.profileLabel} (${userProfile.fullName})`
+    : copy.profileLabel;
+
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCmdOpen((open) => !open);
+      }
+    }
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, []);
 
   useEffect(() => {
-    const handleSearchShortcut = (event: KeyboardEvent) => {
-      const target = event.target;
-      const isEditing =
-        target instanceof HTMLElement &&
-        (target.isContentEditable ||
-          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-
-      if (isEditing) return;
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        router.push("/search");
-      }
-    };
-
-    window.addEventListener("keydown", handleSearchShortcut);
-    return () => window.removeEventListener("keydown", handleSearchShortcut);
-  }, [router]);
-
-  useEffect(() => {
     if (!drawerOpen) return;
-
-    const drawer = drawerRef.current;
-    const menuButton = menuButtonRef.current;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const previousBodyOverflow = document.body.style.overflow;
-    const desktopQuery = window.matchMedia("(min-width: 1280px)");
-    const focusFrame = window.requestAnimationFrame(() => {
-      const initialFocus =
-        drawer?.querySelector<HTMLElement>("[data-drawer-close]") ??
-        drawer?.querySelector<HTMLElement>(focusableSelector);
-      initialFocus?.focus({ preventScroll: true });
-    });
-
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    const closeBtn = drawerRef.current?.querySelector<HTMLElement>("[data-drawer-close]");
+    closeBtn?.focus();
 
-    const handleDrawerKeydown = (event: KeyboardEvent) => {
+    function handleDrawerKeys(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        closeDrawer();
+        setDrawerOpen(false);
+        requestAnimationFrame(() => menuButtonRef.current?.focus());
         return;
       }
-
-      if (event.key !== "Tab" || !drawer) return;
-
-      const focusableElements = Array.from(
-        drawer.querySelectorAll<HTMLElement>(focusableSelector),
-      );
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements.at(-1);
-
-      if (!firstElement || !lastElement) {
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusables = getFocusableElements(drawerRef.current);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
-        return;
-      }
-
-      if (event.shiftKey) {
-        if (
-          document.activeElement === firstElement ||
-          !drawer.contains(document.activeElement)
-        ) {
-          event.preventDefault();
-          lastElement.focus();
-        }
-      } else if (document.activeElement === lastElement) {
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
         event.preventDefault();
-        firstElement.focus();
+        first.focus();
       }
-    };
+    }
 
-    const handleDesktopViewport = (event: MediaQueryListEvent) => {
-      if (event.matches) closeDrawer();
-    };
-
-    document.addEventListener("keydown", handleDrawerKeydown);
-    desktopQuery.addEventListener("change", handleDesktopViewport);
-
+    window.addEventListener("keydown", handleDrawerKeys);
     return () => {
-      window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener("keydown", handleDrawerKeydown);
-      desktopQuery.removeEventListener("change", handleDesktopViewport);
-      document.body.style.overflow = previousBodyOverflow;
-      if (previouslyFocused && document.contains(previouslyFocused)) {
-        previouslyFocused.focus({ preventScroll: true });
-      } else {
-        menuButton?.focus({ preventScroll: true });
-      }
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleDrawerKeys);
     };
-  }, [closeDrawer, drawerOpen]);
+  }, [drawerOpen]);
 
   return (
-    <div className="relative flex min-h-dvh w-full flex-1 overflow-x-clip bg-slate-950 text-slate-100">
+    <div
+      className={cn(
+        "uptech-glean-shell bg-[#FAF9FB] text-[#0D1321]",
+        isChatRoute ? "uptech-glean-shell--chat" : "min-h-dvh",
+      )}
+    >
       <a
         href="#main-content"
-        className="fixed left-4 top-4 z-[100] -translate-y-24 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-xl transition-transform duration-150 focus:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-[#0B1220] focus:px-4 focus:py-2 focus:text-xs focus:font-semibold focus:[color:#FFFFFF]"
       >
-        {copy.skipNavigation}
+        {copy.skipToContent}
       </a>
 
-      <div
-        className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_72%_-10%,rgba(37,99,235,0.14),transparent_38%),radial-gradient(circle_at_18%_105%,rgba(124,58,237,0.10),transparent_32%)]"
-        aria-hidden="true"
-      />
+      {!isChatRoute && announceVisible ? (
+        <div className="glean-announce-bar">
+          <span>
+            <strong className="font-semibold [color:#FFFFFF]">{copy.announceTag}:</strong>{" "}
+            {copy.announceBody}
+          </span>
+          <Link href="/chat" className="glean-announce-link">
+            {copy.announceCta}
+          </Link>
+          <button
+            type="button"
+            onClick={() => setAnnounceVisible(false)}
+            aria-label={copy.dismissAnnounce}
+            className="absolute right-3 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-[#CBD5E1] transition-colors hover:bg-white/10 hover:[color:#FFFFFF]"
+          >
+            <X aria-hidden="true" className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
 
-      <Sidebar pathname={pathname} locale={locale} copy={copy} />
-      <MobileDrawer
-        open={drawerOpen}
-        pathname={pathname}
-        onClose={closeDrawer}
-        drawerRef={drawerRef}
+      <header className="glean-topnav shrink-0">
+        <div className="glean-topnav-inner">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3 lg:gap-6">
+            <button
+              ref={menuButtonRef}
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label={copy.openNavigation}
+              aria-haspopup="dialog"
+              aria-expanded={drawerOpen}
+              aria-controls="mobile-navigation-drawer"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-[#0D1321]/10 bg-white text-[#323B4D] hover:bg-[#F3F4F8] hover:text-[#0D1321] xl:hidden"
+            >
+              <Menu aria-hidden="true" className="size-4" />
+            </button>
+
+            <Link
+              href="/dashboard"
+              aria-label={copy.dashboardLink}
+              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-base font-bold tracking-[-0.03em] text-[#1B44FF] sm:gap-2 sm:text-lg"
+            >
+              <GleanBrandMark />
+              <span>
+                uptech
+                <span className="hidden font-semibold text-[#0D1321] min-[420px]:inline">
+                  .knowledge
+                </span>
+              </span>
+            </Link>
+
+            <nav aria-label={copy.appNavigation} className="hidden items-center gap-1 xl:flex">
+              {primaryItems.map((item) => {
+                const active = isNavItemActive(pathname, item);
+                return (
+                  <Link
+                    key={item.id}
+                    href={item.href}
+                    aria-current={active ? "page" : undefined}
+                    className="glean-nav-pill"
+                  >
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            <button
+              type="button"
+              onClick={() => setCmdOpen(true)}
+              title={copy.quickSearch}
+              className="inline-flex size-9 items-center justify-center gap-2.5 rounded-full border border-[#0D1321]/10 bg-white text-xs font-medium text-[#505A6E] transition-colors hover:border-[#0D1321]/20 hover:text-[#0D1321] sm:h-9 sm:w-auto sm:px-3.5"
+            >
+              <Search aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="sr-only sm:not-sr-only">{copy.quickSearchShort}</span>
+              <span className="glean-mono hidden rounded-full bg-[#F3F4F8] px-2 py-0.5 text-[11px] text-[#505A6E] md:inline">
+                Ctrl K
+              </span>
+            </button>
+
+            <Link
+              href="/notifications"
+              aria-label={copy.notifications}
+              title={copy.notifications}
+              className={cn(
+                "relative inline-flex size-9 items-center justify-center rounded-full border border-[#0D1321]/10 bg-white text-[#323B4D] transition-colors hover:bg-[#F3F4F8] hover:text-[#0D1321]",
+                pathname.startsWith("/notifications") &&
+                  "border-[#C8D2FF] bg-[#EEF1FF] text-[#1635C7]",
+              )}
+            >
+              <Bell aria-hidden="true" className="size-4" />
+              {unreadNotifications > 0 ? (
+                <span
+                  aria-label={`${unreadNotifications}`}
+                  className="absolute -right-1 -top-1 inline-flex min-w-4 items-center justify-center rounded-full border border-white bg-[#1B44FF] px-1 text-[10px] font-bold leading-4 text-white"
+                >
+                  {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                </span>
+              ) : null}
+            </Link>
+
+            <Link
+              href="/profile"
+              title={profileTitle}
+              className={cn(
+                "inline-flex size-9 items-center justify-center overflow-hidden rounded-full border border-[#0D1321]/10 bg-[#F3F4F8] text-xs font-bold text-[#0D1321] transition-colors hover:border-[#C8D2FF] hover:bg-[#EEF1FF] hover:text-[#1635C7]",
+                pathname.startsWith("/profile") &&
+                  "border-[#1B44FF] bg-[#EEF1FF] text-[#1635C7]",
+              )}
+            >
+              {userProfile?.pictureUrl && !avatarError ? (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={userProfile.pictureUrl}
+                  alt=""
+                  aria-hidden="true"
+                  referrerPolicy="no-referrer"
+                  onError={() => setAvatarError(true)}
+                  className="size-full object-cover"
+                />
+              ) : profileInitials ? (
+                <span aria-hidden="true">{profileInitials}</span>
+              ) : (
+                <UserRound aria-hidden="true" className="size-4" />
+              )}
+              <span className="sr-only">{copy.profileLabel}</span>
+            </Link>
+
+            <Link
+              href="/documents#upload-demo-heading"
+              title={copy.addDocument}
+              className="glean-btn glean-btn-navy glean-topnav-add"
+            >
+              <Plus aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="sr-only sm:not-sr-only">{copy.addDocument}</span>
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      {/* Glean Floating Left Capsule Dock (Desktop xl+) */}
+      <aside
+        aria-label={copy.dockLabel}
+        className="glean-floating-dock hidden flex-col gap-1.5 xl:flex"
+      >
+        {primaryItems.map((item) => {
+          const Icon = item.icon;
+          const active = isNavItemActive(pathname, item);
+          return (
+            <Link
+              key={item.id}
+              href={item.href}
+              aria-label={item.label}
+              title={item.label}
+              aria-current={active ? "page" : undefined}
+              className="glean-dock-btn"
+            >
+              <Icon aria-hidden="true" className="size-[17px]" />
+            </Link>
+          );
+        })}
+        <div className="my-1 h-px bg-[#0D1321]/10" aria-hidden="true" />
+        <Link
+          href="/profile"
+          aria-label={copy.profileLabel}
+          title={copy.profileLabel}
+          aria-current={pathname.startsWith("/profile") ? "page" : undefined}
+          className="glean-dock-btn"
+        >
+          <UserRound aria-hidden="true" className="size-[17px]" />
+        </Link>
+      </aside>
+
+      {/* Accessible Mobile Drawer */}
+      {drawerOpen ? (
+        <div className="fixed inset-0 z-50 xl:hidden">
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={copy.closeNavigation}
+            onClick={() => setDrawerOpen(false)}
+            className="absolute inset-0 bg-[#0B1220]/40 backdrop-blur-xs"
+          />
+          <aside
+            id="mobile-navigation-drawer"
+            ref={drawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={copy.appNavigation}
+            className="relative flex h-dvh w-[min(86vw,20rem)] flex-col border-r border-[#0D1321]/10 bg-white p-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[#0D1321]/10 pb-3">
+              <Link
+                href="/dashboard"
+                onClick={() => setDrawerOpen(false)}
+                className="inline-flex items-center gap-2 text-base font-bold tracking-[-0.02em] text-[#1B44FF]"
+              >
+                <GleanBrandMark />
+                <span>
+                  uptech<span className="text-[#0D1321]">.knowledge</span>
+                </span>
+              </Link>
+              <button
+                data-drawer-close
+                type="button"
+                onClick={() => {
+                  setDrawerOpen(false);
+                  requestAnimationFrame(() => menuButtonRef.current?.focus());
+                }}
+                aria-label={copy.closeNavigation}
+                className="inline-flex size-9 items-center justify-center rounded-full border border-[#0D1321]/10 text-[#323B4D] hover:bg-[#F3F4F8]"
+              >
+                <X aria-hidden="true" className="size-4" />
+              </button>
+            </div>
+
+            <nav className="mt-4 flex-1 space-y-1 overflow-y-auto" aria-label={copy.appNavigation}>
+              {allPaletteItems.map((item) => {
+                const Icon = item.icon;
+                const active = isNavItemActive(pathname, item);
+                return (
+                  <Link
+                    key={item.id}
+                    href={item.href}
+                    onClick={() => setDrawerOpen(false)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors",
+                      active
+                        ? "bg-[#EEF1FF] font-semibold text-[#1635C7]"
+                        : "text-[#323B4D] hover:bg-[#F3F4F8] hover:text-[#0D1321]",
+                    )}
+                  >
+                    <Icon aria-hidden="true" className="size-4 shrink-0" />
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
+            </nav>
+
+            <div className="mt-3 rounded-xl border border-[#0D1321]/8 bg-[#FAF9FB] p-3 text-xs text-[#505A6E]">
+              <p className="font-semibold text-[#0D1321]">{copy.workspaceName}</p>
+              <p className="mt-0.5">{copy.prototypeTag} · Read-only UI</p>
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className={cn(
+          "glean-main-canvas focus:outline-none",
+          isChatRoute && "glean-main-canvas--chat",
+        )}
+      >
+        {children}
+      </main>
+
+      {!isChatRoute ? <QuickCopilotLauncher locale={locale} copy={copy} /> : null}
+
+      <CommandPaletteModal
+        open={cmdOpen}
+        onClose={() => setCmdOpen(false)}
+        items={allPaletteItems}
         locale={locale}
         copy={copy}
       />
-
-      <div className="relative z-10 flex min-h-dvh min-w-0 flex-1 flex-col">
-        <Topbar
-          pathname={pathname}
-          drawerOpen={drawerOpen}
-          onOpenDrawer={openDrawer}
-          menuButtonRef={menuButtonRef}
-          copy={copy}
-        />
-        <main
-          id="main-content"
-          lang={locale === "en" ? "vi" : undefined}
-          tabIndex={-1}
-          className="relative min-w-0 flex-1 overflow-x-hidden focus:outline-none"
-        >
-          {children}
-        </main>
-      </div>
     </div>
   );
 }

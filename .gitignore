@@ -46,3 +46,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local runtime workspace knowledge/chat storage
+/.uptech-data/
+
+.vercel
+.env*

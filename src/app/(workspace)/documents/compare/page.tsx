@@ -5,6 +5,8 @@ import { getKnowledgeReadAdapter } from "@/features/knowledge/get-read-adapter";
 
 export const metadata: Metadata = { title: "So sánh tài liệu" };
 
+export const dynamic = "force-dynamic";
+
 export default async function DocumentComparePage({ searchParams }: { searchParams: Promise<RawDocumentParams> }) {
   const adapter = getKnowledgeReadAdapter();
   const input = parseCompareParams(await searchParams);

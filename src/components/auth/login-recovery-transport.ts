@@ -132,6 +132,9 @@ export function resolveLoginRecoveryTransport(input: Readonly<{
         { name: "intent", value: "SWITCH_ACCOUNT" },
         ...(csrfToken === null ? [] : [{ name: "csrf_token" as const, value: csrfToken }]),
       ]);
+    case "REGISTER_ORGANIZATION":
+      if (canonical.kind !== "REQUEST") return null;
+      return nativeForm(canonical.path, [{ name: "intent", value: "REGISTER_ORGANIZATION" }]);
     case "START_ORGANIZATION_SETUP":
     case "RESTART_DIRECTORY_CONSENT":
     case "FINISH_BOOTSTRAP":

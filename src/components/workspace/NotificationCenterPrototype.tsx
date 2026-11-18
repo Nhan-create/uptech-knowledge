@@ -1,352 +1,448 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
+  Bell,
   BellOff,
+  BookOpenCheck,
   Check,
   CheckCheck,
   FileCheck2,
-  FileClock,
-  LockKeyhole,
-  SlidersHorizontal,
-  TriangleAlert,
-  type LucideIcon,
+  FilePenLine,
+  FileX2,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
 } from "lucide-react";
+
+import { usePreferences } from "@/components/preferences/PreferencesProvider";
 import { Badge, Card } from "@/components/ui";
-import { cn } from "@/lib/utils";
 import {
-  DemoNotice,
   IconTile,
   PageIntro,
-  PrototypeHint,
   SectionHeading,
   WorkspacePage,
+  type IconTone,
 } from "@/components/workspace/WorkspacePrimitives";
+import { cn } from "@/lib/utils";
+import type {
+  WorkspaceNotificationKind,
+  WorkspaceNotificationRecord,
+} from "@/server/knowledge/repository";
 
-type NotificationFilter = "all" | "unread";
+type NotificationReadFilter = "all" | "unread";
+type NotificationGroupFilter = "all" | "documents" | "knowledge" | "utility";
 
-type NotificationItem = {
-  id: string;
-  title: string;
-  description: string;
-  time: string;
-  dateTime: string;
-  variant: "neutral" | "info" | "warning";
-  icon: LucideIcon;
-  tone: "blue" | "emerald" | "amber";
-  href?: string;
-  action: string;
-  unread: boolean;
-  stale?: boolean;
-};
+type NotificationCenterProps = Readonly<{
+  initialNotifications: readonly WorkspaceNotificationRecord[];
+}>;
 
-const initialNotifications: NotificationItem[] = [
+const KIND_META: Record<
+  WorkspaceNotificationKind,
   {
-    id: "document-ready",
-    title: "Tài liệu mẫu đã sẵn sàng để tra cứu",
-    description:
-      "Quy định làm việc từ xa 2026.pdf đã hoàn tất bước xử lý minh họa.",
-    time: "8 phút trước",
-    dateTime: "2026-08-23T09:12:00+07:00",
-    variant: "info",
+    icon: typeof Bell;
+    tone: IconTone;
+    group: "documents" | "knowledge" | "utility";
+    badgeVariant: "info" | "success" | "warning" | "neutral";
+  }
+> = {
+  document_uploaded: {
     icon: FileCheck2,
     tone: "emerald",
-    href: "/documents/doc_a91f07",
-    action: "Mở tài liệu mẫu",
-    unread: true,
+    group: "documents",
+    badgeVariant: "success",
   },
-  {
-    id: "document-processing",
-    title: "Tệp mẫu đang được chuẩn bị",
-    description:
-      "Cẩm nang vận hành nội bộ.pdf đang ở tiến độ minh họa 68%.",
-    time: "36 phút trước",
-    dateTime: "2026-08-23T08:44:00+07:00",
-    variant: "neutral",
-    icon: FileClock,
+  document_updated: {
+    icon: FilePenLine,
     tone: "blue",
-    href: "/documents/doc_e39b80",
-    action: "Xem trạng thái mẫu",
-    unread: false,
+    group: "documents",
+    badgeVariant: "info",
   },
-  {
-    id: "stale-target",
-    title: "Đích thông báo mẫu không còn khả dụng",
-    description:
-      "Tài nguyên gốc có thể đã bị xóa hoặc quyền truy cập đã thay đổi. Thông báo không cấp lại quyền truy cập.",
-    time: "Hôm qua",
-    dateTime: "2026-08-22T16:20:00+07:00",
-    variant: "warning",
-    icon: TriangleAlert,
+  document_deleted: {
+    icon: FileX2,
     tone: "amber",
-    action: "Không thể mở",
-    unread: false,
-    stale: true,
+    group: "documents",
+    badgeVariant: "warning",
   },
-];
+  knowledge_created: {
+    icon: BookOpenCheck,
+    tone: "violet",
+    group: "knowledge",
+    badgeVariant: "info",
+  },
+  knowledge_verified: {
+    icon: ShieldCheck,
+    tone: "emerald",
+    group: "knowledge",
+    badgeVariant: "success",
+  },
+  utility_completed: {
+    icon: Sparkles,
+    tone: "blue",
+    group: "utility",
+    badgeVariant: "info",
+  },
+};
 
-const filters: Array<{ id: NotificationFilter; label: string }> = [
-  { id: "all", label: "Tất cả" },
-  { id: "unread", label: "Chưa đọc" },
-];
+function formatRelativeTime(iso: string, locale: "vi" | "en"): string {
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) return locale === "en" ? "Just now" : "Vừa xong";
+  const diffSec = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+  if (diffSec < 60) return locale === "en" ? "Just now" : "Vừa xong";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return locale === "en" ? `${diffMin}m ago` : `${diffMin} phút trước`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return locale === "en" ? `${diffHours}h ago` : `${diffHours} giờ trước`;
+  return new Date(parsed).toLocaleDateString(locale === "en" ? "en-US" : "vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
-export function NotificationCenterPrototype() {
-  const [notifications, setNotifications] =
-    useState<NotificationItem[]>(initialNotifications);
-  const [filter, setFilter] = useState<NotificationFilter>("all");
-  const activeFilterButtonRef = useRef<HTMLButtonElement>(null);
+function broadcastUnreadCount(count: number) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("uptech:notifications-updated", { detail: { unreadCount: count } }),
+    );
+  }
+}
+
+export function NotificationCenterPrototype({
+  initialNotifications,
+}: NotificationCenterProps) {
+  const { locale } = usePreferences();
+  const [notifications, setNotifications] = useState<readonly WorkspaceNotificationRecord[]>(
+    initialNotifications,
+  );
+  const [readFilter, setReadFilter] = useState<NotificationReadFilter>("all");
+  const [groupFilter, setGroupFilter] = useState<NotificationGroupFilter>("all");
+  const [busy, setBusy] = useState(false);
+  const activeFilterRef = useRef<HTMLButtonElement>(null);
 
   const unreadCount = notifications.filter((item) => item.unread).length;
-  const visibleNotifications =
-    filter === "unread"
-      ? notifications.filter((item) => item.unread)
-      : notifications;
 
-  function handoffFocusToActiveFilter() {
-    window.requestAnimationFrame(() => activeFilterButtonRef.current?.focus());
-  }
+  const visibleNotifications = useMemo(() => {
+    return notifications.filter((item) => {
+      if (readFilter === "unread" && !item.unread) return false;
+      if (groupFilter !== "all" && KIND_META[item.kind].group !== groupFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [notifications, readFilter, groupFilter]);
 
-  function markAsRead(id: string, handoffFocus = false) {
-    setNotifications((current) =>
-      current.map((item) =>
+  async function markAsRead(id: string) {
+    setNotifications((prev) => {
+      const next = prev.map((item) =>
         item.id === id ? { ...item, unread: false } : item,
-      ),
-    );
-    if (handoffFocus) handoffFocusToActiveFilter();
+      );
+      broadcastUnreadCount(next.filter((i) => i.unread).length);
+      return next;
+    });
+
+    try {
+      const response = await fetch("/api/v1/workspace/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notificationId: id }),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          notifications?: WorkspaceNotificationRecord[];
+          unreadCount?: number;
+        };
+        if (Array.isArray(data.notifications)) {
+          setNotifications(data.notifications);
+          broadcastUnreadCount(data.unreadCount ?? 0);
+        }
+      }
+    } catch {
+      // Optimistic state already updated
+    }
   }
 
-  function markAllAsRead() {
-    setNotifications((current) =>
-      current.map((item) => ({ ...item, unread: false })),
-    );
-    handoffFocusToActiveFilter();
+  async function markAllAsRead() {
+    if (unreadCount === 0 || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/v1/workspace/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markAll: true }),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          notifications?: WorkspaceNotificationRecord[];
+          unreadCount?: number;
+        };
+        if (Array.isArray(data.notifications)) {
+          setNotifications(data.notifications);
+          broadcastUnreadCount(data.unreadCount ?? 0);
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearAllNotifications() {
+    if (notifications.length === 0 || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/v1/workspace/notifications", {
+        method: "DELETE",
+      });
+      if (response.ok) {
+        setNotifications([]);
+        broadcastUnreadCount(0);
+      }
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <WorkspacePage>
       <PageIntro
-        eyebrow="Notification Center · Prototype"
-        title="Trung tâm thông báo"
-        description="Lọc và đánh dấu trạng thái ngay trong bản mẫu. Mọi thay đổi được đặt lại khi bạn rời hoặc tải lại trang."
+        eyebrow={locale === "en" ? "Activity Inbox · Live" : "Hộp tin hoạt động · Dữ liệu thật"}
+        title={locale === "en" ? "Notification Center" : "Trung tâm thông báo"}
+        description={
+          locale === "en"
+            ? "Real-time workspace activity log covering document indexing, Knowledge Cards verification, and AI utilities."
+            : "Theo dõi mọi sự kiện thật trong không gian tri thức: lập chỉ mục tài liệu, xác minh Thẻ tri thức và kết quả Tiện ích AI."
+        }
         actions={
-          <button
-            type="button"
-            onClick={markAllAsRead}
-            disabled={unreadCount === 0}
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold text-slate-200 transition-colors hover:border-blue-700 hover:bg-blue-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-600 disabled:hover:bg-slate-900"
-          >
-            <CheckCheck aria-hidden="true" className="size-4" />
-            Đánh dấu tất cả đã đọc
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={markAllAsRead}
+              disabled={unreadCount === 0 || busy}
+              className="glean-btn glean-btn-secondary glean-btn-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <CheckCheck aria-hidden="true" className="size-3.5" />
+              <span>
+                {locale === "en" ? "Mark all read" : "Đánh dấu tất cả đã đọc"}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={clearAllNotifications}
+              disabled={notifications.length === 0 || busy}
+              className="glean-btn glean-btn-secondary glean-btn-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 aria-hidden="true" className="size-3.5" />
+              <span>{locale === "en" ? "Clear inbox" : "Dọn hộp tin"}</span>
+            </button>
+          </div>
         }
       />
 
-      <DemoNotice className="mt-6" />
+      <div className="mt-6 space-y-4">
+        <SectionHeading
+          id="notification-list-heading"
+          title={locale === "en" ? "Recent events" : "Hoạt động gần đây"}
+          description={
+            locale === "en"
+              ? "Click any item link to jump directly to the target document or knowledge card."
+              : "Chọn sự kiện để mở nhanh tài liệu, thẻ tri thức hoặc kết quả AI liên quan."
+          }
+          action={
+            <Badge variant={unreadCount > 0 ? "info" : "neutral"} dot={unreadCount > 0}>
+              {locale === "en"
+                ? `${unreadCount} unread`
+                : `${unreadCount} chưa đọc`}
+            </Badge>
+          }
+        />
 
-      <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <section aria-labelledby="notification-list-heading" className="min-w-0">
-          <SectionHeading
-            id="notification-list-heading"
-            title="Cập nhật gần đây"
-            description="Các mục dưới đây là fixture minh họa, không phản ánh sự kiện thật của workspace."
-            action={
-              <Badge
-                variant={unreadCount > 0 ? "info" : "neutral"}
-                dot={unreadCount > 0}
-              >
-                {unreadCount} chưa đọc · fixture
-              </Badge>
-            }
-          />
+        {/* Dual Filter Bar: Read status + Category */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2" aria-label={locale === "en" ? "Filter by read status" : "Lọc trạng thái đọc"}>
+            <button
+              ref={readFilter === "all" ? activeFilterRef : undefined}
+              type="button"
+              aria-pressed={readFilter === "all"}
+              onClick={() => setReadFilter("all")}
+              className={cn(
+                "inline-flex min-h-9 items-center justify-center rounded-full border px-3.5 text-xs font-semibold transition-colors",
+                readFilter === "all"
+                  ? "border-[#1B44FF] bg-[#EEF1FF] text-[#1635C7]"
+                  : "border-[#0D1321]/10 bg-white text-[#505A6E] hover:text-[#0D1321]",
+              )}
+            >
+              {locale === "en"
+                ? `All (${notifications.length})`
+                : `Tất cả (${notifications.length})`}
+            </button>
+            <button
+              ref={readFilter === "unread" ? activeFilterRef : undefined}
+              type="button"
+              aria-pressed={readFilter === "unread"}
+              onClick={() => setReadFilter("unread")}
+              className={cn(
+                "inline-flex min-h-9 items-center justify-center rounded-full border px-3.5 text-xs font-semibold transition-colors",
+                readFilter === "unread"
+                  ? "border-[#1B44FF] bg-[#EEF1FF] text-[#1635C7]"
+                  : "border-[#0D1321]/10 bg-white text-[#505A6E] hover:text-[#0D1321]",
+              )}
+            >
+              {locale === "en" ? `Unread (${unreadCount})` : `Chưa đọc (${unreadCount})`}
+            </button>
+          </div>
 
-          <div className="mb-4 flex flex-wrap gap-2" aria-label="Lọc thông báo">
-            {filters.map((item) => (
+          <div className="flex flex-wrap gap-1.5" aria-label={locale === "en" ? "Filter by category" : "Lọc theo loại"}>
+            {(
+              [
+                { id: "all", vi: "Mọi loại", en: "Everything" },
+                { id: "documents", vi: "Tài liệu", en: "Documents" },
+                { id: "knowledge", vi: "Thẻ tri thức", en: "Knowledge Cards" },
+                { id: "utility", vi: "Tiện ích AI", en: "AI Utilities" },
+              ] as const
+            ).map((tab) => (
               <button
-                key={item.id}
-                ref={filter === item.id ? activeFilterButtonRef : undefined}
+                key={tab.id}
                 type="button"
-                aria-pressed={filter === item.id}
-                onClick={() => setFilter(item.id)}
+                aria-pressed={groupFilter === tab.id}
+                onClick={() => setGroupFilter(tab.id)}
                 className={cn(
-                  "inline-flex min-h-11 items-center justify-center rounded-lg border px-4 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
-                  filter === item.id
-                    ? "border-blue-600 bg-blue-950/50 text-blue-200"
-                    : "border-slate-800 bg-slate-900 text-slate-400 hover:border-slate-700 hover:text-slate-200",
+                  "rounded-full px-3 py-1 text-xs font-medium transition-colors",
+                  groupFilter === tab.id
+                    ? "bg-[#0B1220] [color:#FFFFFF]"
+                    : "bg-[#F3F4F8] text-[#505A6E] hover:text-[#0D1321]",
                 )}
               >
-                {item.label}
-                {item.id === "unread" ? ` (${unreadCount})` : ""}
+                {tab[locale]}
               </button>
             ))}
           </div>
+        </div>
 
-          <p className="sr-only" aria-live="polite">
-            Hiện có {unreadCount} thông báo chưa đọc trong bản mẫu.
-          </p>
-
-          {visibleNotifications.length > 0 ? (
-            <ol className="space-y-3">
-              {visibleNotifications.map((notification) => (
-                <li key={notification.id}>
+        {/* Feed List or Empty State */}
+        {visibleNotifications.length > 0 ? (
+          <ol className="space-y-3">
+            {visibleNotifications.map((item) => {
+              const meta = KIND_META[item.kind];
+              const isStale = item.href === null;
+              return (
+                <li key={item.id}>
                   <Card
                     className={cn(
-                      "p-4 sm:p-5",
-                      notification.unread &&
-                        "border-blue-800/70 bg-blue-950/20",
+                      "p-4 sm:p-5 transition-colors",
+                      item.unread && "border-[#C8D2FF] bg-[#F6F8FF]",
                     )}
                   >
                     <article className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                      <IconTile
-                        icon={notification.icon}
-                        tone={notification.tone}
-                      />
+                      <IconTile icon={meta.icon} tone={meta.tone} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <Badge
-                            variant={notification.variant}
-                            dot={notification.unread}
+                            variant={isStale ? "warning" : meta.badgeVariant}
+                            dot={item.unread}
                             size="sm"
                           >
-                            {notification.stale
-                              ? "Đích hết hiệu lực"
-                              : notification.unread
-                                ? "Chưa đọc"
+                            {item.unread
+                              ? locale === "en"
+                                ? "Unread"
+                                : "Chưa đọc"
+                              : locale === "en"
+                                ? "Read"
                                 : "Đã đọc"}
                           </Badge>
-                          <time
-                            dateTime={notification.dateTime}
-                            className="text-xs text-slate-400"
-                          >
-                            {notification.time}
+                          <time dateTime={item.createdAtIso} className="text-xs text-[#505A6E]">
+                            {formatRelativeTime(item.createdAtIso, locale)}
                           </time>
                         </div>
-                        <h3 className="mt-2 text-base font-semibold leading-6 text-white">
-                          {notification.title}
+                        <h3 className="mt-2 text-base font-bold leading-6 text-[#0D1321]">
+                          {item.title}
                         </h3>
-                        <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">
-                          {notification.description}
+                        <p className="mt-1 max-w-3xl text-sm leading-6 text-[#505A6E]">
+                          {item.description}
                         </p>
                       </div>
 
                       <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:shrink-0 sm:justify-end">
-                        {notification.unread ? (
+                        {item.unread ? (
                           <button
                             type="button"
-                            onClick={() =>
-                              markAsRead(notification.id, filter === "unread")
-                            }
-                            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-700 px-3 text-xs font-semibold text-slate-300 transition-colors hover:border-blue-700 hover:bg-blue-950/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 sm:flex-none"
+                            onClick={() => markAsRead(item.id)}
+                            className="glean-btn glean-btn-secondary glean-btn-sm"
                           >
                             <Check aria-hidden="true" className="size-3.5" />
-                            Đã đọc
+                            <span>{locale === "en" ? "Mark read" : "Đã đọc"}</span>
                           </button>
                         ) : null}
-                        {notification.href ? (
+
+                        {item.href ? (
                           <Link
-                            href={notification.href}
-                            onClick={() => markAsRead(notification.id)}
-                            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-700 px-3 text-xs font-semibold text-slate-300 transition-colors hover:border-blue-700 hover:bg-blue-950/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 sm:flex-none"
+                            href={item.href}
+                            onClick={() => markAsRead(item.id)}
+                            className="glean-btn glean-btn-navy glean-btn-sm"
                           >
-                            {notification.action}
+                            <span>{item.actionLabel}</span>
                             <ArrowRight aria-hidden="true" className="size-3.5" />
                           </Link>
                         ) : (
-                          <button
-                            type="button"
-                            disabled
-                            aria-describedby={`stale-note-${notification.id}`}
-                            className="inline-flex min-h-11 flex-1 cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-slate-800 px-3 text-xs font-semibold text-slate-600 sm:flex-none"
-                          >
-                            <LockKeyhole aria-hidden="true" className="size-3.5" />
-                            {notification.action}
-                          </button>
-                        )}
-                        {!notification.href ? (
-                          <span
-                            id={`stale-note-${notification.id}`}
-                            className="sr-only"
-                          >
-                            Đích fixture đã hết hiệu lực nên không thể mở.
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-[#0D1321]/10 bg-[#F3F4F8] px-3 py-1.5 text-xs font-semibold text-[#505A6E]">
+                            {item.actionLabel}
                           </span>
-                        ) : null}
+                        )}
                       </div>
                     </article>
                   </Card>
                 </li>
-              ))}
-            </ol>
-          ) : (
-            <Card className="flex flex-col items-center px-5 py-10 text-center">
-              <IconTile icon={BellOff} tone="slate" className="size-12" />
-              <h3 className="mt-4 font-semibold text-white">
-                Không có thông báo chưa đọc
-              </h3>
-              <p className="mt-1 max-w-md text-sm leading-6 text-slate-400">
-                Tất cả fixture hiện đã được đánh dấu đã đọc trong lần mở trang
-                này. Bạn có thể chuyển sang bộ lọc “Tất cả” để xem lại danh sách.
-              </p>
-              <button
-                type="button"
-                onClick={() => setFilter("all")}
-                className="mt-4 inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-700 px-4 text-sm font-semibold text-slate-300 transition-colors hover:border-blue-700 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-              >
-                Xem tất cả
-              </button>
-            </Card>
-          )}
-        </section>
-
-        <aside aria-labelledby="notification-rules-heading" className="space-y-4">
-          <Card className="p-5">
-            <div className="flex items-start gap-3">
-              <IconTile icon={LockKeyhole} tone="violet" />
-              <div>
-                <h2
-                  id="notification-rules-heading"
-                  className="font-semibold text-white"
+              );
+            })}
+          </ol>
+        ) : (
+          <Card className="flex flex-col items-center px-6 py-12 text-center">
+            <IconTile icon={BellOff} tone="slate" className="size-12" />
+            <h3 className="mt-4 text-base font-bold text-[#0D1321]">
+              {notifications.length === 0
+                ? locale === "en"
+                  ? "No workspace notifications yet"
+                  : "Chưa có thông báo hoạt động nào"
+                : locale === "en"
+                  ? "No matching notifications"
+                  : "Không có thông báo phù hợp bộ lọc"}
+            </h3>
+            <p className="mt-1.5 max-w-md text-sm leading-6 text-[#505A6E]">
+              {notifications.length === 0
+                ? locale === "en"
+                  ? "Real notifications appear automatically when you upload documents, verify Knowledge Cards, or run AI Utilities."
+                  : "Thông báo thật sẽ tự động xuất hiện mỗi khi bạn tải tài liệu lên, xác minh Thẻ tri thức hoặc chạy xong Tiện ích AI."
+                : locale === "en"
+                  ? "Switch filter back to All to inspect earlier activity logs."
+                  : "Chuyển bộ lọc về Tất cả để xem lại các hoạt động trước đó."}
+            </p>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              {notifications.length === 0 ? (
+                <>
+                  <Link href="/documents" className="glean-btn glean-btn-cobalt glean-btn-sm">
+                    {locale === "en" ? "Go to Library" : "Tải tài liệu lên"}
+                  </Link>
+                  <Link href="/utility" className="glean-btn glean-btn-secondary glean-btn-sm">
+                    {locale === "en" ? "Open AI Utilities" : "Mở Tiện ích AI"}
+                  </Link>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReadFilter("all");
+                    setGroupFilter("all");
+                  }}
+                  className="glean-btn glean-btn-secondary glean-btn-sm"
                 >
-                  Mở đích an toàn
-                </h2>
-                <p className="mt-1 text-sm leading-6 text-slate-400">
-                  Quyền với tài nguyên phải được kiểm tra lại lúc mở; thông báo
-                  không thay thế quyền truy cập.
-                </p>
-              </div>
-            </div>
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <PrototypeHint>
-                Đích nhạy cảm cần được ẩn khi liên kết bị thu hồi hoặc không còn
-                tồn tại.
-              </PrototypeHint>
+                  {locale === "en" ? "Show all events" : "Xem tất cả hoạt động"}
+                </button>
+              )}
             </div>
           </Card>
-
-          <Card className="p-5">
-            <div className="flex items-start gap-3">
-              <IconTile icon={SlidersHorizontal} tone="slate" />
-              <div>
-                <h2 className="font-semibold text-white">Tùy chọn nhận tin</h2>
-                <p
-                  id="notification-preference-note"
-                  className="mt-1 text-sm leading-6 text-slate-400"
-                >
-                  Kênh, loại sự kiện và thời gian lưu chưa được phê duyệt cho bản
-                  mẫu này.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled
-              aria-describedby="notification-preference-note"
-              className="mt-4 inline-flex min-h-11 w-full cursor-not-allowed items-center justify-center rounded-lg border border-slate-800 text-sm font-semibold text-slate-600"
-            >
-              Mở tùy chọn · chưa khả dụng
-            </button>
-          </Card>
-        </aside>
+        )}
       </div>
     </WorkspacePage>
   );

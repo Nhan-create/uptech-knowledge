@@ -19,6 +19,7 @@ const EXPECTED: Readonly<Record<RecoveryActionId, readonly [string, string]>> = 
   START_NORMAL_LOGIN: ["NATIVE_FORM", "/api/v1/auth/google/transactions"],
   START_NORMAL_LOGIN_AFTER_COOLDOWN: ["NATIVE_FORM", "/api/v1/auth/google/transactions"],
   SWITCH_GOOGLE_ACCOUNT: ["NATIVE_FORM", "/api/v1/auth/google/transactions"],
+  REGISTER_ORGANIZATION: ["NATIVE_FORM", "/api/v1/onboarding/google-workspace/transactions"],
   START_ORGANIZATION_SETUP: ["NATIVE_FORM", "/api/v1/onboarding/google-workspace/transactions"],
   RESTART_DIRECTORY_CONSENT: ["NATIVE_FORM", "/api/v1/onboarding/google-workspace/transactions"],
   CHECK_BOOTSTRAP_STATUS: ["FETCH", "/api/v1/onboarding/google-workspace/status"],

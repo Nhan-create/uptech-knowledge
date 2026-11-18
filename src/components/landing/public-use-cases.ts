@@ -20,9 +20,9 @@ const vi: Record<PublicInfoSection, readonly UseCase[]> = {
     ["Lãnh đạo", "Biết khi dữ liệu chưa đủ", "Cần quyết định nhưng báo cáo thiếu số liệu mới.", "Báo cáo hiện có và câu hỏi quyết định.", "AI nêu khoảng trống thay vì suy đoán và liệt kê nguồn đã kiểm tra.", "Biết phần nào chắc chắn và cần bổ sung dữ liệu nào."],
   ],
   capabilities: [
-    ["Mọi phòng ban", "Search và Chat trong một luồng", "Nhớ ý nhưng không nhớ tên tài liệu.", "Từ khóa gần đúng hoặc một câu hỏi hoàn chỉnh.", "Search ngữ nghĩa tìm nguồn; Chat tổng hợp với citation.", "Đúng tài liệu, đúng đoạn và câu trả lời sẵn sàng dùng."],
-    ["Quản lý dự án", "So sánh phiên bản tài liệu", "Cần biết đề xuất mới thay đổi gì.", "Hai phiên bản trong Knowledge Space.", "Nhóm thay đổi theo chủ đề và dẫn về từng vị trí.", "Danh sách khác biệt, tác động và bằng chứng cho mỗi thay đổi."],
-    ["Chuyên viên", "Tạo bản nháp từ nguồn chuẩn", "Cần email, checklist hoặc tóm tắt mà không chép lại.", "Bộ tài liệu và định dạng đầu ra đã chọn.", "AI tạo nháp chỉ từ phạm vi nguồn đang hiển thị.", "Bản nháp có cấu trúc, citation và sẵn sàng chỉnh sửa."],
+    ["Mọi phòng ban", "Tìm kiếm và Trợ lý AI trong một luồng", "Nhớ nội dung chính sách nhưng không nhớ tên tài liệu.", "Từ khóa hoặc câu hỏi trong phạm vi Không gian tri thức.", "Lọc nguồn Sẵn sàng trên Tìm kiếm rồi hỏi Trợ lý AI kèm trích dẫn [1]..[N].", "Đúng tài liệu Sẵn sàng, đoạn trích gốc và câu trả lời kiểm chứng được."],
+    ["Quản lý dự án", "So sánh tài liệu (Diff)", "Cần biết tài liệu mới bổ sung hoặc thay đổi điểm nào.", "Hai tài liệu Sẵn sàng trong Thư viện.", "Mở So sánh Diff để đối chiếu các mục Bổ sung và Thay đổi.", "Danh sách điểm bổ sung, thay đổi và ngữ cảnh đối chiếu rõ ràng."],
+    ["Chuyên viên", "Tạo bản nháp từ Tiện ích AI", "Cần tóm tắt, dịch thuật, checklist, báo cáo hoặc email từ tài liệu gốc.", "Tác vụ đã chọn và 1–3 nguồn trong Tiện ích AI.", "Chạy tác vụ trên bộ nguồn đã chọn và rà soát bản nháp ngay trên màn hình.", "Bản nháp có ghi rõ nguồn đầu vào để kiểm tra trước khi sử dụng."],
   ],
   workflow: [
     ["Quản trị tri thức", "Đưa nguồn mới vào workspace", "Quy trình vừa ban hành cần sớm tìm được.", "Tệp đã duyệt, chủ sở hữu, metadata và quyền.", "Tải lên, kiểm tra quyền rồi xử lý và lập chỉ mục.", "Nguồn có trạng thái rõ và chỉ xuất hiện với người có quyền."],
@@ -43,9 +43,9 @@ const en: Record<PublicInfoSection, readonly UseCase[]> = {
     ["Leadership", "Know when evidence is incomplete", "A decision is needed but reports lack current figures.", "Available reports and the decision question.", "Identify gaps instead of guessing and list checked sources.", "Leaders see what is supported and what data is still needed."],
   ],
   capabilities: [
-    ["Every team", "Search and chat in one flow", "A user recalls the meaning, not the file name.", "Approximate keywords or a complete question.", "Semantic search finds sources; chat answers with citations.", "The right document, passage, and a usable answer."],
-    ["Project managers", "Compare document versions", "A manager needs to understand proposal changes.", "Two versions in a Knowledge Space.", "Group changes by topic and link each to its location.", "Differences, impact, and evidence for every change."],
-    ["Specialists", "Draft from approved sources", "A specialist needs an email, checklist, or summary.", "A source set and requested output format.", "Generate only from the source scope shown on screen.", "A structured, cited draft ready for human review."],
+    ["Every team", "Search and AI Assistant in one flow", "A user recalls the policy topic, not the file name.", "Keywords or a question scoped to a Knowledge Space.", "Filter Ready files in Search, then ask AI Assistant with [1]..[N] citations.", "The right Ready document, source excerpt, and a verifiable answer."],
+    ["Project managers", "Compare documents with Diff", "A manager needs to see what changed between documents.", "Two Ready documents from the Library.", "Open Document Diff to review Additions and Changes side by side.", "Clear list of additions, changes, and comparison context."],
+    ["Specialists", "Draft outputs in AI Utilities", "A specialist needs a summary, translation, checklist, report, or email.", "Chosen utility and 1–3 selected sources.", "Run the utility on selected sources and review the editable draft.", "A source-labeled draft ready for human verification."],
   ],
   workflow: [
     ["Knowledge admins", "Bring a new source into a workspace", "A new procedure must become searchable quickly.", "Approved file, owner, metadata, and access scope.", "Upload, validate access, process, and index.", "Clear source status and visibility only for authorized people."],

@@ -141,6 +141,12 @@ export function trustedVercelClientIp(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
   if (environment.VERCEL !== "1") {
+    if (
+      environment.NODE_ENV === "development" &&
+      environment.UPTECH_LOCAL_DEV_IP
+    ) {
+      return canonicalizeClientIp(environment.UPTECH_LOCAL_DEV_IP);
+    }
     throw new GoogleLoginCryptoError("Trusted edge is unavailable");
   }
   const vercelId = headers.get("x-vercel-id");

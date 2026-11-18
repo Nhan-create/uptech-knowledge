@@ -415,6 +415,26 @@ export function createGoogleLoginService(input: {
         onboardingTokenHash: hashProof(onboardingCredential),
         requestId: operationRequestId,
       });
+      if (
+        (completed.outcome === "NORMAL" || completed.outcome === "ONBOARDING") &&
+        repository.syncProfileClaims !== undefined &&
+        (claims.displayName !== null || claims.pictureUrl !== null)
+      ) {
+        const tokenHashToSync =
+          completed.outcome === "NORMAL"
+            ? Buffer.from(session.token_hash, "hex")
+            : hashProof(onboardingCredential);
+        try {
+          await repository.syncProfileClaims({
+            credentialHash: tokenHashToSync,
+            displayName: claims.displayName,
+            pictureUrl: claims.pictureUrl,
+          });
+        } catch {
+          // Non-fatal metadata enrichment: keep login resilient if the optional
+          // profile-claim sync routine is unavailable.
+        }
+      }
       if (completed.outcome === "NORMAL") {
         return {
           outcome: "NORMAL",

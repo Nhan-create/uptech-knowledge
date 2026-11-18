@@ -1266,6 +1266,17 @@ BEGIN
     RETURN ROW('DENIED', NULL)::uptech.google_workspace_bootstrap_complete_result_v1;
   END;
 
+  -- Evaluate deferred constraint triggers while still inside SECURITY DEFINER
+  -- (uptech_migration_owner), then restore DEFERRED mode for any caller transaction.
+  SET CONSTRAINTS
+    uptech.workspace_domain_locators_alias_parent_check,
+    uptech.google_workspace_bootstrap_receipts_committed_attempt
+    IMMEDIATE;
+  SET CONSTRAINTS
+    uptech.workspace_domain_locators_alias_parent_check,
+    uptech.google_workspace_bootstrap_receipts_committed_attempt
+    DEFERRED;
+
   RETURN ROW('PROVISIONING', selected_status_expires_at)::uptech.google_workspace_bootstrap_complete_result_v1;
 END
 $function$;

@@ -17,43 +17,43 @@ export function Badge({
 }: BadgeProps) {
   const variantStyles = {
     neutral:
-      "bg-slate-800/80 text-slate-300 border-slate-700/60",
+      "bg-[#F3F4F8] text-[#323B4D] border-[#0D1321]/10",
     info:
-      "bg-sky-950/70 text-sky-300 border-sky-800/50",
+      "bg-[#ECF2FF] text-[#1945C2] border-[#C8D2FF]",
     success:
-      "bg-emerald-950/70 text-emerald-300 border-emerald-800/50",
+      "bg-[#E7F7EF] text-[#076944] border-[#BBEAD2]",
     warning:
-      "bg-amber-950/70 text-amber-300 border-amber-800/50",
+      "bg-[#FFF3DE] text-[#924D05] border-[#F6D59B]",
     danger:
-      "bg-rose-950/70 text-rose-300 border-rose-800/50",
+      "bg-[#FDECEC] text-[#B32018] border-[#FACACA]",
   };
 
   const dotStyles = {
-    neutral: "bg-slate-400",
-    info: "bg-sky-400",
-    success: "bg-emerald-400",
-    warning: "bg-amber-400",
-    danger: "bg-rose-400",
+    neutral: "bg-[#505A6E]",
+    info: "bg-[#1B44FF]",
+    success: "bg-[#059669]",
+    warning: "bg-[#D97706]",
+    danger: "bg-[#DC2626]",
   };
 
   const sizeStyles = {
-    sm: "px-2 py-0.5 text-[11px] gap-1.5",
-    md: "px-2.5 py-1 text-xs gap-1.5",
+    sm: "px-2.5 py-0.5 text-[11px] gap-1.5",
+    md: "px-3 py-1 text-xs gap-1.5",
   };
 
   return (
     <span
       className={cn(
-        "inline-flex items-center font-medium rounded-md border tracking-tight leading-none select-none",
+        "inline-flex items-center rounded-full border font-medium leading-none tracking-tight select-none",
         variantStyles[variant],
         sizeStyles[size],
-        className
+        className,
       )}
       {...props}
     >
       {dot && (
         <span
-          className={cn("w-1.5 h-1.5 rounded-full shrink-0", dotStyles[variant])}
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotStyles[variant])}
           aria-hidden="true"
         />
       )}

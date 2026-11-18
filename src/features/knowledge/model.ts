@@ -56,6 +56,7 @@ export type DocumentSummaryView = Readonly<{
   space: Pick<SpaceSummaryView, "id" | "name">;
   processing: ProcessingState;
   governance: readonly GovernanceMarker[];
+  chunkCount?: number;
 }>;
 
 export type DocumentDetailView = DocumentSummaryView &
@@ -64,6 +65,12 @@ export type DocumentDetailView = DocumentSummaryView &
       id: string;
       label: string;
       updatedLabel: string;
+    }>[];
+    sections?: readonly Readonly<{
+      id: string;
+      heading: string;
+      locator: string;
+      content: string;
     }>[];
     preview:
       | Readonly<{
@@ -88,6 +95,8 @@ export type SearchResultView = Readonly<{
   document: DocumentSummaryView;
   snippet: string;
   locator: string;
+  heading?: string;
+  score?: number;
 }>;
 
 export type SearchOutcome =

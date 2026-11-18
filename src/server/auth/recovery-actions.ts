@@ -18,7 +18,7 @@ export const PROVISIONING_PUBLIC_STATES = Object.freeze([
 export type ProvisioningPublicState = (typeof PROVISIONING_PUBLIC_STATES)[number];
 
 export const RECOVERY_ACTION_IDS = Object.freeze([
-  "START_NORMAL_LOGIN", "START_NORMAL_LOGIN_AFTER_COOLDOWN", "SWITCH_GOOGLE_ACCOUNT", "START_ORGANIZATION_SETUP",
+  "START_NORMAL_LOGIN", "START_NORMAL_LOGIN_AFTER_COOLDOWN", "SWITCH_GOOGLE_ACCOUNT", "REGISTER_ORGANIZATION", "START_ORGANIZATION_SETUP",
   "RESTART_DIRECTORY_CONSENT", "CHECK_BOOTSTRAP_STATUS", "RETRY_DIRECTORY_SYNC", "FINISH_BOOTSTRAP", "EXIT_ONBOARDING",
   "SUBMIT_ACCESS_REQUEST", "OPEN_ENTERPRISE_LOGIN_HELP", "OPEN_DOMAIN_VERIFICATION_HELP", "COPY_SUPER_ADMIN_INSTRUCTIONS",
   "COPY_WORKSPACE_ADMIN_INSTRUCTIONS", "CONTACT_UPTECH", "COPY_REQUEST_ID",
@@ -59,6 +59,7 @@ export const RECOVERY_ACTION_DESCRIPTORS = frozen({
   START_NORMAL_LOGIN: request("START_NORMAL_LOGIN", "POST", "/api/v1/auth/google/transactions", "Đăng nhập bằng Google", "Sign in with Google"),
   START_NORMAL_LOGIN_AFTER_COOLDOWN: request("START_NORMAL_LOGIN_AFTER_COOLDOWN", "POST", "/api/v1/auth/google/transactions", "Thử lại khi hết thời gian chờ", "Try again after cooldown"),
   SWITCH_GOOGLE_ACCOUNT: request("SWITCH_GOOGLE_ACCOUNT", "POST", "/api/v1/auth/google/transactions", "Đổi tài khoản Google", "Switch Google account"),
+  REGISTER_ORGANIZATION: request("REGISTER_ORGANIZATION", "POST", "/api/v1/onboarding/google-workspace/transactions", "Đăng ký tổ chức mới", "Register new organization"),
   START_ORGANIZATION_SETUP: request("START_ORGANIZATION_SETUP", "POST", "/api/v1/onboarding/google-workspace/transactions", "Thiết lập tổ chức", "Set up organization"),
   RESTART_DIRECTORY_CONSENT: request("RESTART_DIRECTORY_CONSENT", "POST", "/api/v1/onboarding/google-workspace/transactions", "Kết nối lại Google Workspace", "Reconnect Google Workspace"),
   CHECK_BOOTSTRAP_STATUS: request("CHECK_BOOTSTRAP_STATUS", "GET", "/api/v1/onboarding/google-workspace/status", "Kiểm tra trạng thái", "Check status"),

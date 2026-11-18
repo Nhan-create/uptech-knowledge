@@ -6,6 +6,7 @@ import {
   createGoogleCloudSecretManagerRegistration,
   type GoogleCloudSecretManagerConfiguration,
 } from "../secrets/google-cloud-secret-manager.ts";
+import { resolveLocalDevSecretProviderRegistration } from "../secrets/local-dev-secret-manager.ts";
 import {
   connectGoogleDirectory,
   type ConnectGoogleDirectoryInput,
@@ -104,6 +105,15 @@ export function createConfiguredGoogleCloudDirectoryRuntime(
   >,
   environment: Environment = process.env,
 ): DirectoryRuntime {
+  const localDevRegistration =
+    resolveLocalDevSecretProviderRegistration(environment);
+  if (localDevRegistration !== null) {
+    return createDirectoryRuntime({
+      ...dependencies,
+      secretProviderRegistration: localDevRegistration,
+    });
+  }
+
   return createGoogleCloudDirectoryRuntime({
     ...dependencies,
     googleCloudSecretManager: loadGoogleCloudDirectoryRuntimeConfiguration(

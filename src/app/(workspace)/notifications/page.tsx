@@ -1,10 +1,22 @@
-import type { Metadata } from "next";
 import { NotificationCenterPrototype } from "@/components/workspace/NotificationCenterPrototype";
+import {
+  getPreviewWorkspaceContext,
+  isWorkspacePreviewModeEnabled,
+} from "@/server/knowledge/access-context";
+import {
+  listWorkspaceNotifications,
+  type WorkspaceNotificationRecord,
+} from "@/server/knowledge/repository";
 
-export const metadata: Metadata = {
-  title: "Thông báo",
-};
+export const dynamic = "force-dynamic";
 
-export default function NotificationsPage() {
-  return <NotificationCenterPrototype />;
+export default async function NotificationsPage() {
+  let initialNotifications: readonly WorkspaceNotificationRecord[] = [];
+  if (isWorkspacePreviewModeEnabled()) {
+    initialNotifications = await listWorkspaceNotifications(
+      getPreviewWorkspaceContext(),
+    ).catch(() => []);
+  }
+
+  return <NotificationCenterPrototype initialNotifications={initialNotifications} />;
 }

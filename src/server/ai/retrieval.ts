@@ -1,0 +1,247 @@
+import { normalizeFold } from "@/features/dashboard/hero-matching";
+import {
+  resolveScopeToSpaceId,
+  type ChatCitationSource,
+  type ChatTurnEvidenceState,
+  type ContextScopeType,
+} from "@/features/chat/chat-engine";
+import { embedTextWithGemini } from "@/server/ai/gemini-client";
+import type {
+  StoredDocumentChunk,
+  StoredKnowledgeDocument,
+} from "@/server/knowledge/repository";
+
+export interface RetrievedReadyPassage {
+  readonly number: number;
+  readonly document: StoredKnowledgeDocument;
+  readonly chunk: StoredDocumentChunk;
+  readonly isDeprecated: boolean;
+  readonly score: number;
+}
+
+export interface RetrievalOutcome {
+  readonly evidenceState: ChatTurnEvidenceState;
+  readonly excludedCount: number;
+  readonly passages: readonly RetrievedReadyPassage[];
+  readonly citations: readonly ChatCitationSource[];
+}
+
+export interface RankedChunkMatch {
+  readonly document: StoredKnowledgeDocument;
+  readonly chunk: StoredDocumentChunk;
+  readonly score: number;
+  readonly lexicalHit: boolean;
+  readonly semanticScore: number;
+}
+
+const SUMMARY_INTENT_PATTERN =
+  /tom tat|tong hop|summary|summarize|overview|tat ca|all docs/iu;
+
+export function tokenizeQuery(query: string): string[] {
+  return Array.from(
+    new Set(
+      normalizeFold(query)
+        .split(/[\s,.;:!?()[\]{}"'\/\\-]+/u)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 2),
+    ),
+  );
+}
+
+function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const va = a[i] ?? 0;
+    const vb = b[i] ?? 0;
+    dot += va * vb;
+    magA += va * va;
+    magB += vb * vb;
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom > 0 ? dot / denom : 0;
+}
+
+function lexicalChunkMatch(
+  tokens: readonly string[],
+  foldedQuery: string,
+  doc: StoredKnowledgeDocument,
+  chunk: StoredDocumentChunk,
+): { readonly score: number; readonly hit: boolean } {
+  const haystack = normalizeFold(
+    `${doc.summary.name} ${doc.summary.space.name} ${chunk.heading} ${chunk.content}`,
+  );
+  const titleHaystack = normalizeFold(`${doc.summary.name} ${chunk.heading}`);
+  let score = 0;
+
+  if (foldedQuery.length >= 3 && haystack.includes(foldedQuery)) {
+    score += 18;
+  }
+  for (const token of tokens) {
+    if (haystack.includes(token)) {
+      score += 4;
+      if (titleHaystack.includes(token)) {
+        score += 3;
+      }
+    }
+  }
+
+  return {
+    score,
+    hit: score > 0 || (tokens.length === 0 && haystack.includes(foldedQuery)),
+  };
+}
+
+/**
+ * Shared hybrid lexical + Gemini vector ranker across Ready documents.
+ */
+export async function rankReadyChunksHybrid(args: Readonly<{
+  query: string;
+  documents: readonly StoredKnowledgeDocument[];
+  includeAllOnZeroMatch?: boolean;
+  prioritizeDocIds?: ReadonlySet<string>;
+}>): Promise<readonly RankedChunkMatch[]> {
+  const readyDocs = args.documents.filter(
+    (doc) => doc.summary.processing.kind === "ready" && doc.chunks.length > 0,
+  );
+  if (readyDocs.length === 0) return [];
+
+  const foldedQuery = normalizeFold(args.query);
+  const tokens = tokenizeQuery(args.query);
+  const hasStoredEmbeddings = readyDocs.some((doc) =>
+    doc.chunks.some((c) => Array.isArray(c.embedding) && c.embedding.length > 0),
+  );
+  const queryEmbedding = hasStoredEmbeddings
+    ? await embedTextWithGemini(args.query)
+    : null;
+
+  const ranked: RankedChunkMatch[] = [];
+  for (const doc of readyDocs) {
+    const selectedBonus =
+      args.prioritizeDocIds?.has(doc.summary.id) || doc.isUserUploaded ? 4 : 0;
+    const deprecatedPenalty = doc.summary.governance.some(
+      (g) => g.kind === "deprecated",
+    )
+      ? -3
+      : 1;
+
+    for (const chunk of doc.chunks) {
+      const lex = lexicalChunkMatch(tokens, foldedQuery, doc, chunk);
+      const semanticScore =
+        queryEmbedding && chunk.embedding && chunk.embedding.length > 0
+          ? cosineSimilarity(queryEmbedding, chunk.embedding)
+          : 0;
+      const vectorBonus = semanticScore >= 0.45 ? semanticScore * 14 : 0;
+
+      if (!lex.hit && vectorBonus === 0 && !args.includeAllOnZeroMatch) {
+        continue;
+      }
+
+      const summaryBonus = SUMMARY_INTENT_PATTERN.test(foldedQuery) ? 5 : 0;
+      const score =
+        lex.score + vectorBonus + selectedBonus + deprecatedPenalty + summaryBonus;
+
+      ranked.push({
+        document: doc,
+        chunk,
+        score,
+        lexicalHit: lex.hit,
+        semanticScore,
+      });
+    }
+  }
+
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked;
+}
+
+export async function retrieveReadyPassagesForChat(args: Readonly<{
+  prompt: string;
+  scope: ContextScopeType;
+  selectedDocumentIds: readonly string[];
+  documents: readonly StoredKnowledgeDocument[];
+  maxPassages?: number;
+}>): Promise<RetrievalOutcome> {
+  const maxPassages = args.maxPassages ?? 5;
+  const scopeSpaceId = resolveScopeToSpaceId(args.scope);
+  const selectedIdSet = new Set(args.selectedDocumentIds);
+
+  const docsInScope =
+    args.scope === "selected-documents"
+      ? args.documents.filter((doc) => selectedIdSet.has(doc.summary.id))
+      : scopeSpaceId === "all"
+        ? args.documents
+        : args.documents.filter((doc) => doc.summary.space.id === scopeSpaceId);
+
+  const readyDocs = docsInScope.filter(
+    (doc) => doc.summary.processing.kind === "ready" && doc.chunks.length > 0,
+  );
+  const excludedCount = docsInScope.filter(
+    (doc) => doc.summary.processing.kind !== "ready",
+  ).length;
+
+  if (readyDocs.length === 0) {
+    return {
+      evidenceState: "empty",
+      excludedCount,
+      passages: [],
+      citations: [],
+    };
+  }
+
+  const ranked = await rankReadyChunksHybrid({
+    query: args.prompt,
+    documents: readyDocs,
+    includeAllOnZeroMatch: true,
+    prioritizeDocIds: selectedIdSet,
+  });
+
+  const selected: RankedChunkMatch[] = [];
+  const perDocCount = new Map<string, number>();
+
+  for (const candidate of ranked) {
+    if (selected.length >= maxPassages) break;
+    const count = perDocCount.get(candidate.document.summary.id) ?? 0;
+    if (count >= 2 && readyDocs.length > 1) continue;
+    selected.push(candidate);
+    perDocCount.set(candidate.document.summary.id, count + 1);
+  }
+
+  const passages: RetrievedReadyPassage[] = selected.map((item, idx) => ({
+    number: idx + 1,
+    document: item.document,
+    chunk: item.chunk,
+    isDeprecated: item.document.summary.governance.some(
+      (g) => g.kind === "deprecated",
+    ),
+    score: item.score,
+  }));
+
+  const citations: ChatCitationSource[] = passages.map((p) => ({
+    id: p.document.summary.id,
+    number: p.number,
+    title: p.document.summary.name,
+    fileType: p.document.summary.fileType,
+    version: p.document.summary.versionLabel,
+    location: p.chunk.locator,
+    heading: p.chunk.heading,
+    quote: p.chunk.content,
+    knowledgeSpace: p.document.summary.space.name,
+    spaceId: p.document.summary.space.id,
+    statusLabel: p.document.summary.processing.label,
+    ownerLabel: p.document.summary.ownerLabel,
+    updatedLabel: p.document.summary.updatedLabel,
+    isDeprecated: p.isDeprecated,
+    isLocalUpload: p.document.summary.id.startsWith("local-"),
+  }));
+
+  const hasCaution = passages.some((p) => p.isDeprecated);
+  return {
+    evidenceState: hasCaution ? "caution" : "grounded",
+    excludedCount,
+    passages,
+    citations,
+  };
+}

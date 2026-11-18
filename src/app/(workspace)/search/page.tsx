@@ -10,6 +10,8 @@ export const metadata: Metadata = {
   title: "Tìm kiếm",
 };
 
+export const dynamic = "force-dynamic";
+
 const legacySpaceNames: Record<string, string> = {
   people: "Nhân sự",
   operations: "Vận hành",
@@ -30,10 +32,19 @@ export default async function SearchPage({
     ? await adapter.findSpaceIdByLegacyName(legacySpaceName)
     : parsedInput.spaceId;
   const input = { ...parsedInput, spaceId: resolvedSpaceId };
-  const [spaces, outcome] = await Promise.all([
+  const [spaces, outcome, readyList] = await Promise.all([
     adapter.listSpaces(),
     adapter.search(input),
+    adapter.listDocuments({ query: "", processing: "ready" }),
   ]);
+  const readyDocuments = readyList.kind === "ready" ? readyList.documents : [];
 
-  return <SearchScreen input={input} outcome={outcome} spaces={spaces} />;
+  return (
+    <SearchScreen
+      input={input}
+      outcome={outcome}
+      spaces={spaces}
+      readyDocuments={readyDocuments}
+    />
+  );
 }

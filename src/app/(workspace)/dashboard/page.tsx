@@ -7,6 +7,8 @@ export const metadata: Metadata = {
   title: "Tổng quan",
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function DashboardPage() {
   const adapter = getKnowledgeReadAdapter();
   const [spaces, documentOutcome] = await Promise.all([

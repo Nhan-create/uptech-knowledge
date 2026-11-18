@@ -1648,7 +1648,8 @@ BEGIN
   SET status = 'EXCHANGE_RESERVED',
       consumed_at = observed_at,
       completion_handle_hash = p_completion_handle_hash,
-      completion_expires_at = reservation_expiry
+      completion_expires_at = reservation_expiry,
+      request_id = p_request_id
   WHERE id = selected_transaction.id
     AND status = 'PENDING'
     AND expires_at > observed_at;
@@ -2705,7 +2706,8 @@ BEGIN
   SET status = 'EXCHANGE_RESERVED',
       consumed_at = observed_at,
       completion_handle_hash = p_completion_handle_hash,
-      completion_expires_at = reservation_expiry
+      completion_expires_at = reservation_expiry,
+      request_id = p_request_id
   WHERE id = selected_transaction.id
     AND status = 'PENDING'
     AND expires_at > observed_at;

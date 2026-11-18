@@ -711,3 +711,23 @@ test("malformed completion and rejection rows fail closed", async () => {
     GoogleLoginRepositoryError,
   );
 });
+
+test("syncProfileClaims invokes sync_identity_google_profile_claims_v1 with expected arguments", async () => {
+  const fake = fakePool([]);
+  const repository = createGoogleLoginRepository(fake.pool as never);
+  assert.ok(repository.syncProfileClaims);
+
+  await repository.syncProfileClaims({
+    credentialHash: bytes(32, 9),
+    displayName: "Alice Uptech",
+    pictureUrl: "https://lh3.googleusercontent.com/a/profile-photo",
+  });
+
+  assert.equal(fake.calls.length, 1);
+  assert.match(fake.calls[0].text, /uptech\.sync_identity_google_profile_claims_v1/u);
+  assert.deepEqual(fake.calls[0].values, [
+    Buffer.from(bytes(32, 9)),
+    "Alice Uptech",
+    "https://lh3.googleusercontent.com/a/profile-photo",
+  ]);
+});

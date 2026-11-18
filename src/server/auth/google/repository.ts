@@ -112,6 +112,11 @@ export interface GoogleLoginRepository {
     readonly rejectionClass: GoogleLoginRejectionClass;
     readonly requestId: string;
   }): Promise<"RECORDED" | "RATE_LIMITED">;
+  syncProfileClaims?(input: {
+    readonly credentialHash: Uint8Array;
+    readonly displayName: string | null;
+    readonly pictureUrl: string | null;
+  }): Promise<void>;
 }
 
 export class GoogleLoginRepositoryError extends Error {
@@ -233,6 +238,14 @@ SELECT uptech.record_google_login_rejection_v1(
   $2::uptech.google_auth_rejection_class_v1,
   $3::uuid
 )::text AS outcome
+`;
+
+const SYNC_PROFILE_CLAIMS_SQL = `
+SELECT uptech.sync_identity_google_profile_claims_v1(
+  $1::bytea,
+  $2::text,
+  $3::text
+)
 `;
 
 function requireSingleRow<T extends QueryResultRow>(rows: T[]): T {
@@ -526,6 +539,14 @@ export function createGoogleLoginRepository(
         throw new GoogleLoginRepositoryError("Google rejection result is invalid");
       }
       return outcome;
+    },
+
+    async syncProfileClaims(input) {
+      await pool.query(SYNC_PROFILE_CLAIMS_SQL, [
+        Buffer.from(input.credentialHash),
+        input.displayName,
+        input.pictureUrl,
+      ]);
     },
   };
   return Object.freeze(implementation);

@@ -132,7 +132,7 @@ function compositeField(value: string | null): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function domainArray(domains: readonly VerifiedGoogleWorkspaceDomain[]): string {
+export function formatVerifiedDomainsCompositeArray(domains: readonly VerifiedGoogleWorkspaceDomain[]): string {
   return `{${domains.map((domain) => {
     const composite = `(${compositeField(domain.normalizedDomain)},${domain.domainKind},${compositeField(domain.providerParentDomain)})`;
     return `"${composite.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -230,7 +230,7 @@ export function createGoogleWorkspaceBootstrapRepository(
       const row = one((await pool.query(COMPLETE_SQL, [
         input.attemptId, bytes(input.sourceTokenHash), bytes(input.statusTokenHash),
         input.customerId, input.customerDomain, input.providerSubject, input.hostedDomain,
-        domainArray(input.verifiedDomains), input.credentialReference,
+        formatVerifiedDomainsCompositeArray(input.verifiedDomains), input.credentialReference,
         [...input.authorizedScopes], input.requestId,
       ])).rows as QueryResultRow[]);
       if (row.outcome === "DENIED" && row.status_expires_at === null && Object.keys(row).length === 2) {

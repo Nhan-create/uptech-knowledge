@@ -63,6 +63,7 @@ const PUBLIC_ERROR_CODES = new Set<BootstrapServiceErrorCode>([
 const CALLBACK_PARAMETER_LIMITS = new Map<string, number>([
   ["code", 4_096],
   ["state", 43],
+  ["iss", 256],
   ["scope", 4_096],
   ["authuser", 32],
   ["prompt", 64],

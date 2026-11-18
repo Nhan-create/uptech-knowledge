@@ -27,4 +27,14 @@ const dependencies: BootstrapHttpDependencies = Object.freeze({
   },
 });
 
-export const POST = createGoogleWorkspaceBootstrapPost(dependencies);
+const bootstrapPost = createGoogleWorkspaceBootstrapPost(dependencies);
+
+export async function POST(request: Request): Promise<Response> {
+  if (request.headers.get("content-type") === "application/x-www-form-urlencoded") {
+    const { handleDirectOrgSignupPost } = await import(
+      "@/server/onboarding/google-workspace/direct-signup"
+    );
+    return handleDirectOrgSignupPost(request);
+  }
+  return bootstrapPost(request);
+}

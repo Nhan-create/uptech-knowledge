@@ -12,6 +12,7 @@ import {
   type ApprovedSecretProviderRegistration,
 } from "../../secrets/core.ts";
 import { createGoogleCloudSecretManagerRegistration } from "../../secrets/google-cloud-secret-manager.ts";
+import { resolveLocalDevSecretProviderRegistration } from "../../secrets/local-dev-secret-manager.ts";
 import { createConfiguredGoogleDirectoryProductionWorker } from "../../../worker/google-directory-production.ts";
 import {
   createGoogleWorkspaceBootstrapRepository,
@@ -64,8 +65,11 @@ const productionComposition: GoogleWorkspaceBootstrapRuntimeComposition =
     loadConfig: loadGoogleLoginRuntimeConfig,
     getPool: getRuntimeDatabasePool,
     createSecretProviderRegistration(environment: Environment) {
-      return createGoogleCloudSecretManagerRegistration(
-        loadGoogleCloudDirectoryRuntimeConfiguration(environment),
+      return (
+        resolveLocalDevSecretProviderRegistration(environment) ??
+        createGoogleCloudSecretManagerRegistration(
+          loadGoogleCloudDirectoryRuntimeConfiguration(environment),
+        )
       );
     },
     createProvider: createGoogleDirectoryConsentProvider,
@@ -73,6 +77,14 @@ const productionComposition: GoogleWorkspaceBootstrapRuntimeComposition =
     report: reportGoogleWorkspaceBootstrapOperationalEvent,
     now: () => new Date(),
   });
+
+export function createConfiguredSecretAdapter(
+  environment: Environment = process.env,
+) {
+  return loadApprovedSecretAdapter(
+    productionComposition.createSecretProviderRegistration(environment),
+  );
+}
 
 /**
  * Production-only composition for pre-tenant Workspace bootstrap. Its public

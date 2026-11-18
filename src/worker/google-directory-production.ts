@@ -38,7 +38,11 @@ export function loadGoogleDirectoryProductionConfiguration(
   environment: Environment = process.env,
 ): GoogleDirectoryProductionConfiguration {
   return Object.freeze({
-    databaseUrl: required(environment, "DATABASE_URL"),
+    databaseUrl: required(
+      environment,
+      "UPTECH_WORKER_DATABASE_URL",
+      "DATABASE_URL",
+    ),
     oauthClient: Object.freeze({
       clientId: required(
         environment,

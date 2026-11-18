@@ -35,11 +35,11 @@ function actionIds(model: Awaited<ReturnType<typeof resolveLoginPageModel>>): st
   return model.actions.map((action) => action.id);
 }
 
-test("ordinary login is a closed render model with only normal login", async () => {
+test("ordinary login is a closed render model with normal login and direct org registration", async () => {
   const model = await resolveLoginPageModel(new Headers(), undefined, deps());
   assert.equal(model.kind, "RENDER");
   assert.equal(model.state, null);
-  assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN"]);
+  assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN", "REGISTER_ORGANIZATION"]);
   assert.equal(model.csrfToken, null);
   assert.equal(model.requestId, null);
   assert.equal(model.retryAfterSeconds, null);
@@ -121,7 +121,7 @@ test("all uppercase states and legacy callback keys map through the closed regis
     const model = await resolveLoginPageModel(new Headers(), input, deps());
     assert.equal(model.kind, "RENDER");
     assert.equal(model.state, null);
-    assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN"]);
+    assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN", "REGISTER_ORGANIZATION"]);
   }
 });
 
@@ -142,7 +142,7 @@ test("current Web roles redirect only to fixed destinations and stale authority 
   assert.deepEqual(actionIds(stale), ["START_NORMAL_LOGIN", "SWITCH_GOOGLE_ACCOUNT"]);
   const afterClear = await resolveLoginPageModel(new Headers(), undefined, deps());
   assert.equal(afterClear.kind, "RENDER");
-  assert.deepEqual(actionIds(afterClear), ["START_NORMAL_LOGIN"]);
+  assert.deepEqual(actionIds(afterClear), ["START_NORMAL_LOGIN", "REGISTER_ORGANIZATION"]);
 });
 
 test("each authenticated onboarding family derives CSRF and selects executable actions", async () => {
@@ -176,7 +176,7 @@ test("unrecognized onboarding family removes authority and CSRF", async () => {
   assert.equal(model.kind, "RENDER");
   assert.equal(model.state, null);
   assert.equal(model.csrfToken, null);
-  assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN"]);
+  assert.deepEqual(actionIds(model), ["START_NORMAL_LOGIN", "REGISTER_ORGANIZATION"]);
 });
 
 test("real duplicate values and canonical authenticator failure never derive capability", async () => {

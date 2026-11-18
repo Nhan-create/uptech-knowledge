@@ -84,18 +84,21 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
     features: [
       {
         icon: Files,
-        title: "Kho tri thức có cấu trúc",
-        description: "Tổ chức tài liệu theo workspace, phòng ban, dự án hoặc chủ đề.",
+        title: "Thư viện & Không gian tri thức",
+        description:
+          "Tổ chức tài liệu theo không gian (Nhân sự, Vận hành, Dự án Atlas) và theo dõi trạng thái Sẵn sàng hay đang OCR.",
       },
       {
         icon: FolderSearch2,
-        title: "Tìm kiếm hợp nhất",
-        description: "Tìm bằng từ khóa, ý nghĩa và bộ lọc nguồn trong cùng một luồng.",
+        title: "Tìm kiếm & Tìm nhanh (Ctrl K)",
+        description:
+          "Tra cứu trong kho tài liệu Sẵn sàng với bộ lọc Không gian tri thức, Loại tệp hoặc nhảy nhanh từ mọi trang.",
       },
       {
         icon: Sparkles,
-        title: "AI gắn với công việc",
-        description: "Hỏi đáp, tóm tắt và so sánh trên chính những nguồn đã chọn.",
+        title: "Trợ lý AI, So sánh Diff & Tiện ích AI",
+        description:
+          "Hỏi đáp theo phạm vi nguồn, đối chiếu thay đổi giữa hai tài liệu và chạy 6 tác vụ tạo bản nháp cần rà soát.",
       },
     ],
     proofLabel: "Một trải nghiệm liền mạch",
@@ -128,39 +131,45 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
     values: [
       {
         icon: LockKeyhole,
-        title: "Theo đúng quyền",
-        description: "Chỉ nguồn được phép mới đi vào tìm kiếm và câu trả lời.",
+        title: "Chỉ dùng nguồn Sẵn sàng & đúng quyền",
+        description:
+          "Quy tắc Ready-Only loại trừ tệp đang OCR, đang tải hoặc lỗi; quyền được kiểm tra lại lúc mở tài liệu.",
       },
       {
         icon: FileCheck2,
-        title: "Có thể kiểm chứng",
-        description: "Trích dẫn đưa người dùng trở lại tài liệu và vị trí liên quan.",
+        title: "Trình đọc nguồn trích dẫn",
+        description:
+          "Thẻ [1]..[N] mở ngay đoạn trích gốc, số trang/mục và liên kết về trang chi tiết tài liệu.",
       },
       {
         icon: ShieldCheck,
-        title: "Nêu rõ giới hạn",
-        description: "Thiếu bằng chứng, hệ thống nói rõ thay vì tự lấp khoảng trống.",
+        title: "Minh bạch phạm vi & giới hạn",
+        description:
+          "Hiển thị rõ không gian đang hỏi, số tệp Sẵn sàng và số tệp bị loại trừ thay vì suy đoán.",
       },
     ],
     featureEyebrow: "Nguyên tắc thành tính năng",
     featureTitle: "Niềm tin được thể hiện ngay trong giao diện sản phẩm.",
     featureDescription:
-      "Các nguyên tắc không nằm trong tài liệu cam kết riêng; chúng xuất hiện ở từng thao tác người dùng.",
+      "Các nguyên tắc không nằm trong tài liệu cam kết riêng; chúng xuất hiện ở từng tab của web.",
     features: [
       {
         icon: BookOpenCheck,
-        title: "Citation có thể mở",
-        description: "Tên nguồn, vị trí và đoạn liên quan luôn ở gần câu trả lời.",
+        title: "Trình đọc trích dẫn song song",
+        description:
+          "Tên nguồn, phiên bản, vị trí trang/mục và trích đoạn gốc luôn mở được ngay bên cạnh hội thoại.",
       },
       {
         icon: Files,
-        title: "Phạm vi nguồn rõ ràng",
-        description: "Người dùng thấy workspace và bộ tài liệu đang được sử dụng.",
+        title: "Phạm vi nguồn & nhãn hiệu lực",
+        description:
+          "Người dùng chọn Toàn workspace, từng không gian hoặc tệp đính kèm và thấy rõ nhãn Official, Verified, Expiring.",
       },
       {
         icon: MessageSquareText,
-        title: "Phản hồi có mức độ chắc chắn",
-        description: "Câu trả lời phân biệt dữ kiện có nguồn với phần còn thiếu dữ liệu.",
+        title: "Mở đích an toàn & rà soát bản nháp",
+        description:
+          "Thông báo chặn liên kết hết hiệu lực; Tiện ích AI luôn giữ bản nháp ở trạng thái chờ rà soát.",
       },
     ],
     proofLabel: "An toàn trong vận hành",
@@ -193,39 +202,45 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
     values: [
       {
         icon: MessageSquareText,
-        title: "Chat AI có trích dẫn",
-        description: "Hỏi toàn bộ kho tri thức bằng ngôn ngữ tự nhiên.",
+        title: "Trợ lý AI có trích dẫn",
+        description:
+          "Hỏi đáp theo Toàn workspace, từng Không gian tri thức hoặc tài liệu đính kèm trên nguồn Sẵn sàng.",
       },
       {
         icon: FolderSearch2,
-        title: "Search theo từ khóa và ý nghĩa",
-        description: "Tìm đúng chính sách, hợp đồng hay quy trình dù cách diễn đạt khác nhau.",
+        title: "Tìm kiếm & Tìm nhanh (Ctrl K)",
+        description:
+          "Tìm theo từ khóa trên kho tài liệu Sẵn sàng, lọc theo Không gian tri thức và Loại tệp.",
       },
       {
         icon: Files,
-        title: "Knowledge Spaces",
-        description: "Tổ chức nguồn theo phòng ban, dự án, khách hàng hoặc chủ đề.",
+        title: "Thư viện & Không gian tri thức",
+        description:
+          "Quản lý tài liệu theo Nhân sự, Vận hành, Dự án Atlas kèm trạng thái xử lý và lịch sử phiên bản.",
       },
     ],
     featureEyebrow: "Năng lực sản phẩm",
     featureTitle: "Làm nhiều hơn sau khi đã tìm thấy thông tin.",
     featureDescription:
-      "Các công cụ xử lý tài liệu giúp biến thông tin đã tìm được thành đầu ra phục vụ công việc.",
+      "Các công cụ xử lý tài liệu trên web giúp biến thông tin đã tìm được thành đầu ra phục vụ công việc.",
     features: [
       {
         icon: BookOpenCheck,
-        title: "Đọc nguồn trong ngữ cảnh",
-        description: "Đi thẳng tới tài liệu và phần nội dung liên quan tới câu trả lời.",
+        title: "Trình đọc nguồn trích dẫn",
+        description:
+          "Bấm thẻ [1]..[N] để mở đoạn trích gốc ngay bên cạnh câu trả lời và đi tới chi tiết tài liệu.",
       },
       {
         icon: FileCheck2,
-        title: "So sánh tài liệu",
-        description: "Đặt các phiên bản hoặc nguồn cạnh nhau để nhận diện điểm khác biệt.",
+        title: "So sánh tài liệu (Diff)",
+        description:
+          "Đặt hai tài liệu Sẵn sàng cạnh nhau để nhận diện rõ từng điểm Bổ sung và Thay đổi.",
       },
       {
         icon: Sparkles,
-        title: "AI utilities",
-        description: "Tóm tắt, tạo nháp và xử lý nội dung trên bộ nguồn đã chọn.",
+        title: "Tiện ích AI (6 tác vụ)",
+        description:
+          "Tóm tắt, Dịch thuật, Checklist, Báo cáo, Email và So sánh từ nguồn đã chọn để rà soát trước khi dùng.",
       },
     ],
     proofLabel: "Từ khả năng đến kết quả",
@@ -258,39 +273,45 @@ const vietnamese: Record<PublicInfoSection, PublicInfoContent> = {
     values: [
       {
         icon: Files,
-        title: "01 · Tập trung nguồn",
-        description: "Đưa tài liệu được phê duyệt về đúng workspace và không gian tri thức.",
+        title: "01 · Đưa nguồn vào Thư viện",
+        description:
+          "Tải tệp vào đúng Không gian tri thức và theo dõi xử lý (tải lên, OCR, lập chỉ mục) tới Sẵn sàng.",
       },
       {
         icon: LockKeyhole,
-        title: "02 · Giữ nguyên quyền",
-        description: "Gắn phạm vi truy cập trước khi nội dung được xử lý và lập chỉ mục.",
+        title: "02 · Lọc nguồn Sẵn sàng",
+        description:
+          "Chỉ tài liệu đạt Sẵn sàng mới vào Tìm kiếm và Trợ lý AI; tệp đang xử lý hoặc lỗi được tách riêng.",
       },
       {
         icon: FolderSearch2,
-        title: "03 · Tìm hoặc hỏi",
-        description: "Truy xuất bằng từ khóa, ý nghĩa hoặc một câu hỏi tự nhiên.",
+        title: "03 · Tìm kiếm hoặc hỏi Trợ lý AI",
+        description:
+          "Lọc theo Không gian và Loại tệp ở Tìm kiếm hoặc đặt câu hỏi theo phạm vi trên Trợ lý AI.",
       },
     ],
     featureEyebrow: "Bước cuối tạo khác biệt",
-    featureTitle: "Mở nguồn kiểm chứng trước khi hành động.",
+    featureTitle: "Kiểm chứng trích dẫn, đối chiếu và tạo đầu ra.",
     featureDescription:
-      "Câu trả lời không phải điểm kết thúc; người dùng có thể đi tiếp tới đúng tài liệu, vị trí và ngữ cảnh liên quan.",
+      "Câu trả lời không phải điểm kết thúc; người dùng mở đoạn gốc, so sánh hai tài liệu hoặc chuyển sang Tiện ích AI.",
     features: [
       {
         icon: BookOpenCheck,
-        title: "04 · Mở citation",
-        description: "Kiểm tra phần nguồn được dùng để tạo ra kết luận.",
+        title: "04 · Mở Trình đọc trích dẫn",
+        description:
+          "Bấm thẻ [1]..[N] để đối chiếu đoạn văn bản gốc và trang/mục trong tài liệu.",
       },
       {
         icon: FileCheck2,
-        title: "So sánh khi cần",
-        description: "Đối chiếu nguồn hoặc phiên bản trước khi ra quyết định.",
+        title: "So sánh Diff khi cần",
+        description:
+          "Chọn hai tài liệu Sẵn sàng ở So sánh Diff để xem phần Bổ sung và Thay đổi.",
       },
       {
         icon: Sparkles,
-        title: "Tiếp tục xử lý",
-        description: "Tóm tắt hoặc tạo bản nháp mới từ bộ nguồn đã xác nhận.",
+        title: "Tạo bản nháp ở Tiện ích AI",
+        description:
+          "Chạy Tóm tắt, Dịch thuật, Checklist, Báo cáo hoặc Email từ nguồn đã chọn rồi rà soát trước khi dùng.",
       },
     ],
     proofLabel: "Quy trình trong thực tế",
@@ -347,18 +368,21 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
     features: [
       {
         icon: Files,
-        title: "Structured knowledge spaces",
-        description: "Organize documents by workspace, team, project, or topic.",
+        title: "Library & Knowledge Spaces",
+        description:
+          "Organize files into spaces (HR, Operations, Project Atlas) and track Ready vs. OCR/processing status.",
       },
       {
         icon: FolderSearch2,
-        title: "Unified search",
-        description: "Search by keywords, meaning, and source filters in one flow.",
+        title: "Search & Quick Find (Ctrl K)",
+        description:
+          "Query Ready documents by keyword, Knowledge Space, and file type, or jump from any view.",
       },
       {
         icon: Sparkles,
-        title: "AI grounded in real work",
-        description: "Ask, summarize, and compare using the exact sources you select.",
+        title: "AI Assistant, Document Diff & AI Utilities",
+        description:
+          "Ask scoped questions, compare two Ready documents, and run 6 review-first drafting utilities.",
       },
     ],
     proofLabel: "One connected experience",
@@ -457,38 +481,44 @@ const english: Record<PublicInfoSection, PublicInfoContent> = {
       {
         icon: MessageSquareText,
         title: "Cited AI Chat",
-        description: "Ask across permitted enterprise knowledge in natural language.",
+        description:
+          "Ask across the whole workspace, a Knowledge Space, or attached Ready files.",
       },
       {
         icon: FolderSearch2,
-        title: "Semantic and keyword Search",
-        description: "Find policies, contracts, and processes even when wording differs.",
+        title: "Search & Quick Find (Ctrl K)",
+        description:
+          "Filter Ready documents by keyword, Knowledge Space, and file format.",
       },
       {
         icon: Files,
-        title: "Knowledge Spaces",
-        description: "Organize sources around teams, projects, customers, or topics.",
+        title: "Library & Knowledge Spaces",
+        description:
+          "Organize documents across HR, Operations, and Project Atlas with processing states and versions.",
       },
     ],
     featureEyebrow: "Product capabilities",
     featureTitle: "Do more after finding the right information.",
     featureDescription:
-      "Document tools turn trusted information into practical outputs for daily work.",
+      "Web workspace tools turn verified information into practical outputs for daily work.",
     features: [
       {
         icon: BookOpenCheck,
-        title: "Contextual source reader",
-        description: "Jump directly to the document section behind an answer.",
+        title: "Inline Citation Reader",
+        description:
+          "Click [1]..[N] chips to inspect the exact source excerpt beside the answer and open the document.",
       },
       {
         icon: FileCheck2,
         title: "Document comparison",
-        description: "Review versions or sources side by side to identify differences.",
+        description:
+          "Compare two Ready documents side by side to review Additions and Changes.",
       },
       {
         icon: Sparkles,
-        title: "AI utilities",
-        description: "Summarize, draft, and transform content from selected sources.",
+        title: "AI utilities (6 tasks)",
+        description:
+          "Summarize, Translate, Checklist, Report, Email, and Compare from selected sources before review.",
       },
     ],
     proofLabel: "From capability to outcome",

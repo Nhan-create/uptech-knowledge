@@ -302,7 +302,9 @@ test("setup POST refuses non-exact Google authorization destinations", async () 
 
 test("callback success clears setup, replaces onboarding with status authority, and never creates a session", async () => {
   const f = fixture();
-  const response = await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(callbackRequest());
+  const response = await createGoogleWorkspaceBootstrapCallbackGet(f.dependencies)(
+    callbackRequest(`?code=provider-code&state=${issueOpaqueProof()}&iss=https%3A%2F%2Faccounts.google.com&authuser=0&hd=tenant-a.example&prompt=consent`),
+  );
 
   assert.equal(response.status, 303);
   assert.equal(response.headers.get("location"), `${APP_ORIGIN}/setup/provisioning`);
