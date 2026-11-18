@@ -284,12 +284,17 @@ export async function GET(request: Request): Promise<Response> {
       typeof error.code === "string"
         ? error.code
         : undefined;
+    const safeRepoMessage =
+      errName === "GoogleLoginRepositoryError" && error instanceof Error
+        ? error.message
+        : null;
     console.error(
       JSON.stringify({
         event: "GOOGLE_LOGIN_CALLBACK_EXCEPTION",
         request_id: operationRequestId,
         error_name: errName,
         error_code: errCode ?? null,
+        error_message: safeRepoMessage,
       }),
     );
     logCallback(operationRequestId, "PROVIDER_UNAVAILABLE");
