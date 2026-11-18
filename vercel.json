@@ -9,7 +9,7 @@
   "crons": [
     {
       "path": "/api/internal/cron/google-directory",
-      "schedule": "* * * * *"
+      "schedule": "0 0 * * *"
     }
   ],
   "headers": [

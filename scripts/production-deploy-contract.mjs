@@ -69,7 +69,7 @@ const serviceAccountEmailPattern =
   /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
 const directoryCron = Object.freeze({
   path: "/api/internal/cron/google-directory",
-  schedule: "* * * * *",
+  schedule: "0 0 * * *",
 });
 
 function hasExactDirectoryCron(configuration) {
@@ -148,11 +148,20 @@ if (!cronSecretPattern.test(process.env.CRON_SECRET ?? "")) {
   errors.push("Directory cron secret is missing or invalid");
 }
 
+const gcpProjectId = process.env.UPTECH_GCP_SECRET_MANAGER_PROJECT_ID?.trim() ?? "";
+const gcpWorkloadProvider = process.env.UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER?.trim() ?? "";
+const gcpServiceAccountEmail =
+  process.env.UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL?.trim() ?? "";
+const hasAnyGcpMetadata = Boolean(
+  gcpProjectId || gcpWorkloadProvider || gcpServiceAccountEmail,
+);
+
 if (
-  !gcpProjectIdPattern.test(process.env.UPTECH_GCP_SECRET_MANAGER_PROJECT_ID ?? "") ||
-  !workloadIdentityProviderPattern.test(process.env.UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER ?? "") ||
-  !serviceAccountEmailPattern.test(
-    process.env.UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL ?? "",
+  (hasAnyGcpMetadata || process.env.UPTECH_GCP_WORKLOAD_IDENTITY_REQUIRED === "true") &&
+  (
+    !gcpProjectIdPattern.test(gcpProjectId) ||
+    !workloadIdentityProviderPattern.test(gcpWorkloadProvider) ||
+    !serviceAccountEmailPattern.test(gcpServiceAccountEmail)
   )
 ) {
   errors.push("Google Cloud Directory workload identity metadata is missing or invalid");

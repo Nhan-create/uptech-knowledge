@@ -34,7 +34,7 @@ const gcpDirectoryEnvironment = {
 };
 const directoryCron = {
   path: "/api/internal/cron/google-directory",
-  schedule: "* * * * *",
+  schedule: "0 0 * * *",
 };
 
 async function writeFixtureFile(root, relativePath, contents = "fixture") {
@@ -205,10 +205,10 @@ test("requires an exact production Google Directory cron and a strong cron secre
 
   for (const configuration of [
     {},
-    { crons: [{ ...directoryCron, schedule: "0 0 * * *" }] },
+    { crons: [{ ...directoryCron, schedule: "* * * * *" }] },
     { crons: [{ ...directoryCron, path: `${directoryCron.path}/` }] },
     { crons: [directoryCron, directoryCron] },
-    { crons: [directoryCron, { path: "/api/internal/cron/other", schedule: "* * * * *" }] },
+    { crons: [directoryCron, { path: "/api/internal/cron/other", schedule: "0 0 * * *" }] },
     { crons: [{ ...directoryCron, timezone: "UTC" }] },
   ]) {
     const fixtureRoot = await createValidProductionFixture();
