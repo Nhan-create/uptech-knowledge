@@ -111,7 +111,7 @@ test("keeps missing Google fields null instead of inventing fake values and sani
                 email: "user@tenant-a.example",
                 email_verified: true,
                 hosted_domain: "tenant-a.example",
-                picture_url: "http://insecure.tenant-a.example/avatar.png",
+                picture_url: "http://tenant-a.example/avatar.png",
                 department: null,
                 org_unit_path: null,
                 google_is_admin: null,
