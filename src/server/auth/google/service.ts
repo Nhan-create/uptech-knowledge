@@ -386,6 +386,25 @@ export function createGoogleLoginService(input: {
             : error instanceof GoogleOidcProviderRejectedError
               ? "PROVIDER_REJECTED"
             : "CLAIMS_INVALID";
+        if (rejectionClass === "PROVIDER_UNAVAILABLE") {
+          const errName = error instanceof Error ? error.name : "UnknownError";
+          const causeCode =
+            error instanceof Error &&
+            error.cause !== null &&
+            typeof error.cause === "object" &&
+            "code" in error.cause &&
+            typeof error.cause.code === "string"
+              ? error.cause.code
+              : null;
+          console.error(
+            JSON.stringify({
+              event: "GOOGLE_LOGIN_OIDC_UNAVAILABLE",
+              request_id: operationRequestId,
+              error_name: errName,
+              cause_code: causeCode,
+            }),
+          );
+        }
         await safelyRejectBound(
           repository,
           completionHandleHash,

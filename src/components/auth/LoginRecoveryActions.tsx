@@ -115,7 +115,7 @@ export function LoginRecoveryActions({ actions, csrfToken, requestId, state, ret
       {resolvedActions.map((action, index) => {
         const { transport } = action;
         const disabled = pending || (transport.kind === "NATIVE_FORM" && transport.cooldownSeconds !== null && cooldownSeconds > 0);
-        const visual = `${buttonBase} ${index === 0 ? "bg-blue-600 text-white shadow-sm hover:bg-blue-700" : "border border-slate-300 bg-white text-slate-900 hover:bg-slate-50"}`;
+        const visual = `${buttonBase} ${index === 0 ? "bg-blue-600 [color:#ffffff] shadow-sm hover:bg-blue-700" : "border border-slate-300 bg-white [color:#0f172a] hover:bg-slate-50"}`;
         switch (transport.kind) {
           case "NATIVE_FORM":
             return <form key={action.id} action={transport.action} method="post" onSubmit={(event) => submitNativeForm(event, transport)}>

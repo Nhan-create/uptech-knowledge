@@ -275,7 +275,23 @@ export async function GET(request: Request): Promise<Response> {
       ),
       staleCookieHeaders,
     );
-  } catch {
+  } catch (error) {
+    const errName = error instanceof Error ? error.name : "UnknownError";
+    const errCode =
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+    console.error(
+      JSON.stringify({
+        event: "GOOGLE_LOGIN_CALLBACK_EXCEPTION",
+        request_id: operationRequestId,
+        error_name: errName,
+        error_code: errCode ?? null,
+      }),
+    );
     logCallback(operationRequestId, "PROVIDER_UNAVAILABLE");
     const response = redirectToLogin(
       appOrigin,
