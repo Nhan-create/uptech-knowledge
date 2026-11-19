@@ -46,11 +46,11 @@ ALTER TABLE uptech.knowledge_cards
 -- 3. Collaborative Document Comments & Review Notes
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS uptech.knowledge_document_comments (
-  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
   id text NOT NULL,
   document_id text NOT NULL,
   chunk_id text,
-  author_membership_id uuid REFERENCES uptech.workspace_memberships (id) ON DELETE SET NULL,
+  author_membership_id uuid,
   author_label text NOT NULL,
   author_role text NOT NULL DEFAULT 'MEMBER',
   comment_kind text NOT NULL DEFAULT 'COMMENT',
@@ -70,8 +70,13 @@ CREATE INDEX IF NOT EXISTS knowledge_document_comments_doc_idx
 ALTER TABLE uptech.knowledge_document_comments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE uptech.knowledge_document_comments FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS knowledge_document_comments_migration_owner ON uptech.knowledge_document_comments;
+CREATE POLICY knowledge_document_comments_migration_owner ON uptech.knowledge_document_comments
+  TO uptech_migration_owner USING (true) WITH CHECK (true);
+
 DROP POLICY IF EXISTS knowledge_document_comments_tenant_isolation ON uptech.knowledge_document_comments;
 CREATE POLICY knowledge_document_comments_tenant_isolation ON uptech.knowledge_document_comments
+  TO uptech_api_runtime
   USING (
     workspace_id = COALESCE(
       NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
@@ -100,7 +105,7 @@ CREATE INDEX IF NOT EXISTS ai_chat_sessions_shared_idx
 -- 5. Knowledge Source Connectors (Web/Docs Crawler) & Ingestion API Keys
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS uptech.workspace_knowledge_connectors (
-  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
   id text NOT NULL,
   connector_kind text NOT NULL DEFAULT 'WEB_URL',
   title text NOT NULL,
@@ -120,8 +125,13 @@ CREATE TABLE IF NOT EXISTS uptech.workspace_knowledge_connectors (
 ALTER TABLE uptech.workspace_knowledge_connectors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE uptech.workspace_knowledge_connectors FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS workspace_knowledge_connectors_migration_owner ON uptech.workspace_knowledge_connectors;
+CREATE POLICY workspace_knowledge_connectors_migration_owner ON uptech.workspace_knowledge_connectors
+  TO uptech_migration_owner USING (true) WITH CHECK (true);
+
 DROP POLICY IF EXISTS workspace_knowledge_connectors_tenant_isolation ON uptech.workspace_knowledge_connectors;
 CREATE POLICY workspace_knowledge_connectors_tenant_isolation ON uptech.workspace_knowledge_connectors
+  TO uptech_api_runtime
   USING (
     workspace_id = COALESCE(
       NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
@@ -136,7 +146,7 @@ CREATE POLICY workspace_knowledge_connectors_tenant_isolation ON uptech.workspac
   );
 
 CREATE TABLE IF NOT EXISTS uptech.workspace_ingestion_api_keys (
-  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   label text NOT NULL,
   key_prefix text NOT NULL,
@@ -153,8 +163,13 @@ CREATE TABLE IF NOT EXISTS uptech.workspace_ingestion_api_keys (
 ALTER TABLE uptech.workspace_ingestion_api_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE uptech.workspace_ingestion_api_keys FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS workspace_ingestion_api_keys_migration_owner ON uptech.workspace_ingestion_api_keys;
+CREATE POLICY workspace_ingestion_api_keys_migration_owner ON uptech.workspace_ingestion_api_keys
+  TO uptech_migration_owner USING (true) WITH CHECK (true);
+
 DROP POLICY IF EXISTS workspace_ingestion_api_keys_tenant_isolation ON uptech.workspace_ingestion_api_keys;
 CREATE POLICY workspace_ingestion_api_keys_tenant_isolation ON uptech.workspace_ingestion_api_keys
+  TO uptech_api_runtime
   USING (
     workspace_id = COALESCE(
       NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
@@ -168,24 +183,11 @@ CREATE POLICY workspace_ingestion_api_keys_tenant_isolation ON uptech.workspace_
     )
   );
 
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'uptech_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-      uptech.knowledge_document_comments,
-      uptech.workspace_knowledge_connectors,
-      uptech.workspace_ingestion_api_keys
-    TO uptech_app;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'uptech_runtime') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-      uptech.knowledge_document_comments,
-      uptech.workspace_knowledge_connectors,
-      uptech.workspace_ingestion_api_keys
-    TO uptech_runtime;
-  END IF;
-END
-$$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+  uptech.knowledge_document_comments,
+  uptech.workspace_knowledge_connectors,
+  uptech.workspace_ingestion_api_keys
+TO uptech_api_runtime;
 
 -- ============================================================================
 -- 6. Upgrade complete_direct_workspace_signup_v1 to replace temporary

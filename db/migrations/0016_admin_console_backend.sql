@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS uptech.workspace_member_invites (
   CONSTRAINT workspace_member_invites_email_check CHECK (
     pg_catalog.length(normalized_email) BETWEEN 3 AND 320
     AND normalized_email = pg_catalog.lower(pg_catalog.btrim(normalized_email))
-    AND pg_catalog.position('@' IN normalized_email) > 1
+    AND pg_catalog.strpos(normalized_email, '@') > 1
   ),
   CONSTRAINT workspace_member_invites_role_check CHECK (role IN ('ADMIN', 'MEMBER')),
   CONSTRAINT workspace_member_invites_department_check CHECK (
@@ -619,7 +619,7 @@ DECLARE
 BEGIN
   SELECT * INTO caller FROM uptech.require_admin_caller_v1();
 
-  IF v_email = '' OR pg_catalog.position('@' IN v_email) <= 1 THEN
+  IF v_email = '' OR pg_catalog.strpos(v_email, '@') <= 1 THEN
     RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid email';
   END IF;
 
