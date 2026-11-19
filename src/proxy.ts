@@ -29,6 +29,7 @@ const WORKSPACE_API_EXACT_PATHS = new Set([
   "/api/v1/workspace/knowledge",
   "/api/v1/workspace/utility",
   "/api/v1/workspace/notifications",
+  "/api/v1/workspace/profile",
 ]);
 
 const ADMIN_API_EXACT_PATHS = new Set([
@@ -94,7 +95,7 @@ function isLocalWorkspacePreviewRequest(pathname: string, method: string) {
     return false;
   }
 
-  if (isWorkspaceApiRoute(pathname, method)) {
+  if (isWorkspaceApiRoute(pathname, method) || isAdminApiRoute(pathname, method)) {
     return true;
   }
 

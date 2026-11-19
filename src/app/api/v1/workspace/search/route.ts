@@ -1,10 +1,14 @@
+import { normalizeFold } from "@/features/dashboard/hero-matching";
 import {
   generateGroundedChatAnswer,
   readGeminiConfig,
 } from "@/server/ai/gemini-client";
 import { rankReadyChunksHybrid } from "@/server/ai/retrieval";
-import { loadKnowledgeDocumentsAndSpaces } from "@/server/knowledge/repository";
-import { runtimeKnowledgeReadAdapter } from "@/server/knowledge/runtime-read-adapter";
+import {
+  listKnowledgeCards,
+  loadKnowledgeDocumentsAndSpaces,
+} from "@/server/knowledge/repository";
+import { createKnowledgeReadAdapterForAccess } from "@/server/knowledge/runtime-read-adapter";
 import type { Locale } from "@/lib/preferences";
 import {
   authorizeWorkspaceApi,
@@ -26,13 +30,32 @@ export async function GET(request: Request): Promise<Response> {
   const spaceId = url.searchParams.get("space") ?? undefined;
   const fileType = url.searchParams.get("type") ?? undefined;
 
-  const outcome = await runtimeKnowledgeReadAdapter.search({
-    query,
-    spaceId,
-    fileType,
-  });
+  const adapter = createKnowledgeReadAdapterForAccess(auth.access);
+  const [outcome, allCards] = await Promise.all([
+    adapter.search({
+      query,
+      spaceId,
+      fileType,
+    }),
+    query.trim().length >= 2
+      ? listKnowledgeCards(auth.access).catch(() => [])
+      : Promise.resolve([]),
+  ]);
 
-  return workspaceJson({ ok: true, outcome }, 200, requestId);
+  const folded = normalizeFold(query);
+  const matchingCards = folded
+    ? allCards
+        .filter(
+          (card) =>
+            card.status !== "archived" &&
+            normalizeFold(`${card.title} ${card.summary} ${card.spaceName}`).includes(
+              folded,
+            ),
+        )
+        .slice(0, 4)
+    : [];
+
+  return workspaceJson({ ok: true, outcome, matchingCards }, 200, requestId);
 }
 
 /**

@@ -11,8 +11,10 @@ import {
   type UtilityTaskKind,
 } from "@/server/ai/gemini-client";
 import {
+  listUtilityRuns,
   loadKnowledgeDocumentsAndSpaces,
   recordWorkspaceNotification,
+  saveUtilityRun,
 } from "@/server/knowledge/repository";
 
 export const runtime = "nodejs";
@@ -25,6 +27,15 @@ const ALLOWED_TASKS = new Set<UtilityTaskKind>([
   "report",
   "email",
 ]);
+
+export async function GET(request: Request): Promise<Response> {
+  const requestId = resolveRequestId(request);
+  const auth = await authorizeWorkspaceApi(request, requestId);
+  if (!auth.ok) return auth.response;
+
+  const runs = await listUtilityRuns(auth.access);
+  return workspaceJson({ ok: true, runs }, 200, requestId);
+}
 
 export async function POST(request: Request): Promise<Response> {
   const requestId = resolveRequestId(request);
@@ -153,6 +164,19 @@ export async function POST(request: Request): Promise<Response> {
     email: { vi: "Soạn Email", en: "Email draft" },
   };
 
+  const savedRun = await saveUtilityRun(auth.access, {
+    task,
+    title: result.title,
+    summary: result.takeaways[0] ?? result.output.slice(0, 180),
+    sections: [
+      {
+        heading: taskLabels[task][locale],
+        content: result.output,
+      },
+    ],
+    sources: sourcesUsed,
+  });
+
   await recordWorkspaceNotification(auth.access, {
     kind: "utility_completed",
     title:
@@ -170,6 +194,7 @@ export async function POST(request: Request): Promise<Response> {
   return workspaceJson(
     {
       ok: true,
+      runId: savedRun.id,
       task,
       model: result.model,
       title: result.title,

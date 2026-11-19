@@ -1,6 +1,7 @@
 import {
   getStoredKnowledgeDocument,
   readUploadedDocumentBinary,
+  recordWorkspaceDataAuditEvent,
 } from "@/server/knowledge/repository";
 import {
   authorizeWorkspaceApi,
@@ -38,17 +39,29 @@ export async function GET(
     return workspaceError(404, "NOT_FOUND", "Document not found.", requestId);
   }
 
-  const originalBytes = await readUploadedDocumentBinary(documentId);
+  const url = new URL(request.url);
+  const inline = url.searchParams.get("inline") === "1";
+  const dispositionType = inline ? "inline" : "attachment";
+  const originalBytes = await readUploadedDocumentBinary(documentId, auth.access);
   const extension =
     record.rawFileExtension ?? record.summary.fileType ?? "txt";
   const safeFileName = record.summary.name.replace(/["\\\r\n]/g, "_");
+
+  if (!inline) {
+    void recordWorkspaceDataAuditEvent(
+      auth.access,
+      "knowledge.document.downloaded",
+      documentId,
+      { fileName: record.summary.name },
+    );
+  }
 
   if (originalBytes) {
     return new Response(new Uint8Array(originalBytes), {
       status: 200,
       headers: {
         "Content-Type": MIME_BY_EXTENSION[extension] ?? "application/octet-stream",
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(safeFileName)}`,
+        "Content-Disposition": `${dispositionType}; filename*=UTF-8''${encodeURIComponent(safeFileName)}`,
         "Cache-Control": "no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
         "X-Request-Id": requestId,
@@ -71,8 +84,8 @@ export async function GET(
   return new Response(extractedMarkdown, {
     status: 200,
     headers: {
-      "Content-Type": "text/markdown; charset=utf-8",
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fallbackName)}`,
+      "Content-Type": inline ? "text/plain; charset=utf-8" : "text/markdown; charset=utf-8",
+      "Content-Disposition": `${dispositionType}; filename*=UTF-8''${encodeURIComponent(fallbackName)}`,
       "Cache-Control": "no-store, max-age=0",
       "X-Content-Type-Options": "nosniff",
       "X-Request-Id": requestId,

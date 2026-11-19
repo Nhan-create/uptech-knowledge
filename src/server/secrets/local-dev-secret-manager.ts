@@ -16,6 +16,7 @@ import {
 } from "./core.ts";
 
 const LOCAL_SECRET_PREFIX = "local-dev:v1:";
+const ENVELOPE_SECRET_PREFIX = "envelope-kms:v1:";
 const LOCAL_SECRET_ID =
   /^uptech-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
@@ -137,6 +138,89 @@ export function resolveLocalDevSecretProviderRegistration(
         async destroy(reference: SecretReference) {
           const secretId = extractSecretId(reference);
           await unlink(join(secretDir, `${secretId}.json`)).catch(() => {});
+        },
+      };
+      return Object.freeze(adapter);
+    },
+  });
+}
+
+function deriveEnvelopeKmsKey(secretSeed: string): Buffer {
+  return createHash("sha256")
+    .update("UPTECH_ENVELOPE_KMS_SECRET_V1\0", "utf8")
+    .update(secretSeed, "utf8")
+    .digest();
+}
+
+/**
+ * Resolves an AES-256-GCM self-contained envelope secret provider using the
+ * deployment's 256-bit `UPTECH_GOOGLE_LOGIN_PKCE_KEY` when external Google
+ * Cloud Secret Manager Billing/WIF variables are not configured.
+ */
+export function resolveEncryptedEnvelopeSecretProviderRegistration(
+  environment: Environment = process.env,
+): ApprovedSecretProviderRegistration | null {
+  const hasGcpConfig = Boolean(
+    environment.UPTECH_GCP_SECRET_MANAGER_PROJECT_ID?.trim() ||
+      environment.UPTECH_GCP_WORKLOAD_IDENTITY_PROVIDER?.trim() ||
+      environment.UPTECH_GCP_SECRET_MANAGER_SERVICE_ACCOUNT_EMAIL?.trim(),
+  );
+  if (hasGcpConfig) {
+    return null;
+  }
+
+  const secretSeed = environment.UPTECH_GOOGLE_LOGIN_PKCE_KEY?.trim();
+  if (!secretSeed || secretSeed.length < 32) {
+    return null;
+  }
+
+  const key = deriveEnvelopeKmsKey(secretSeed);
+  const aadBytes = Buffer.from("UPTECH_DIRECTORY_REFRESH_TOKEN_V1", "utf8");
+
+  return Object.freeze({
+    providerId: "envelope-kms-secret-manager",
+    configurationPresent: true,
+    createAdapter(): SecretAdapter {
+      const adapter: SecretAdapter = {
+        async create(value: Uint8Array) {
+          const iv = randomBytes(12);
+          const cipher = createCipheriv("aes-256-gcm", key, iv);
+          cipher.setAAD(aadBytes);
+          const ciphertext = Buffer.concat([cipher.update(value), cipher.final()]);
+          const tag = cipher.getAuthTag();
+          return `${ENVELOPE_SECRET_PREFIX}${iv.toString("base64url")}.${ciphertext.toString("base64url")}.${tag.toString("base64url")}` as SecretReference;
+        },
+        async read(reference: SecretReference) {
+          if (!reference.startsWith(ENVELOPE_SECRET_PREFIX)) {
+            throw new SecretOperationError("Envelope secret reference is invalid");
+          }
+          const parts = reference.slice(ENVELOPE_SECRET_PREFIX.length).split(".");
+          if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+            throw new SecretOperationError("Envelope secret payload is malformed");
+          }
+          const decipher = createDecipheriv(
+            "aes-256-gcm",
+            key,
+            Buffer.from(parts[0], "base64url"),
+          );
+          decipher.setAAD(aadBytes);
+          decipher.setAuthTag(Buffer.from(parts[2], "base64url"));
+          return Uint8Array.from(
+            Buffer.concat([
+              decipher.update(Buffer.from(parts[1], "base64url")),
+              decipher.final(),
+            ]),
+          );
+        },
+        async replace(reference: SecretReference) {
+          if (!reference.startsWith(ENVELOPE_SECRET_PREFIX)) {
+            throw new SecretOperationError("Envelope secret reference is invalid");
+          }
+        },
+        async destroy(reference: SecretReference) {
+          if (!reference.startsWith(ENVELOPE_SECRET_PREFIX)) {
+            throw new SecretOperationError("Envelope secret reference is invalid");
+          }
         },
       };
       return Object.freeze(adapter);

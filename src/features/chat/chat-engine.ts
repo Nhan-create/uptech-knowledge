@@ -17,12 +17,14 @@ export type ContextScopeType =
   | "space:hr"
   | "space:operations"
   | "space:atlas"
-  | "selected-documents";
+  | "selected-documents"
+  | `space:${string}`;
 
 export type ChatTurnEvidenceState = "grounded" | "caution" | "empty";
 
 export type ChatCitationSource = Readonly<{
   id: string;
+  chunkId?: string;
   number: number;
   title: string;
   fileType: "pdf" | "docx" | "md";
@@ -93,9 +95,7 @@ export const CHAT_STARTER_PROMPTS: readonly ChatStarterPrompt[] = [
   },
 ] as const;
 
-export const CONTEXT_SCOPE_TO_SPACE_ID: Readonly<
-  Record<Exclude<ContextScopeType, "selected-documents">, string>
-> = {
+export const CONTEXT_SCOPE_TO_SPACE_ID: Readonly<Record<string, string>> = {
   workspace: "all",
   "space:hr": "spc_8f2a01",
   "space:operations": "spc_c14d72",
@@ -112,14 +112,21 @@ export const FIXTURE_TO_CONTEXT_SCOPE: Readonly<
 };
 
 export function resolveScopeToSpaceId(scope: ContextScopeType): string {
-  if (scope === "selected-documents") return "all";
-  return CONTEXT_SCOPE_TO_SPACE_ID[scope];
+  if (scope === "selected-documents" || scope === "workspace") return "all";
+  if (scope in CONTEXT_SCOPE_TO_SPACE_ID) {
+    return CONTEXT_SCOPE_TO_SPACE_ID[scope]!;
+  }
+  if (scope.startsWith("space:")) {
+    return scope.slice(6);
+  }
+  return "all";
 }
 
 export function getContextScopeLabel(
   scope: ContextScopeType,
   locale: Locale,
   selectedSourceCount = 0,
+  spaces?: readonly SpaceSummaryView[],
 ): string {
   if (locale === "en") {
     switch (scope) {
@@ -135,6 +142,11 @@ export function getContextScopeLabel(
         return selectedSourceCount > 0
           ? `${selectedSourceCount} selected docs`
           : "Selected documents (none)";
+      default: {
+        const spaceId = scope.startsWith("space:") ? scope.slice(6) : scope;
+        const matched = spaces?.find((s) => s.id === spaceId);
+        return `Space: ${matched?.name ?? spaceId}`;
+      }
     }
   }
 
@@ -151,6 +163,11 @@ export function getContextScopeLabel(
       return selectedSourceCount > 0
         ? `Chỉ ${selectedSourceCount} tài liệu đã chọn`
         : "Chỉ tài liệu đã chọn (chưa có nguồn)";
+    default: {
+      const spaceId = scope.startsWith("space:") ? scope.slice(6) : scope;
+      const matched = spaces?.find((s) => s.id === spaceId);
+      return `Không gian: ${matched?.name ?? spaceId}`;
+    }
   }
 }
 

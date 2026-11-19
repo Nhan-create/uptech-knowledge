@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -16,8 +16,11 @@ import type { ChatSession } from "@/features/chat/chat-sessions";
 import type { ExtractedDocumentChunk } from "@/server/ai/document-parser";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import {
+  canAccessKnowledgeSpace,
   isWorkspacePreviewModeEnabled,
+  type SpaceAccessScope,
   type WorkspaceAccessContext,
+  type WorkspaceDepartmentKey,
 } from "@/server/knowledge/access-context";
 import type { Locale } from "@/lib/preferences";
 
@@ -79,6 +82,65 @@ export interface WorkspaceNotificationRecord {
   readonly createdAtIso: string;
 }
 
+export interface UtilityRunRecord {
+  readonly id: string;
+  readonly task: "summary" | "translate" | "checklist" | "report" | "email";
+  readonly title: string;
+  readonly summary: string;
+  readonly sections: readonly Readonly<{ heading: string; content: string }>[];
+  readonly sources: readonly Readonly<{
+    documentId: string | null;
+    title: string;
+    spaceName: string | null;
+  }>[];
+  readonly createdAtIso: string;
+}
+
+export interface WorkspacePolicySettings {
+  readonly maxUploadMb: number;
+  readonly allowMemberUploads: boolean;
+  readonly requireVerifiedCardsInChat: boolean;
+  readonly piiRedactionEnabled: boolean;
+}
+
+export type DocumentCommentKind = "COMMENT" | "OUTDATED_FLAG" | "APPROVAL_NOTE";
+
+export interface DocumentCommentRecord {
+  readonly id: string;
+  readonly documentId: string;
+  readonly chunkId: string | null;
+  readonly authorLabel: string;
+  readonly authorRole: "OWNER" | "ADMIN" | "MEMBER";
+  readonly commentKind: DocumentCommentKind;
+  readonly body: string;
+  readonly resolved: boolean;
+  readonly createdAtIso: string;
+}
+
+export interface KnowledgeConnectorRecord {
+  readonly id: string;
+  readonly connectorKind: "WEB_URL" | "WEBHOOK_API";
+  readonly title: string;
+  readonly sourceUrl: string;
+  readonly spaceId: string;
+  readonly documentId: string | null;
+  readonly status: "ACTIVE" | "ERROR";
+  readonly lastSyncedAtIso: string;
+  readonly chunkCount: number;
+  readonly createdByLabel: string;
+}
+
+export interface IngestionApiKeyRecord {
+  readonly id: string;
+  readonly label: string;
+  readonly keyPrefix: string;
+  readonly defaultSpaceId: string;
+  readonly createdByLabel: string;
+  readonly lastUsedAtIso: string | null;
+  readonly revokedAtIso: string | null;
+  readonly createdAtIso: string;
+}
+
 export interface PersistedWorkspaceState {
   readonly schemaVersion?: number;
   readonly spaces: readonly SpaceSummaryView[];
@@ -86,6 +148,11 @@ export interface PersistedWorkspaceState {
   readonly sessions: readonly ChatSession[];
   readonly cards?: readonly KnowledgeCardRecord[];
   readonly notifications?: readonly WorkspaceNotificationRecord[];
+  readonly utilityRuns?: readonly UtilityRunRecord[];
+  readonly comments?: readonly DocumentCommentRecord[];
+  readonly versionSnapshots?: Readonly<Record<string, readonly StoredDocumentChunk[]>>;
+  readonly connectors?: readonly KnowledgeConnectorRecord[];
+  readonly apiKeys?: readonly (IngestionApiKeyRecord & { readonly keyHash?: string })[];
 }
 
 const PREVIEW_DATA_DIR = resolve(process.cwd(), ".uptech-data");
@@ -228,7 +295,35 @@ function safeUploadedBinaryPath(documentId: string): string {
   return resolve(PREVIEW_FILES_DIR, `${documentId}.bin`);
 }
 
-export async function readUploadedDocumentBinary(documentId: string): Promise<Buffer | null> {
+export async function readUploadedDocumentBinary(
+  documentId: string,
+  access?: WorkspaceAccessContext,
+): Promise<Buffer | null> {
+  if (access && canAttemptPostgres(access)) {
+    try {
+      const dbBytes = await withTenantPostgres(access, async (query) => {
+        const res = await query(
+          `SELECT content_bytes
+           FROM uptech.knowledge_document_blobs
+           WHERE document_id = $1
+           LIMIT 1`,
+          [documentId],
+        );
+        const raw = res.rows[0]?.content_bytes;
+        if (Buffer.isBuffer(raw)) return raw;
+        if (raw instanceof Uint8Array) return Buffer.from(raw);
+        return null;
+      });
+      if (dbBytes) return dbBytes;
+    } catch {
+      // Fallback safely if 0017 blob table is not yet present.
+    }
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) {
+    return null;
+  }
+
   try {
     return await readFile(safeUploadedBinaryPath(documentId));
   } catch {
@@ -259,9 +354,10 @@ async function withTenantPostgres<T>(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.current_workspace_id', $1, true)", [
-      access.workspaceId,
-    ]);
+    await client.query(
+      "SELECT set_config('app.current_workspace_id', $1, true), set_config('app.workspace_id', $1, true)",
+      [access.workspaceId],
+    );
     const result = await fn((sql, params) => client.query(sql, params));
     await client.query("COMMIT");
     return result;
@@ -281,9 +377,49 @@ export async function loadKnowledgeDocumentsAndSpaces(
 }> {
   if (canAttemptPostgres(access)) {
     const dbResult = await withTenantPostgres(access, async (query) => {
-      const spaceRows = await query(
-        "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
-      );
+      let spaceRows: Record<string, unknown>[];
+      try {
+        spaceRows = (
+          await query(
+            `SELECT id, name, description, access_scope, allowed_department_key
+             FROM uptech.knowledge_spaces
+             ORDER BY name ASC`,
+          )
+        ).rows;
+      } catch {
+        spaceRows = (
+          await query(
+            "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
+          )
+        ).rows;
+      }
+
+      if (spaceRows.length === 0) {
+        for (const seedSpace of DEFAULT_SPACES) {
+          await query(
+            `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (workspace_id, id) DO NOTHING`,
+            [access.workspaceId, seedSpace.id, seedSpace.name, seedSpace.description],
+          );
+        }
+        try {
+          spaceRows = (
+            await query(
+              `SELECT id, name, description, access_scope, allowed_department_key
+               FROM uptech.knowledge_spaces
+               ORDER BY name ASC`,
+            )
+          ).rows;
+        } catch {
+          spaceRows = (
+            await query(
+              "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
+            )
+          ).rows;
+        }
+      }
+
       const docRows = await query(
         `SELECT id, space_id, name, file_type, version_label, detail, owner_label,
                 updated_label, processing_kind, processing_label, governance_kind,
@@ -302,72 +438,97 @@ export async function loadKnowledgeDocumentsAndSpaces(
          ORDER BY created_at DESC`,
       );
       return {
-        spaceRows: spaceRows.rows,
+        spaceRows,
         docRows: docRows.rows,
         chunkRows: chunkRows.rows,
         versionRows: versionRows.rows,
       };
     });
 
-    if (dbResult.spaceRows.length > 0 || dbResult.docRows.length > 0) {
-      const chunksByDoc = new Map<string, StoredDocumentChunk[]>();
-      for (const row of dbResult.chunkRows) {
-        const docId = String(row.document_id);
-        const list = chunksByDoc.get(docId) ?? [];
-        list.push({
-          chunkId: String(row.chunk_id),
-          documentId: docId,
-          chunkIndex: Number(row.chunk_index),
-          heading: String(row.heading ?? ""),
-          locator: String(row.locator ?? ""),
-          content: String(row.content ?? ""),
-          embedding: Array.isArray(row.embedding_json)
-            ? (row.embedding_json as number[])
-            : undefined,
-        });
-        chunksByDoc.set(docId, list);
-      }
-
-      const versionsByDoc = new Map<
-        string,
-        Array<{ id: string; label: string; updatedLabel: string }>
-      >();
-      for (const row of dbResult.versionRows) {
-        const docId = String(row.document_id);
-        const list = versionsByDoc.get(docId) ?? [];
-        list.push({
-          id: String(row.version_id),
-          label: String(row.version_label),
-          updatedLabel: String(row.updated_label ?? ""),
-        });
-        versionsByDoc.set(docId, list);
-      }
-
-      const docCountBySpace = new Map<string, number>();
-      for (const row of dbResult.docRows) {
-        const sid = String(row.space_id);
-        docCountBySpace.set(sid, (docCountBySpace.get(sid) ?? 0) + 1);
-      }
-
-      const spaceMap = new Map<string, SpaceSummaryView>();
-      const spaces: SpaceSummaryView[] = dbResult.spaceRows.map((row) => {
-        const id = String(row.id) as SpaceId;
-        const view: SpaceSummaryView = {
-          id,
-          name: String(row.name),
-          description: String(row.description ?? ""),
-          documentCount: docCountBySpace.get(id) ?? 0,
-        };
-        spaceMap.set(id, view);
-        return view;
+    const chunksByDoc = new Map<string, StoredDocumentChunk[]>();
+    for (const row of dbResult.chunkRows) {
+      const docId = String(row.document_id);
+      const list = chunksByDoc.get(docId) ?? [];
+      list.push({
+        chunkId: String(row.chunk_id),
+        documentId: docId,
+        chunkIndex: Number(row.chunk_index),
+        heading: String(row.heading ?? ""),
+        locator: String(row.locator ?? ""),
+        content: String(row.content ?? ""),
+        embedding: Array.isArray(row.embedding_json)
+          ? (row.embedding_json as number[])
+          : undefined,
       });
+      chunksByDoc.set(docId, list);
+    }
 
-      const documents: StoredKnowledgeDocument[] = dbResult.docRows.map((row) => {
+    const versionsByDoc = new Map<
+      string,
+      Array<{ id: string; label: string; updatedLabel: string }>
+    >();
+    for (const row of dbResult.versionRows) {
+      const docId = String(row.document_id);
+      const list = versionsByDoc.get(docId) ?? [];
+      list.push({
+        id: String(row.version_id),
+        label: String(row.version_label),
+        updatedLabel: String(row.updated_label ?? ""),
+      });
+      versionsByDoc.set(docId, list);
+    }
+
+    const docCountBySpace = new Map<string, number>();
+    for (const row of dbResult.docRows) {
+      const sid = String(row.space_id);
+      docCountBySpace.set(sid, (docCountBySpace.get(sid) ?? 0) + 1);
+    }
+
+    const spaceMap = new Map<string, SpaceSummaryView>();
+    const allSpaces: SpaceSummaryView[] = dbResult.spaceRows.map((row) => {
+      const id = String(row.id) as SpaceId;
+      const accessScope: SpaceAccessScope =
+        row.access_scope === "ADMIN_ONLY"
+          ? "ADMIN_ONLY"
+          : row.access_scope === "DEPARTMENT"
+            ? "DEPARTMENT"
+            : "WORKSPACE";
+      const allowedDepartmentKey: WorkspaceDepartmentKey | null =
+        row.allowed_department_key === "SALES" ||
+        row.allowed_department_key === "HR" ||
+        row.allowed_department_key === "IT" ||
+        row.allowed_department_key === "FINANCE"
+          ? row.allowed_department_key
+          : null;
+      const view: SpaceSummaryView = {
+        id,
+        name: String(row.name),
+        description: String(row.description ?? ""),
+        documentCount: docCountBySpace.get(id) ?? 0,
+        accessScope,
+        allowedDepartmentKey,
+      };
+      spaceMap.set(id, view);
+      return view;
+    });
+
+    const visibleSpaces = allSpaces.filter((space) =>
+      canAccessKnowledgeSpace(access, space),
+    );
+    const visibleSpaceIds = new Set<string>(visibleSpaces.map((s) => s.id));
+
+    const documents: StoredKnowledgeDocument[] = dbResult.docRows
+      .filter((row) => visibleSpaceIds.has(String(row.space_id)))
+      .map((row) => {
         const id = String(row.id) as DocumentId;
         const spaceId = String(row.space_id) as SpaceId;
         const space = spaceMap.get(spaceId) ?? { id: spaceId, name: spaceId };
-        const processingKind = String(row.processing_kind) as DocumentSummaryView["processing"]["kind"];
-        const govKind = String(row.governance_kind) === "deprecated" ? "deprecated" : "verified";
+        const processingKind = String(
+          row.processing_kind,
+        ) as DocumentSummaryView["processing"]["kind"];
+        const govKind =
+          String(row.governance_kind) === "deprecated" ? "deprecated" : "verified";
+        const docChunks = chunksByDoc.get(id) ?? [];
 
         return {
           summary: {
@@ -387,11 +548,15 @@ export async function loadKnowledgeDocumentsAndSpaces(
             governance: [
               {
                 kind: govKind,
-                label: String(row.governance_label || (govKind === "deprecated" ? "Phiên bản cũ" : "Đã xác minh")),
+                label: String(
+                  row.governance_label ||
+                    (govKind === "deprecated" ? "Phiên bản cũ" : "Đã xác minh"),
+                ),
                 description: String(row.detail ?? ""),
                 variant: govKind === "deprecated" ? "warning" : "success",
               },
             ],
+            chunkCount: docChunks.length,
           },
           versions: versionsByDoc.get(id) ?? [
             {
@@ -402,12 +567,12 @@ export async function loadKnowledgeDocumentsAndSpaces(
           ],
           isUserUploaded: Boolean(row.is_user_uploaded),
           byteSize: Number(row.byte_size ?? 0),
-          chunks: chunksByDoc.get(id) ?? [],
+          rawFileExtension: String(row.file_type ?? "").toLowerCase() || undefined,
+          chunks: docChunks,
         };
       });
 
-      return { spaces, documents };
-    }
+    return { spaces: visibleSpaces, documents };
   }
 
   if (!isWorkspacePreviewModeEnabled()) {
@@ -420,18 +585,24 @@ export async function loadKnowledgeDocumentsAndSpaces(
     for (const doc of state.documents) {
       spaceCounts.set(doc.summary.space.id, (spaceCounts.get(doc.summary.space.id) ?? 0) + 1);
     }
-    return {
-      spaces: state.spaces.map((space) => ({
+    const visibleSpaces = state.spaces
+      .filter((space) => canAccessKnowledgeSpace(access, space))
+      .map((space) => ({
         ...space,
         documentCount: spaceCounts.get(space.id) ?? 0,
-      })),
-      documents: state.documents.map((doc) => ({
-        ...doc,
-        summary: {
-          ...doc.summary,
-          chunkCount: doc.chunks.length,
-        },
-      })),
+      }));
+    const visibleIds = new Set<string>(visibleSpaces.map((s) => s.id));
+    return {
+      spaces: visibleSpaces,
+      documents: state.documents
+        .filter((doc) => visibleIds.has(doc.summary.space.id))
+        .map((doc) => ({
+          ...doc,
+          summary: {
+            ...doc.summary,
+            chunkCount: doc.chunks.length,
+          },
+        })),
     };
   });
 }
@@ -540,12 +711,30 @@ export async function createUploadedKnowledgeDocument(
         ],
       );
 
-      await query(
-        `INSERT INTO uptech.knowledge_document_versions (
-          workspace_id, document_id, version_id, version_label, note, updated_label
-        ) VALUES ($1, $2, $3, 'v1.0', $4, $5)`,
-        [access.workspaceId, args.id, `${args.id}-v1`, detailText, nowLabel],
-      );
+      try {
+        await query(
+          `INSERT INTO uptech.knowledge_document_versions (
+            workspace_id, document_id, version_id, version_label, note, updated_label, chunks_snapshot_json, author_label, byte_size
+          ) VALUES ($1, $2, $3, 'v1.0', $4, $5, $6::jsonb, $7, $8)`,
+          [
+            access.workspaceId,
+            args.id,
+            `${args.id}-v1`,
+            detailText,
+            nowLabel,
+            JSON.stringify(storedChunks),
+            access.actorLabel,
+            args.byteSize,
+          ],
+        );
+      } catch {
+        await query(
+          `INSERT INTO uptech.knowledge_document_versions (
+            workspace_id, document_id, version_id, version_label, note, updated_label
+          ) VALUES ($1, $2, $3, 'v1.0', $4, $5)`,
+          [access.workspaceId, args.id, `${args.id}-v1`, detailText, nowLabel],
+        );
+      }
 
       for (const chunk of storedChunks) {
         await query(
@@ -563,6 +752,85 @@ export async function createUploadedKnowledgeDocument(
             chunk.embedding ? JSON.stringify(chunk.embedding) : null,
           ],
         );
+      }
+
+      if (args.rawBytes && args.rawBytes.length > 0) {
+        try {
+          await query(
+            `INSERT INTO uptech.knowledge_document_blobs (
+               workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (workspace_id, document_id)
+             DO UPDATE SET
+               file_extension = EXCLUDED.file_extension,
+               content_type = EXCLUDED.content_type,
+               byte_size = EXCLUDED.byte_size,
+               content_bytes = EXCLUDED.content_bytes`,
+            [
+              access.workspaceId,
+              args.id,
+              args.extension.toLowerCase(),
+              "application/octet-stream",
+              args.rawBytes.length,
+              Buffer.from(args.rawBytes),
+            ],
+          );
+        } catch {
+          // Safe fallback if 0017 blob table is not yet present.
+        }
+      }
+
+      const uploadedNotification = createNotificationItem({
+        kind: "document_uploaded",
+        title:
+          args.locale === "en"
+            ? `Indexed: ${args.fileName}`
+            : `Đã lập chỉ mục: ${args.fileName}`,
+        description:
+          args.locale === "en"
+            ? `Parsed ${storedChunks.length} searchable segments in "${targetSpace.name}". Ready for AI Chat, Search & Utilities.`
+            : `Đã tách ${storedChunks.length} đoạn tri thức vào không gian "${targetSpace.name}". Sẵn sàng cho Trợ lý AI, Tìm kiếm và Tiện ích.`,
+        href: `/documents/${args.id}`,
+        actionLabel: args.locale === "en" ? "Open document" : "Mở tài liệu",
+      });
+
+      try {
+        await query(
+          `INSERT INTO uptech.workspace_notifications (
+             workspace_id, id, kind, title, description, href, action_label, unread, recipient_membership_id
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)`,
+          [
+            access.workspaceId,
+            uploadedNotification.id,
+            uploadedNotification.kind,
+            uploadedNotification.title,
+            uploadedNotification.description,
+            uploadedNotification.href,
+            uploadedNotification.actionLabel,
+            true,
+            access.membershipId,
+          ],
+        );
+      } catch {
+        try {
+          await query(
+            `INSERT INTO uptech.workspace_notifications (
+               workspace_id, id, kind, title, description, href, action_label, unread
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              access.workspaceId,
+              uploadedNotification.id,
+              uploadedNotification.kind,
+              uploadedNotification.title,
+              uploadedNotification.description,
+              uploadedNotification.href,
+              uploadedNotification.actionLabel,
+              true,
+            ],
+          );
+        } catch {
+          // Ignore if notifications table not yet migrated.
+        }
       }
 
       const firstChunk = storedChunks[0]!;
@@ -699,20 +967,48 @@ export async function createUploadedKnowledgeDocument(
 
 export async function createKnowledgeSpace(
   access: WorkspaceAccessContext,
-  args: Readonly<{ id: string; name: string; description: string }>,
+  args: Readonly<{
+    id: string;
+    name: string;
+    description: string;
+    accessScope?: SpaceAccessScope;
+    allowedDepartmentKey?: WorkspaceDepartmentKey | null;
+  }>,
 ): Promise<SpaceSummaryView> {
+  const accessScope: SpaceAccessScope = args.accessScope ?? "WORKSPACE";
+  const allowedDepartmentKey: WorkspaceDepartmentKey | null =
+    accessScope === "DEPARTMENT" ? (args.allowedDepartmentKey ?? null) : null;
+
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
-      await query(
-        `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
-         VALUES ($1, $2, $3, $4)`,
-        [access.workspaceId, args.id, args.name, args.description],
-      );
+      try {
+        await query(
+          `INSERT INTO uptech.knowledge_spaces (
+             workspace_id, id, name, description, access_scope, allowed_department_key
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            access.workspaceId,
+            args.id,
+            args.name,
+            args.description,
+            accessScope,
+            allowedDepartmentKey,
+          ],
+        );
+      } catch {
+        await query(
+          `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
+           VALUES ($1, $2, $3, $4)`,
+          [access.workspaceId, args.id, args.name, args.description],
+        );
+      }
       return {
         id: args.id as SpaceId,
         name: args.name,
         description: args.description,
         documentCount: 0,
+        accessScope,
+        allowedDepartmentKey,
       };
     });
   }
@@ -728,6 +1024,8 @@ export async function createKnowledgeSpace(
       name: args.name,
       description: args.description,
       documentCount: 0,
+      accessScope,
+      allowedDepartmentKey,
     };
     await writePreviewStoreFile({
       ...state,
@@ -1470,14 +1768,27 @@ export async function listWorkspaceNotifications(
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
       try {
-        const res = await query(
-          `SELECT id, kind, title, description, href, action_label, unread,
-                  created_at::text AS created_at_iso
-           FROM uptech.workspace_notifications
-           ORDER BY created_at DESC
-           LIMIT $1`,
-          [MAX_NOTIFICATIONS],
-        );
+        let res;
+        try {
+          res = await query(
+            `SELECT id, kind, title, description, href, action_label, unread,
+                    created_at::text AS created_at_iso
+             FROM uptech.workspace_notifications
+             WHERE recipient_membership_id IS NULL OR recipient_membership_id = $1::uuid
+             ORDER BY created_at DESC
+             LIMIT $2`,
+            [access.membershipId, MAX_NOTIFICATIONS],
+          );
+        } catch {
+          res = await query(
+            `SELECT id, kind, title, description, href, action_label, unread,
+                    created_at::text AS created_at_iso
+             FROM uptech.workspace_notifications
+             ORDER BY created_at DESC
+             LIMIT $1`,
+            [MAX_NOTIFICATIONS],
+          );
+        }
         return res.rows.map((row) => ({
           id: String(row.id),
           kind: String(row.kind) as WorkspaceNotificationKind,
@@ -1512,6 +1823,7 @@ export async function recordWorkspaceNotification(
     description: string;
     href: string | null;
     actionLabel: string;
+    broadcast?: boolean;
   }>,
 ): Promise<WorkspaceNotificationRecord | null> {
   const entry = createNotificationItem(input);
@@ -1519,21 +1831,40 @@ export async function recordWorkspaceNotification(
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
       try {
-        await query(
-          `INSERT INTO uptech.workspace_notifications (
-             workspace_id, id, kind, title, description, href, action_label, unread
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            access.workspaceId,
-            entry.id,
-            entry.kind,
-            entry.title,
-            entry.description,
-            entry.href,
-            entry.actionLabel,
-            entry.unread,
-          ],
-        );
+        try {
+          await query(
+            `INSERT INTO uptech.workspace_notifications (
+               workspace_id, id, kind, title, description, href, action_label, unread, recipient_membership_id
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)`,
+            [
+              access.workspaceId,
+              entry.id,
+              entry.kind,
+              entry.title,
+              entry.description,
+              entry.href,
+              entry.actionLabel,
+              entry.unread,
+              input.broadcast ? null : access.membershipId,
+            ],
+          );
+        } catch {
+          await query(
+            `INSERT INTO uptech.workspace_notifications (
+               workspace_id, id, kind, title, description, href, action_label, unread
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              access.workspaceId,
+              entry.id,
+              entry.kind,
+              entry.title,
+              entry.description,
+              entry.href,
+              entry.actionLabel,
+              entry.unread,
+            ],
+          );
+        }
         return entry;
       } catch {
         return null;
@@ -1561,7 +1892,14 @@ export async function markWorkspaceNotificationsRead(
     return withTenantPostgres(access, async (query) => {
       try {
         if (args.markAll) {
-          await query("UPDATE uptech.workspace_notifications SET unread = false");
+          try {
+            await query(
+              "UPDATE uptech.workspace_notifications SET unread = false WHERE recipient_membership_id IS NULL OR recipient_membership_id = $1::uuid",
+              [access.membershipId],
+            );
+          } catch {
+            await query("UPDATE uptech.workspace_notifications SET unread = false");
+          }
         } else if (args.notificationId) {
           await query(
             "UPDATE uptech.workspace_notifications SET unread = false WHERE id = $1",
@@ -1596,7 +1934,14 @@ export async function clearWorkspaceNotifications(
   if (canAttemptPostgres(access)) {
     await withTenantPostgres(access, async (query) => {
       try {
-        await query("DELETE FROM uptech.workspace_notifications");
+        try {
+          await query(
+            "DELETE FROM uptech.workspace_notifications WHERE recipient_membership_id IS NULL OR recipient_membership_id = $1::uuid",
+            [access.membershipId],
+          );
+        } catch {
+          await query("DELETE FROM uptech.workspace_notifications");
+        }
       } catch {
         // Ignore if table not yet migrated
       }
@@ -1611,3 +1956,921 @@ export async function clearWorkspaceNotifications(
     await writePreviewStoreFile({ ...state, notifications: [] });
   });
 }
+
+export async function loadWorkspacePolicySettings(
+  access: WorkspaceAccessContext,
+): Promise<WorkspacePolicySettings> {
+  const defaults: WorkspacePolicySettings = {
+    maxUploadMb: 25,
+    allowMemberUploads: true,
+    requireVerifiedCardsInChat: false,
+    piiRedactionEnabled: true,
+  };
+  if (!canAttemptPostgres(access)) return defaults;
+
+  return withTenantPostgres(access, async (query) => {
+    try {
+      const res = await query(
+        `SELECT max_upload_mb, allow_member_uploads, require_verified_cards_in_chat, pii_redaction_enabled
+         FROM uptech.workspace_settings
+         WHERE workspace_id = $1::uuid
+         LIMIT 1`,
+        [access.workspaceId],
+      );
+      const row = res.rows[0];
+      if (!row) return defaults;
+      return {
+        maxUploadMb: Number(row.max_upload_mb ?? 25),
+        allowMemberUploads: row.allow_member_uploads !== false,
+        requireVerifiedCardsInChat: row.require_verified_cards_in_chat === true,
+        piiRedactionEnabled: row.pii_redaction_enabled !== false,
+      };
+    } catch {
+      return defaults;
+    }
+  });
+}
+
+export async function listUtilityRuns(
+  access: WorkspaceAccessContext,
+): Promise<readonly UtilityRunRecord[]> {
+  if (canAttemptPostgres(access)) {
+    return withTenantPostgres(access, async (query) => {
+      try {
+        const res = await query(
+          `SELECT id, task, title, summary, sections_json, sources_json,
+                  created_at::text AS created_at_iso
+           FROM uptech.workspace_utility_runs
+           WHERE membership_id = $1::uuid
+           ORDER BY created_at DESC
+           LIMIT 25`,
+          [access.membershipId],
+        );
+        return res.rows.map((row) => ({
+          id: String(row.id),
+          task: String(row.task) as UtilityRunRecord["task"],
+          title: String(row.title),
+          summary: String(row.summary),
+          sections: Array.isArray(row.sections_json)
+            ? (row.sections_json as UtilityRunRecord["sections"])
+            : [],
+          sources: Array.isArray(row.sources_json)
+            ? (row.sources_json as UtilityRunRecord["sources"])
+            : [],
+          createdAtIso: String(row.created_at_iso ?? new Date().toISOString()),
+        }));
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) return [];
+
+  return withStoreLock(async () => {
+    const state = await readPreviewStoreFile();
+    return state.utilityRuns ?? [];
+  });
+}
+
+export async function saveUtilityRun(
+  access: WorkspaceAccessContext,
+  input: Readonly<{
+    task: UtilityRunRecord["task"];
+    title: string;
+    summary: string;
+    sections: UtilityRunRecord["sections"];
+    sources: UtilityRunRecord["sources"];
+  }>,
+): Promise<UtilityRunRecord> {
+  const entry: UtilityRunRecord = {
+    id: `util_${randomUUID().slice(0, 10)}`,
+    task: input.task,
+    title: input.title,
+    summary: input.summary,
+    sections: input.sections,
+    sources: input.sources,
+    createdAtIso: new Date().toISOString(),
+  };
+
+  if (canAttemptPostgres(access)) {
+    await withTenantPostgres(access, async (query) => {
+      try {
+        await query(
+          `INSERT INTO uptech.workspace_utility_runs (
+             workspace_id, id, membership_id, task, title, summary, sections_json, sources_json
+           ) VALUES ($1, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+          [
+            access.workspaceId,
+            entry.id,
+            access.membershipId,
+            entry.task,
+            entry.title,
+            entry.summary,
+            JSON.stringify(entry.sections),
+            JSON.stringify(entry.sources),
+          ],
+        );
+      } catch {
+        // Ignore if utility_runs table is not yet migrated.
+      }
+    });
+    return entry;
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    await withStoreLock(async () => {
+      const state = await readPreviewStoreFile();
+      await writePreviewStoreFile({
+        ...state,
+        utilityRuns: [entry, ...(state.utilityRuns ?? [])].slice(0, 25),
+      });
+    });
+  }
+
+  return entry;
+}
+
+// ============================================================================
+// Enterprise Data-Plane Audit Trail (SOC2 / ISO 27001)
+// ============================================================================
+export async function recordWorkspaceDataAuditEvent(
+  access: WorkspaceAccessContext,
+  eventType: string,
+  targetId: string,
+  metadata: Readonly<Record<string, unknown>> = {},
+): Promise<void> {
+  if (!canAttemptPostgres(access)) return;
+  await withTenantPostgres(access, async (query) => {
+    try {
+      await query(
+        `INSERT INTO uptech.audit_events (
+           workspace_id, actor_user_id, actor_membership_id, event_type,
+           target_type, target_id, request_id, outcome, metadata
+         ) VALUES (
+           $1::uuid, $2::uuid, $3::uuid, $4,
+           'knowledge_resource', $5, $6, 'SUCCESS', $7::jsonb
+         )`,
+        [
+          access.workspaceId,
+          access.userId ?? null,
+          access.membershipId ?? null,
+          eventType,
+          targetId,
+          `req_${randomUUID().slice(0, 12)}`,
+          JSON.stringify({
+            actorLabel: access.actorLabel,
+            workspaceRole: access.workspaceRole,
+            ...metadata,
+          }),
+        ],
+      );
+    } catch {
+      // Never block primary user flow if audit table permissions differ.
+    }
+  });
+}
+
+// ============================================================================
+// Multi-Version Document Lifecycle (Upload v2.0+, Snapshot Diff & Rollback)
+// ============================================================================
+function computeNextVersionLabel(currentLabel: string): string {
+  const match = /^v?(\d+)(?:\.(\d+))?/i.exec(currentLabel.trim());
+  if (!match) return "v2.0";
+  const major = Number.parseInt(match[1] ?? "1", 10);
+  return `v${major + 1}.0`;
+}
+
+export async function uploadNewDocumentVersion(
+  access: WorkspaceAccessContext,
+  documentId: string,
+  args: Readonly<{
+    fileName: string;
+    extension: string;
+    byteSize: number;
+    rawBytes?: Uint8Array;
+    chunks: readonly ExtractedDocumentChunk[];
+    embeddings?: ReadonlyArray<readonly number[] | null>;
+    versionNote?: string;
+    locale: Locale;
+  }>,
+): Promise<DocumentDetailView | null> {
+  const existing = await getStoredKnowledgeDocument(access, documentId);
+  if (!existing) return null;
+
+  const nextVersionLabel = computeNextVersionLabel(existing.summary.versionLabel);
+  const nextVersionId = `${documentId}-${nextVersionLabel.replace(/[^a-zA-Z0-9]/g, "")}-${Date.now().toString(36).slice(-4)}`;
+  const nowLabel =
+    args.locale === "vi"
+      ? `Cập nhật ${nextVersionLabel} · vừa xong`
+      : `Updated ${nextVersionLabel} · just now`;
+  const noteText =
+    args.versionNote?.trim() ||
+    (args.locale === "vi"
+      ? `Cập nhật phiên bản ${nextVersionLabel} (${args.chunks.length} đoạn trích)`
+      : `Updated version ${nextVersionLabel} (${args.chunks.length} segments)`);
+
+  const storedChunks: StoredDocumentChunk[] =
+    args.chunks.length > 0
+      ? args.chunks.map((chunk, index) => ({
+          chunkId: `${documentId}-chunk-${index}`,
+          documentId,
+          chunkIndex: index,
+          heading: chunk.heading,
+          locator: chunk.locator,
+          content: chunk.content,
+          embedding: args.embeddings?.[index] ?? undefined,
+        }))
+      : existing.chunks.map((c) => ({ ...c }));
+
+  if (canAttemptPostgres(access)) {
+    const result = await withTenantPostgres(access, async (query) => {
+      // Snapshot previous active version chunks if not already stored
+      const prevVersion = existing.versions[0];
+      if (prevVersion) {
+        try {
+          await query(
+            `UPDATE uptech.knowledge_document_versions
+             SET chunks_snapshot_json = COALESCE(chunks_snapshot_json, $3::jsonb)
+             WHERE document_id = $1 AND version_id = $2`,
+            [documentId, prevVersion.id, JSON.stringify(existing.chunks)],
+          );
+        } catch {
+          // Ignore if column not yet migrated
+        }
+      }
+
+      try {
+        await query(
+          `INSERT INTO uptech.knowledge_document_versions (
+             workspace_id, document_id, version_id, version_label, note, updated_label,
+             chunks_snapshot_json, author_label, byte_size
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`,
+          [
+            access.workspaceId,
+            documentId,
+            nextVersionId,
+            nextVersionLabel,
+            noteText,
+            nowLabel,
+            JSON.stringify(storedChunks),
+            access.actorLabel,
+            args.byteSize,
+          ],
+        );
+      } catch {
+        await query(
+          `INSERT INTO uptech.knowledge_document_versions (
+             workspace_id, document_id, version_id, version_label, note, updated_label
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            access.workspaceId,
+            documentId,
+            nextVersionId,
+            nextVersionLabel,
+            noteText,
+            nowLabel,
+          ],
+        );
+      }
+
+      await query(
+        "DELETE FROM uptech.knowledge_document_chunks WHERE document_id = $1",
+        [documentId],
+      );
+      for (const chunk of storedChunks) {
+        await query(
+          `INSERT INTO uptech.knowledge_document_chunks (
+             workspace_id, chunk_id, document_id, chunk_index, heading, locator, content, embedding_json
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+          [
+            access.workspaceId,
+            chunk.chunkId,
+            documentId,
+            chunk.chunkIndex,
+            chunk.heading,
+            chunk.locator,
+            chunk.content,
+            chunk.embedding ? JSON.stringify(chunk.embedding) : null,
+          ],
+        );
+      }
+
+      if (args.rawBytes && args.rawBytes.length > 0) {
+        try {
+          await query(
+            `INSERT INTO uptech.knowledge_document_blobs (
+               workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
+             ) VALUES ($1, $2, $3, 'application/octet-stream', $4, $5)
+             ON CONFLICT (workspace_id, document_id)
+             DO UPDATE SET
+               file_extension = EXCLUDED.file_extension,
+               byte_size = EXCLUDED.byte_size,
+               content_bytes = EXCLUDED.content_bytes`,
+            [
+              access.workspaceId,
+              documentId,
+              args.extension.toLowerCase(),
+              args.rawBytes.length,
+              Buffer.from(args.rawBytes),
+            ],
+          );
+        } catch {
+          // Ignore if blob table not yet migrated
+        }
+      }
+
+      await query(
+        `UPDATE uptech.knowledge_documents
+         SET version_label = $2,
+             detail = $3,
+             updated_label = $4,
+             byte_size = $5,
+             updated_at = transaction_timestamp()
+         WHERE id = $1`,
+        [documentId, nextVersionLabel, noteText, nowLabel, args.byteSize],
+      );
+
+      // Flag any verified Knowledge Cards derived from this document for re-verification
+      try {
+        await query(
+          `UPDATE uptech.knowledge_cards
+           SET status = 'draft',
+               flagged_outdated_reason = $2,
+               updated_at = transaction_timestamp()
+           WHERE source_document_id = $1 AND status = 'verified'`,
+          [
+            documentId,
+            `Tài liệu nguồn vừa nâng cấp lên ${nextVersionLabel} — cần rà soát lại thẻ tri thức.`,
+          ],
+        );
+      } catch {
+        // Ignore if column not yet migrated
+      }
+
+      return true;
+    });
+
+    if (result) {
+      await recordWorkspaceDataAuditEvent(
+        access,
+        "knowledge.document.version_uploaded",
+        documentId,
+        {
+          versionLabel: nextVersionLabel,
+          chunkCount: storedChunks.length,
+          byteSize: args.byteSize,
+        },
+      );
+      await recordWorkspaceNotification(access, {
+        kind: "document_updated",
+        title: `Phiên bản mới ${nextVersionLabel}: ${existing.summary.name}`,
+        description: noteText,
+        href: `/documents/${documentId}`,
+        actionLabel: "Xem & Đối chiếu",
+      });
+    }
+
+    const refreshed = await getStoredKnowledgeDocument(access, documentId);
+    if (!refreshed) return null;
+    const firstChunk = refreshed.chunks[0];
+    return {
+      ...refreshed.summary,
+      versions: refreshed.versions,
+      sections: refreshed.chunks.map((c) => ({
+        id: c.chunkId,
+        heading: c.heading,
+        locator: c.locator,
+        content: c.content,
+      })),
+      preview: firstChunk
+        ? {
+            kind: "fixture-excerpt",
+            heading: firstChunk.heading,
+            locator: firstChunk.locator,
+            excerpt: firstChunk.content.slice(0, 600),
+          }
+        : { kind: "unavailable", reason: "No indexed chunks." },
+    };
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) return null;
+
+  return withStoreLock(async () => {
+    const state = await readPreviewStoreFile();
+    const idx = state.documents.findIndex((d) => d.summary.id === documentId);
+    if (idx === -1) return null;
+    const doc = state.documents[idx]!;
+    const prevVersionId = doc.versions[0]?.id ?? `${documentId}-v1`;
+
+    const snapshots: Record<string, readonly StoredDocumentChunk[]> = {
+      ...(state.versionSnapshots ?? {}),
+      [prevVersionId]: doc.chunks,
+      [nextVersionId]: storedChunks,
+    };
+
+    const nextVersions = [
+      { id: nextVersionId, label: nextVersionLabel, updatedLabel: nowLabel },
+      ...doc.versions,
+    ];
+
+    const updatedDoc: StoredKnowledgeDocument = {
+      ...doc,
+      summary: {
+        ...doc.summary,
+        versionLabel: nextVersionLabel,
+        detail: noteText,
+        updatedLabel: nowLabel,
+      },
+      versions: nextVersions,
+      byteSize: args.byteSize,
+      chunks: storedChunks,
+    };
+
+    const nextDocs = [...state.documents];
+    nextDocs[idx] = updatedDoc;
+
+    await writePreviewStoreFile({
+      ...state,
+      documents: nextDocs,
+      versionSnapshots: snapshots,
+    });
+
+    const firstChunk = storedChunks[0];
+    return {
+      ...updatedDoc.summary,
+      versions: updatedDoc.versions,
+      sections: storedChunks.map((c) => ({
+        id: c.chunkId,
+        heading: c.heading,
+        locator: c.locator,
+        content: c.content,
+      })),
+      preview: firstChunk
+        ? {
+            kind: "fixture-excerpt",
+            heading: firstChunk.heading,
+            locator: firstChunk.locator,
+            excerpt: firstChunk.content.slice(0, 600),
+          }
+        : { kind: "unavailable", reason: "No indexed chunks." },
+    };
+  });
+}
+
+export async function getDocumentVersionChunks(
+  access: WorkspaceAccessContext,
+  documentId: string,
+  versionId?: string,
+): Promise<readonly StoredDocumentChunk[]> {
+  const doc = await getStoredKnowledgeDocument(access, documentId);
+  if (!doc) return [];
+  if (!versionId || doc.versions[0]?.id === versionId || doc.summary.versionLabel === versionId) {
+    return doc.chunks;
+  }
+
+  if (canAttemptPostgres(access)) {
+    return withTenantPostgres(access, async (query) => {
+      try {
+        const res = await query(
+          `SELECT chunks_snapshot_json
+           FROM uptech.knowledge_document_versions
+           WHERE document_id = $1 AND (version_id = $2 OR version_label = $2)
+           LIMIT 1`,
+          [documentId, versionId],
+        );
+        const snap = res.rows[0]?.chunks_snapshot_json;
+        if (Array.isArray(snap) && snap.length > 0) {
+          return snap as readonly StoredDocumentChunk[];
+        }
+      } catch {
+        // Fallback below
+      }
+      return doc.chunks;
+    });
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    const state = await readPreviewStoreFile();
+    const matchedVersion = doc.versions.find(
+      (v) => v.id === versionId || v.label === versionId,
+    );
+    const snap =
+      (matchedVersion && state.versionSnapshots?.[matchedVersion.id]) ??
+      state.versionSnapshots?.[versionId];
+    if (snap && snap.length > 0) return snap;
+  }
+
+  return doc.chunks;
+}
+
+export async function rollbackDocumentVersion(
+  access: WorkspaceAccessContext,
+  documentId: string,
+  targetVersionId: string,
+  locale: Locale = "vi",
+): Promise<DocumentDetailView | null> {
+  const existing = await getStoredKnowledgeDocument(access, documentId);
+  if (!existing) return null;
+
+  const targetVersion = existing.versions.find(
+    (v) => v.id === targetVersionId || v.label === targetVersionId,
+  );
+  if (!targetVersion) return null;
+
+  const targetChunks = await getDocumentVersionChunks(access, documentId, targetVersion.id);
+  const restoredNote =
+    locale === "vi"
+      ? `Khôi phục (Rollback) từ phiên bản ${targetVersion.label}`
+      : `Rolled back from version ${targetVersion.label}`;
+
+  return uploadNewDocumentVersion(access, documentId, {
+    fileName: existing.summary.name,
+    extension: existing.rawFileExtension ?? existing.summary.fileType,
+    byteSize: existing.byteSize,
+    chunks: targetChunks.map((c, idx) => ({
+      chunkIndex: idx,
+      heading: c.heading,
+      locator: c.locator,
+      content: c.content,
+    })),
+    versionNote: restoredNote,
+    locale,
+  });
+}
+
+// ============================================================================
+// Collaborative Document Comments, Approval Notes & Outdated Flags
+// ============================================================================
+export async function listDocumentComments(
+  access: WorkspaceAccessContext,
+  documentId: string,
+): Promise<readonly DocumentCommentRecord[]> {
+  if (canAttemptPostgres(access)) {
+    return withTenantPostgres(access, async (query) => {
+      try {
+        const res = await query(
+          `SELECT id, document_id, chunk_id, author_label, author_role,
+                  comment_kind, body, resolved, created_at::text AS created_at_iso
+           FROM uptech.knowledge_document_comments
+           WHERE document_id = $1
+           ORDER BY created_at DESC
+           LIMIT 50`,
+          [documentId],
+        );
+        return res.rows.map((r) => ({
+          id: String(r.id),
+          documentId: String(r.document_id),
+          chunkId: r.chunk_id ? String(r.chunk_id) : null,
+          authorLabel: String(r.author_label),
+          authorRole: (r.author_role === "OWNER" || r.author_role === "ADMIN"
+            ? r.author_role
+            : "MEMBER") as DocumentCommentRecord["authorRole"],
+          commentKind: (r.comment_kind === "OUTDATED_FLAG" ||
+          r.comment_kind === "APPROVAL_NOTE"
+            ? r.comment_kind
+            : "COMMENT") as DocumentCommentKind,
+          body: String(r.body),
+          resolved: Boolean(r.resolved),
+          createdAtIso: String(r.created_at_iso ?? new Date().toISOString()),
+        }));
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) return [];
+  const state = await readPreviewStoreFile();
+  return (state.comments ?? []).filter((c) => c.documentId === documentId);
+}
+
+export async function createDocumentComment(
+  access: WorkspaceAccessContext,
+  documentId: string,
+  input: Readonly<{
+    chunkId?: string | null;
+    commentKind?: DocumentCommentKind;
+    body: string;
+  }>,
+): Promise<DocumentCommentRecord> {
+  const comment: DocumentCommentRecord = {
+    id: `cmt_${randomUUID().slice(0, 10)}`,
+    documentId,
+    chunkId: input.chunkId ?? null,
+    authorLabel: access.actorLabel,
+    authorRole: access.workspaceRole,
+    commentKind: input.commentKind ?? "COMMENT",
+    body: input.body.trim(),
+    resolved: false,
+    createdAtIso: new Date().toISOString(),
+  };
+
+  if (canAttemptPostgres(access)) {
+    await withTenantPostgres(access, async (query) => {
+      await query(
+        `INSERT INTO uptech.knowledge_document_comments (
+           workspace_id, id, document_id, chunk_id, author_membership_id,
+           author_label, author_role, comment_kind, body
+         ) VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, $7, $8, $9)`,
+        [
+          access.workspaceId,
+          comment.id,
+          documentId,
+          comment.chunkId,
+          access.membershipId ?? null,
+          comment.authorLabel,
+          comment.authorRole,
+          comment.commentKind,
+          comment.body,
+        ],
+      );
+
+      if (comment.commentKind === "OUTDATED_FLAG") {
+        try {
+          await query(
+            `UPDATE uptech.knowledge_documents
+             SET flagged_outdated_reason = $2,
+                 flagged_outdated_by = $3,
+                 flagged_outdated_at = transaction_timestamp()
+             WHERE id = $1`,
+            [documentId, comment.body, comment.authorLabel],
+          );
+        } catch {
+          // Ignore if column not yet migrated
+        }
+      }
+    });
+
+    await recordWorkspaceDataAuditEvent(
+      access,
+      comment.commentKind === "OUTDATED_FLAG"
+        ? "knowledge.document.flagged_outdated"
+        : "knowledge.document.comment_added",
+      documentId,
+      { commentKind: comment.commentKind },
+    );
+    return comment;
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    await withStoreLock(async () => {
+      const state = await readPreviewStoreFile();
+      await writePreviewStoreFile({
+        ...state,
+        comments: [comment, ...(state.comments ?? [])].slice(0, 200),
+      });
+    });
+  }
+
+  return comment;
+}
+
+// ============================================================================
+// Knowledge Connectors (Web URL Crawler & Enterprise Ingestion API Keys)
+// ============================================================================
+export async function listKnowledgeConnectors(
+  access: WorkspaceAccessContext,
+): Promise<readonly KnowledgeConnectorRecord[]> {
+  if (canAttemptPostgres(access)) {
+    return withTenantPostgres(access, async (query) => {
+      try {
+        const res = await query(
+          `SELECT id, connector_kind, title, source_url, space_id, document_id,
+                  status, last_synced_at::text AS last_synced_at_iso, chunk_count, created_by_label
+           FROM uptech.workspace_knowledge_connectors
+           ORDER BY last_synced_at DESC
+           LIMIT 50`,
+        );
+        return res.rows.map((r) => ({
+          id: String(r.id),
+          connectorKind:
+            r.connector_kind === "WEBHOOK_API" ? "WEBHOOK_API" : "WEB_URL",
+          title: String(r.title),
+          sourceUrl: String(r.source_url),
+          spaceId: String(r.space_id),
+          documentId: r.document_id ? String(r.document_id) : null,
+          status: r.status === "ERROR" ? "ERROR" : "ACTIVE",
+          lastSyncedAtIso: String(r.last_synced_at_iso ?? new Date().toISOString()),
+          chunkCount: Number(r.chunk_count ?? 0),
+          createdByLabel: String(r.created_by_label ?? access.actorLabel),
+        }));
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) return [];
+  const state = await readPreviewStoreFile();
+  return state.connectors ?? [];
+}
+
+export async function saveKnowledgeConnectorRecord(
+  access: WorkspaceAccessContext,
+  input: Readonly<{
+    id?: string;
+    connectorKind?: "WEB_URL" | "WEBHOOK_API";
+    title: string;
+    sourceUrl: string;
+    spaceId: string;
+    documentId: string | null;
+    chunkCount: number;
+  }>,
+): Promise<KnowledgeConnectorRecord> {
+  const record: KnowledgeConnectorRecord = {
+    id: input.id ?? `conn_${randomUUID().slice(0, 10)}`,
+    connectorKind: input.connectorKind ?? "WEB_URL",
+    title: input.title,
+    sourceUrl: input.sourceUrl,
+    spaceId: input.spaceId,
+    documentId: input.documentId,
+    status: "ACTIVE",
+    lastSyncedAtIso: new Date().toISOString(),
+    chunkCount: input.chunkCount,
+    createdByLabel: access.actorLabel,
+  };
+
+  if (canAttemptPostgres(access)) {
+    await withTenantPostgres(access, async (query) => {
+      try {
+        await query(
+          `INSERT INTO uptech.workspace_knowledge_connectors (
+             workspace_id, id, connector_kind, title, source_url, space_id,
+             document_id, status, last_synced_at, chunk_count, created_by_label
+           ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, 'ACTIVE', transaction_timestamp(), $8, $9)
+           ON CONFLICT (workspace_id, id)
+           DO UPDATE SET
+             title = EXCLUDED.title,
+             document_id = EXCLUDED.document_id,
+             status = 'ACTIVE',
+             last_synced_at = transaction_timestamp(),
+             chunk_count = EXCLUDED.chunk_count`,
+          [
+            access.workspaceId,
+            record.id,
+            record.connectorKind,
+            record.title,
+            record.sourceUrl,
+            record.spaceId,
+            record.documentId,
+            record.chunkCount,
+            record.createdByLabel,
+          ],
+        );
+      } catch {
+        // Ignore if table not yet migrated
+      }
+    });
+    await recordWorkspaceDataAuditEvent(
+      access,
+      "knowledge.connector.url_ingested",
+      record.id,
+      { sourceUrl: record.sourceUrl, chunkCount: record.chunkCount },
+    );
+    return record;
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    await withStoreLock(async () => {
+      const state = await readPreviewStoreFile();
+      const filtered = (state.connectors ?? []).filter((c) => c.id !== record.id);
+      await writePreviewStoreFile({
+        ...state,
+        connectors: [record, ...filtered].slice(0, 50),
+      });
+    });
+  }
+
+  return record;
+}
+
+export async function listIngestionApiKeys(
+  access: WorkspaceAccessContext,
+): Promise<readonly IngestionApiKeyRecord[]> {
+  if (canAttemptPostgres(access)) {
+    return withTenantPostgres(access, async (query) => {
+      try {
+        const res = await query(
+          `SELECT id::text AS id, label, key_prefix, default_space_id, created_by_label,
+                  last_used_at::text AS last_used_at_iso, revoked_at::text AS revoked_at_iso,
+                  created_at::text AS created_at_iso
+           FROM uptech.workspace_ingestion_api_keys
+           ORDER BY created_at DESC
+           LIMIT 30`,
+        );
+        return res.rows.map((r) => ({
+          id: String(r.id),
+          label: String(r.label),
+          keyPrefix: String(r.key_prefix),
+          defaultSpaceId: String(r.default_space_id),
+          createdByLabel: String(r.created_by_label),
+          lastUsedAtIso: r.last_used_at_iso ? String(r.last_used_at_iso) : null,
+          revokedAtIso: r.revoked_at_iso ? String(r.revoked_at_iso) : null,
+          createdAtIso: String(r.created_at_iso ?? new Date().toISOString()),
+        }));
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  if (!isWorkspacePreviewModeEnabled()) return [];
+  const state = await readPreviewStoreFile();
+  return state.apiKeys ?? [];
+}
+
+export async function createIngestionApiKey(
+  access: WorkspaceAccessContext,
+  input: Readonly<{ label: string; defaultSpaceId: string }>,
+): Promise<{ readonly record: IngestionApiKeyRecord; readonly rawSecretKey: string }> {
+  const tokenSecret = randomBytes(20).toString("hex");
+  const rawSecretKey = `upt_live_${tokenSecret}`;
+  const keyPrefix = `${rawSecretKey.slice(0, 14)}...${rawSecretKey.slice(-4)}`;
+  const keyHash = createHash("sha256").update(rawSecretKey).digest("hex");
+  const id = randomUUID();
+
+  const record: IngestionApiKeyRecord = {
+    id,
+    label: input.label.trim() || "CI/CD Knowledge Sync Key",
+    keyPrefix,
+    defaultSpaceId: input.defaultSpaceId || "spc_8f2a01",
+    createdByLabel: access.actorLabel,
+    lastUsedAtIso: null,
+    revokedAtIso: null,
+    createdAtIso: new Date().toISOString(),
+  };
+
+  if (canAttemptPostgres(access)) {
+    await withTenantPostgres(access, async (query) => {
+      await query(
+        `INSERT INTO uptech.workspace_ingestion_api_keys (
+           workspace_id, id, label, key_prefix, key_hash, default_space_id, created_by_label
+         ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)`,
+        [
+          access.workspaceId,
+          id,
+          record.label,
+          record.keyPrefix,
+          keyHash,
+          record.defaultSpaceId,
+          record.createdByLabel,
+        ],
+      );
+    });
+    await recordWorkspaceDataAuditEvent(
+      access,
+      "knowledge.connector.api_key_created",
+      id,
+      { label: record.label, keyPrefix: record.keyPrefix },
+    );
+    return { record, rawSecretKey };
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    await withStoreLock(async () => {
+      const state = await readPreviewStoreFile();
+      await writePreviewStoreFile({
+        ...state,
+        apiKeys: [{ ...record, keyHash }, ...(state.apiKeys ?? [])],
+      });
+    });
+  }
+
+  return { record, rawSecretKey };
+}
+
+export async function revokeIngestionApiKey(
+  access: WorkspaceAccessContext,
+  keyId: string,
+): Promise<void> {
+  if (canAttemptPostgres(access)) {
+    await withTenantPostgres(access, async (query) => {
+      await query(
+        `UPDATE uptech.workspace_ingestion_api_keys
+         SET revoked_at = transaction_timestamp()
+         WHERE id = $1::uuid AND revoked_at IS NULL`,
+        [keyId],
+      );
+    });
+    await recordWorkspaceDataAuditEvent(
+      access,
+      "knowledge.connector.api_key_revoked",
+      keyId,
+    );
+    return;
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    await withStoreLock(async () => {
+      const state = await readPreviewStoreFile();
+      await writePreviewStoreFile({
+        ...state,
+        apiKeys: (state.apiKeys ?? []).map((k) =>
+          k.id === keyId ? { ...k, revokedAtIso: new Date().toISOString() } : k,
+        ),
+      });
+    });
+  }
+}
+

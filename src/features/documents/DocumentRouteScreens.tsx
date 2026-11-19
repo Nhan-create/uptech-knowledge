@@ -21,8 +21,11 @@ import {
   WorkspacePage,
 } from "@/components/workspace/WorkspacePrimitives";
 import {
+  DocumentCommentsAndGovernancePanel,
   DocumentDetailActions,
+  DocumentInlineOriginalViewer,
   DocumentRowQuickActions,
+  DocumentVersionLifecyclePanel,
 } from "@/features/documents/DocumentLibraryActions";
 import {
   DocumentIdentity,
@@ -41,9 +44,11 @@ import type {
 export function DocumentDetailScreen({
   outcome,
   spaces = [],
+  highlightedChunkId,
 }: {
   outcome: DocumentLookupOutcome;
   spaces?: readonly SpaceSummaryView[];
+  highlightedChunkId?: string;
 }) {
   if (outcome.kind === "unavailable") {
     return (
@@ -96,26 +101,50 @@ export function DocumentDetailScreen({
               <Badge variant="neutral">{document.versionLabel}</Badge>
             </div>
 
+            <DocumentInlineOriginalViewer
+              documentId={document.id}
+              fileName={document.name}
+              fileType={document.fileType}
+            />
+
             {sections.length > 0 ? (
               <div id="preview-heading" className="mt-4 space-y-4">
-                {sections.map((section) => (
-                  <article
-                    key={section.id}
-                    className="rounded-2xl border border-[#0D1321]/8 bg-[#FAF9FB] p-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h2 className="text-sm font-bold text-[#0D1321]">
-                        {section.heading}
-                      </h2>
-                      <Badge variant="info" size="sm">
-                        {section.locator}
-                      </Badge>
-                    </div>
-                    <p className="mt-2.5 whitespace-pre-wrap text-sm leading-7 text-[#323B4D]">
-                      {section.content}
-                    </p>
-                  </article>
-                ))}
+                {sections.map((section) => {
+                  const isCited =
+                    Boolean(highlightedChunkId) &&
+                    (section.id === highlightedChunkId ||
+                      `chunk-${section.id}` === highlightedChunkId);
+                  return (
+                    <article
+                      key={section.id}
+                      id={`chunk-${section.id}`}
+                      className={
+                        isCited
+                          ? "scroll-mt-24 rounded-2xl border-2 border-[#1B44FF] bg-[#EEF3FF]/80 p-4 shadow-[0_8px_24px_-8px_rgba(27,68,255,0.28)]"
+                          : "scroll-mt-24 rounded-2xl border border-[#0D1321]/8 bg-[#FAF9FB] p-4"
+                      }
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="text-sm font-bold text-[#0D1321]">
+                            {section.heading}
+                          </h2>
+                          {isCited ? (
+                            <span className="rounded-full bg-[#1B44FF] px-2.5 py-0.5 text-[11px] font-semibold text-white">
+                              Đoạn bằng chứng được trích dẫn
+                            </span>
+                          ) : null}
+                        </div>
+                        <Badge variant="info" size="sm">
+                          {section.locator}
+                        </Badge>
+                      </div>
+                      <p className="mt-2.5 whitespace-pre-wrap text-sm leading-7 text-[#323B4D]">
+                        {section.content}
+                      </p>
+                    </article>
+                  );
+                })}
               </div>
             ) : (
               <div className="mt-5 rounded-xl border border-[#F6D59B] bg-[#FFF9EF] p-5">
@@ -135,32 +164,23 @@ export function DocumentDetailScreen({
             )}
           </section>
 
-          <section aria-labelledby="versions-heading">
+          <section
+            aria-labelledby="versions-heading"
+            className="rounded-2xl border border-[#0D1321]/10 bg-white p-5 shadow-[0_8px_20px_-8px_rgba(11,18,32,0.08)] sm:p-6"
+          >
             <SectionHeading
               id="versions-heading"
-              title="Lịch sử phiên bản"
-              description="Các mốc phiên bản được ghi nhận khi tải lên hoặc cập nhật."
+              title="Quản lý vòng đời & Lịch sử phiên bản (v1.0 → v2.0+)"
+              description="Tải lên phiên bản mới, đối chiếu thay đổi giữa các phiên bản và khôi phục (Rollback) snapshot cũ."
             />
-            {document.versions.length ? (
-              <ul className="mt-3 space-y-2">
-                {document.versions.map((version) => (
-                  <li
-                    key={version.id}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-[#0D1321]/10 bg-white px-4 py-3 text-sm"
-                  >
-                    <span className="font-semibold text-[#0D1321]">{version.label}</span>
-                    <span className="glean-tabular text-[#505A6E]">
-                      {version.updatedLabel}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-3 rounded-xl border border-dashed border-[#0D1321]/16 bg-white p-5 text-sm text-[#505A6E]">
-                Chưa có bản ghi lịch sử phiên bản bổ sung.
-              </p>
-            )}
+            <DocumentVersionLifecyclePanel
+              documentId={document.id}
+              currentVersionLabel={document.versionLabel}
+              versions={document.versions}
+            />
           </section>
+
+          <DocumentCommentsAndGovernancePanel documentId={document.id} />
         </div>
 
         <aside className="space-y-4">

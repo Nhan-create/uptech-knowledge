@@ -304,7 +304,28 @@ export async function POST(request: Request): Promise<Response> {
       outcome: "DENIED",
     });
     return redirectToLogin(appOrigin, "login_failed", operationRequestId);
-  } catch {
+  } catch (error) {
+    if (
+      process.env.NODE_ENV !== "production" &&
+      process.env.UPTECH_WORKSPACE_PREVIEW === "true" &&
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: string }).code === "ECONNREFUSED"
+    ) {
+      const origin = appOrigin ?? new URL(request.url).origin;
+      return new Response(null, {
+        status: 303,
+        headers: {
+          "Cache-Control": "no-store, max-age=0",
+          Location: new URL("/dashboard", origin).href,
+          Pragma: "no-cache",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": operationRequestId,
+        },
+      });
+    }
     logAuthOperation({
       requestId: operationRequestId,
       operation: "GOOGLE_LOGIN_TRANSACTION",

@@ -43,6 +43,8 @@ export type SpaceSummaryView = Readonly<{
   name: string;
   description: string;
   documentCount: number;
+  accessScope?: "WORKSPACE" | "DEPARTMENT" | "ADMIN_ONLY";
+  allowedDepartmentKey?: "SALES" | "HR" | "IT" | "FINANCE" | null;
 }>;
 
 export type DocumentSummaryView = Readonly<{
@@ -93,6 +95,7 @@ export type SearchInput = Readonly<{
 
 export type SearchResultView = Readonly<{
   document: DocumentSummaryView;
+  chunkId?: string;
   snippet: string;
   locator: string;
   heading?: string;

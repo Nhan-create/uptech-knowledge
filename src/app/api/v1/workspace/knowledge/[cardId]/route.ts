@@ -1,5 +1,6 @@
 import {
   deleteKnowledgeCard,
+  recordWorkspaceDataAuditEvent,
   updateKnowledgeCard,
   type KnowledgeCardKind,
   type KnowledgeCardStatus,
@@ -70,6 +71,19 @@ export async function PATCH(
   const summary = typeof body.summary === "string" ? body.summary : undefined;
   const rationale = typeof body.rationale === "string" ? body.rationale : undefined;
 
+  if (
+    status === "verified" &&
+    auth.access.workspaceRole !== "OWNER" &&
+    auth.access.workspaceRole !== "ADMIN"
+  ) {
+    return workspaceError(
+      403,
+      "APPROVAL_AUTHORITY_REQUIRED",
+      "Theo quy trình phê duyệt 2 bước (Maker-Checker), chỉ Chủ sở hữu (OWNER) hoặc Quản trị viên (ADMIN) mới có quyền phê duyệt Thẻ tri thức sang trạng thái Đã xác minh.",
+      requestId,
+    );
+  }
+
   const updated = await updateKnowledgeCard(auth.access, cardId, {
     status,
     kind,
@@ -81,6 +95,17 @@ export async function PATCH(
 
   if (!updated) {
     return workspaceError(404, "NOT_FOUND", "Knowledge card not found.", requestId);
+  }
+
+  if (status) {
+    void recordWorkspaceDataAuditEvent(
+      auth.access,
+      status === "verified"
+        ? "knowledge.card.verified"
+        : "knowledge.card.status_updated",
+      cardId,
+      { status, title: updated.title },
+    );
   }
 
   return workspaceJson({ ok: true, card: updated }, 200, requestId);

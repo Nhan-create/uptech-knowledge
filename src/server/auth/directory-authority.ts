@@ -83,6 +83,68 @@ export type CurrentDirectoryAuthorityInspection =
   | "NOT_CURRENT"
   | "UNAVAILABLE";
 
+export interface VerifiedDirectoryPermissionContext {
+  readonly workspaceId: string;
+  readonly membershipRole: "OWNER" | "ADMIN" | "MEMBER";
+  readonly departmentKey: "SALES" | "HR" | "IT" | "FINANCE" | null;
+  readonly directGroupIds: readonly string[];
+}
+
+export async function loadCurrentDirectoryPermissionContext(
+  session: {
+    readonly context: NormalSessionContext;
+    readonly credentialHash: Uint8Array;
+  },
+  pool: Pick<DatabasePool, "connect">,
+): Promise<VerifiedDirectoryPermissionContext | null> {
+  const workspaceRole = session.context.workspaceRole;
+  if (!isDirectoryRole(workspaceRole)) {
+    return null;
+  }
+  try {
+    return await withRequestTransaction(
+      requestTransactionContextFromSession(
+        session.context,
+        session.credentialHash,
+      ),
+      async (client) => {
+        const result = await client.query<DirectoryPermissionContextRow>(
+          LOAD_DIRECTORY_PERMISSION_CONTEXT_SQL,
+        );
+        if (
+          result.rows.length !== 1 ||
+          !isCurrentDirectoryPermissionContext(
+            result.rows[0],
+            session.context.workspaceId,
+            workspaceRole,
+          )
+        ) {
+          return null;
+        }
+        const row = result.rows[0];
+        const dept =
+          row.department_key === "SALES" ||
+          row.department_key === "HR" ||
+          row.department_key === "IT" ||
+          row.department_key === "FINANCE"
+            ? row.department_key
+            : null;
+        return Object.freeze({
+          workspaceId: session.context.workspaceId,
+          membershipRole: workspaceRole,
+          departmentKey: dept,
+          directGroupIds: Array.isArray(row.direct_group_ids)
+            ? (row.direct_group_ids as string[])
+            : [],
+        });
+      },
+      pool,
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function inspectCurrentDirectoryAuthority(
   session: {
     readonly context: NormalSessionContext;

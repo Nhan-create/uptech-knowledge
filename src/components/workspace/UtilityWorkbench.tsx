@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   AlignLeft,
@@ -156,6 +156,21 @@ type UtilityApiSuccess = Readonly<{
   disclaimer: string;
 }>;
 
+type UtilityRunHistoryItem = Readonly<{
+  id: string;
+  task: UtilityTaskId;
+  title: string;
+  output: string;
+  takeaways: readonly string[];
+  sourcesUsed: ReadonlyArray<{
+    documentId: string | null;
+    title: string;
+    spaceName: string | null;
+  }>;
+  model: string;
+  createdAt: string;
+}>;
+
 type UtilityWorkbenchProps = Readonly<{
   documents: readonly DocumentSummaryView[];
   spaces: readonly SpaceSummaryView[];
@@ -186,6 +201,22 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
   const [checkedLines, setCheckedLines] = useState<Record<number, boolean>>({});
   const [savingCards, setSavingCards] = useState(false);
   const [savedCardsCount, setSavedCardsCount] = useState<number | null>(null);
+  const [recentRuns, setRecentRuns] = useState<readonly UtilityRunHistoryItem[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/v1/workspace/utility", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { runs?: UtilityRunHistoryItem[] } | null) => {
+        if (active && data?.runs) {
+          setRecentRuns(data.runs);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const selectedTool =
     UTILITY_TOOLS.find((item) => item.id === activeTool) ?? UTILITY_TOOLS[0];
@@ -235,6 +266,19 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
       setResult(payload);
       setEditableOutput(payload.output);
       setViewMode("rendered");
+      setRecentRuns((prev) => [
+        {
+          id: `run-${Date.now()}`,
+          task: payload.task,
+          title: payload.title,
+          output: payload.output,
+          takeaways: payload.takeaways,
+          sourcesUsed: payload.sourcesUsed,
+          model: payload.model,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev.slice(0, 19),
+      ]);
     } catch {
       setErrorMessage(
         locale === "en"
@@ -790,6 +834,68 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
           </div>
         </Card>
       </section>
+
+      {recentRuns.length > 0 ? (
+        <Card className="p-5">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-[#111827]">
+                {locale === "en" ? "Saved Utility Run History" : "Lịch sử chạy Tiện ích AI gần đây"}
+              </h3>
+              <p className="text-xs text-[#647084]">
+                {locale === "en"
+                  ? "Click any past run to reload its output and takeaways."
+                  : "Nhấp vào kết quả đã chạy để mở lại nội dung và điểm cốt lõi."}
+              </p>
+            </div>
+            <Badge variant="neutral">{recentRuns.length}</Badge>
+          </div>
+          <div className="mt-3 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+            {recentRuns.slice(0, 6).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setActiveTool(item.task);
+                  setResult({
+                    ok: true,
+                    task: item.task,
+                    model: item.model,
+                    title: item.title,
+                    output: item.output,
+                    takeaways: item.takeaways,
+                    sourcesUsed: item.sourcesUsed,
+                    disclaimer:
+                      locale === "en"
+                        ? "Loaded from saved workspace utility run history."
+                        : "Đã nạp lại từ lịch sử chạy Tiện ích AI của không gian làm việc.",
+                  });
+                  setEditableOutput(item.output);
+                  setViewMode("rendered");
+                }}
+                className="flex flex-col justify-between rounded-xl border border-[#0D1321]/10 bg-[#FAFBFF] p-3 text-left transition-colors hover:border-[#1635C7]/35 hover:bg-[#F3F6FF]"
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="rounded-md bg-[#EEF3FF] px-2 py-0.5 text-[11px] font-semibold uppercase text-[#1635C7]">
+                      {item.task}
+                    </span>
+                    <span className="text-[11px] text-[#647084]">
+                      {new Date(item.createdAt).toLocaleString(locale === "en" ? "en-US" : "vi-VN")}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 line-clamp-1 text-xs font-semibold text-[#111827]">
+                    {item.title}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-[11px] text-[#505A6E]">
+                    {item.output}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </Card>
+      ) : null}
     </div>
   );
 }

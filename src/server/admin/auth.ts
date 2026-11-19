@@ -10,6 +10,7 @@ import {
 import { type DatabasePool } from "@/server/db/core";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import { classifyRequestCredential } from "@/server/http/request-security";
+import { isWorkspacePreviewModeEnabled } from "@/server/knowledge/access-context";
 
 export interface AdminApiContext {
   readonly session: AuthenticatedWebSession;
@@ -20,6 +21,41 @@ export interface AdminApiContext {
   readonly sessionId: string;
   readonly role: "OWNER" | "ADMIN";
   readonly requestId: string;
+  readonly isPreviewMode?: boolean;
+}
+
+function createPreviewAdminContext(requestId: string): AdminApiContext {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const actorId = "00000000-0000-4000-8000-000000000002";
+  const membershipId = "00000000-0000-4000-8000-000000000003";
+  const sessionId = "00000000-0000-4000-8000-000000000004";
+  return Object.freeze({
+    session: {
+      credentialHash: new Uint8Array(32),
+      context: {
+        workspaceId,
+        actorId,
+        membershipId,
+        sessionId,
+        workspaceRole: "OWNER" as const,
+      },
+    } as unknown as AuthenticatedWebSession,
+    pool: {
+      connect: async () => {
+        throw new Error("Preview mode pool");
+      },
+      query: async () => {
+        throw new Error("Preview mode pool");
+      },
+    } as unknown as Pick<DatabasePool, "connect" | "query">,
+    workspaceId,
+    actorId,
+    membershipId,
+    sessionId,
+    role: "OWNER",
+    requestId,
+    isPreviewMode: true,
+  });
 }
 
 export function resolveAdminRequestId(request: Request): string {
@@ -100,6 +136,9 @@ export async function resolveAdminContextFromHeaders(
       requestId,
     });
   } catch {
+    if (isWorkspacePreviewModeEnabled()) {
+      return createPreviewAdminContext(requestId);
+    }
     return null;
   }
 }
@@ -125,6 +164,9 @@ export async function authorizeAdminApi(
 
   const credential = classifyRequestCredential(request.headers);
   if (!credential.ok || credential.kind !== "cookie") {
+    if (isWorkspacePreviewModeEnabled()) {
+      return { ok: true, admin: createPreviewAdminContext(requestId) };
+    }
     return {
       ok: false,
       response: adminError(
@@ -185,6 +227,9 @@ export async function authorizeAdminApi(
       }),
     };
   } catch (error) {
+    if (isWorkspacePreviewModeEnabled()) {
+      return { ok: true, admin: createPreviewAdminContext(requestId) };
+    }
     if (error instanceof WebSessionAuthenticationError) {
       return {
         ok: false,

@@ -11,6 +11,7 @@ import {
 import { Badge, Card } from "@/components/ui";
 import type {
   AdminBillingProfileRecord,
+  AdminKnowledgeAnalyticsRecord,
   AdminWorkspaceOverview,
 } from "@/server/admin/repository";
 
@@ -18,6 +19,7 @@ interface BillingApiPayload {
   readonly ok: boolean;
   readonly overview: AdminWorkspaceOverview;
   readonly billing: AdminBillingProfileRecord;
+  readonly analytics?: AdminKnowledgeAnalyticsRecord;
   readonly error?: { readonly message?: string };
 }
 
@@ -386,6 +388,114 @@ export function AdminBillingClient() {
           </div>
         </Card>
       </form>
+
+      {/* Enterprise Knowledge Analytics & Content Gaps */}
+      {data?.analytics ? (
+        <div className="space-y-4">
+          <Card className="p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-[#0D1321]">
+                  Phân tích chất lượng tri thức AI (30 ngày gần nhất)
+                </h3>
+                <p className="text-xs text-[#64748B]">
+                  Theo dõi độ phủ nguồn dẫn chứng, phản hồi của nhân viên và các câu hỏi chưa có tài liệu trả lời (Content Gaps).
+                </p>
+              </div>
+              <Badge variant="info">
+                {data.analytics.turns30d > 0
+                  ? `${Math.round(
+                      (data.analytics.groundedTurns30d / data.analytics.turns30d) * 100,
+                    )}% có nguồn dẫn chứng`
+                  : "Chưa có lượt hỏi"}
+              </Badge>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-xl bg-[#F8FAFC] p-3.5">
+                <p className="text-xs text-[#64748B]">Trả lời đủ dẫn chứng</p>
+                <p className="mt-1 text-xl font-bold text-emerald-700">
+                  {data.analytics.groundedTurns30d}
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#F8FAFC] p-3.5">
+                <p className="text-xs text-[#64748B]">Thiếu nguồn (Content Gaps)</p>
+                <p className="mt-1 text-xl font-bold text-amber-700">
+                  {data.analytics.emptyTurns30d}
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#F8FAFC] p-3.5">
+                <p className="text-xs text-[#64748B]">Đánh giá Hữu ích / Cần sửa</p>
+                <p className="mt-1 text-xl font-bold text-[#0D1321]">
+                  {data.analytics.positiveFeedback30d} 👍 · {data.analytics.negativeFeedback30d} 👎
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#F8FAFC] p-3.5">
+                <p className="text-xs text-[#64748B]">Thẻ tri thức Đã xác minh / Nháp</p>
+                <p className="mt-1 text-xl font-bold text-[#1635C7]">
+                  {data.analytics.verifiedCardsCount} / {data.analytics.draftCardsCount}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-xl border border-[#0D1321]/10 p-4">
+                <h4 className="text-sm font-bold text-[#0D1321]">
+                  Lỗ hổng tri thức cần bổ sung tài liệu ({data.analytics.contentGaps.length})
+                </h4>
+                {data.analytics.contentGaps.length === 0 ? (
+                  <p className="mt-2 text-xs text-[#64748B]">
+                    Chưa phát hiện câu hỏi nào thiếu tài liệu dẫn chứng trong 30 ngày qua.
+                  </p>
+                ) : (
+                  <ul className="mt-3 divide-y divide-[#0D1321]/6 text-xs">
+                    {data.analytics.contentGaps.map((gap, idx) => (
+                      <li key={`${gap.prompt}-${idx}`} className="py-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="font-semibold text-[#0D1321]">{gap.prompt}</span>
+                          <Badge variant={gap.evidenceState === "empty" ? "warning" : "danger"}>
+                            {gap.askCount}x
+                          </Badge>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-[#64748B]">
+                          Phạm vi: {gap.scope} ·{" "}
+                          {gap.evidenceState === "empty" ? "Chưa có tài liệu" : "Phản hồi chưa tốt"}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-[#0D1321]/10 p-4">
+                <h4 className="text-sm font-bold text-[#0D1321]">
+                  Tài liệu được Trợ lý AI trích dẫn nhiều nhất ({data.analytics.topCitedDocs.length})
+                </h4>
+                {data.analytics.topCitedDocs.length === 0 ? (
+                  <p className="mt-2 text-xs text-[#64748B]">
+                    Chưa có thống kê trích dẫn tài liệu trong 30 ngày qua.
+                  </p>
+                ) : (
+                  <ul className="mt-3 divide-y divide-[#0D1321]/6 text-xs">
+                    {data.analytics.topCitedDocs.map((doc) => (
+                      <li
+                        key={doc.documentId}
+                        className="flex items-center justify-between gap-2 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold text-[#0D1321]">{doc.title}</p>
+                          <p className="text-[11px] text-[#64748B]">{doc.spaceName}</p>
+                        </div>
+                        <Badge variant="success">{doc.citationCount} trích dẫn</Badge>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </Card>
+        </div>
+      ) : null}
     </div>
   );
 }

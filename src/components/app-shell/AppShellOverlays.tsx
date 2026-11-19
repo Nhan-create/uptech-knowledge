@@ -2,7 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Search, Sparkles, X } from "lucide-react";
+import {
+  ArrowRight,
+  BookOpenCheck,
+  FileText,
+  Loader2,
+  Search,
+  Sparkles,
+  X,
+} from "lucide-react";
 
 import {
   type AppShellCopy,
@@ -26,7 +34,73 @@ export function CommandPaletteModal({
 }>) {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveDocs, setLiveDocs] = useState<
+    ReadonlyArray<{
+      document: { id: string; name: string; fileType: string; space: { name: string } };
+      chunkId?: string;
+      heading?: string;
+      locator: string;
+      snippet: string;
+    }>
+  >([]);
+  const [liveCards, setLiveCards] = useState<
+    ReadonlyArray<{
+      id: string;
+      title: string;
+      kind: string;
+      status: string;
+      spaceName: string;
+    }>
+  >([]);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < 2) {
+      setLiveDocs([]);
+      setLiveCards([]);
+      setLiveLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setLiveLoading(true);
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/v1/workspace/search?q=${encodeURIComponent(trimmedQuery)}`, {
+        signal: controller.signal,
+        cache: "no-store",
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then(
+          (
+            data: {
+              outcome?: {
+                kind?: string;
+                results?: typeof liveDocs;
+              };
+              matchingCards?: typeof liveCards;
+            } | null,
+          ) => {
+            if (data?.outcome?.kind === "results" && Array.isArray(data.outcome.results)) {
+              setLiveDocs(data.outcome.results.slice(0, 5));
+            } else {
+              setLiveDocs([]);
+            }
+            setLiveCards(Array.isArray(data?.matchingCards) ? data.matchingCards : []);
+          },
+        )
+        .catch(() => {})
+        .finally(() => {
+          setLiveLoading(false);
+        });
+    }, 160);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, query]);
 
   useEffect(() => {
     if (!open) return;
@@ -113,23 +187,135 @@ export function CommandPaletteModal({
           </button>
         </form>
 
-        <div className="max-h-96 overflow-y-auto p-3">
+        <div className="max-h-[28rem] overflow-y-auto p-3">
           {query.trim() ? (
-            <button
-              type="button"
-              onClick={() =>
-                navigateTo(`/search?q=${encodeURIComponent(query.trim())}`)
-              }
-              className="mb-3 flex w-full items-center justify-between rounded-xl border border-[#C8D2FF] bg-[#EEF1FF] px-3.5 py-2.5 text-left text-sm font-medium text-[#1635C7] hover:bg-[#DCE3FF]/70"
-            >
-              <span className="flex min-w-0 items-center gap-2.5">
-                <Search aria-hidden="true" className="size-4 shrink-0" />
-                <span className="truncate">
-                  {copy.commandRunSearch} “{query.trim()}”
-                </span>
-              </span>
-              <ArrowRight aria-hidden="true" className="size-4 shrink-0" />
-            </button>
+            <div className="mb-3 space-y-2">
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigateTo(`/search?q=${encodeURIComponent(query.trim())}`)
+                  }
+                  className="flex w-full items-center justify-between rounded-xl border border-[#C8D2FF] bg-[#EEF1FF] px-3 py-2 text-left text-xs font-semibold text-[#1635C7] hover:bg-[#DCE3FF]/70"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Search aria-hidden="true" className="size-3.5 shrink-0" />
+                    <span className="truncate">
+                      {copy.commandRunSearch} “{query.trim()}”
+                    </span>
+                  </span>
+                  <ArrowRight aria-hidden="true" className="size-3.5 shrink-0" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigateTo(`/chat?prompt=${encodeURIComponent(query.trim())}`)
+                  }
+                  className="flex w-full items-center justify-between rounded-xl border border-[#1B44FF]/30 bg-[#0B1220] px-3 py-2 text-left text-xs font-semibold text-white hover:bg-[#172136]"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Sparkles aria-hidden="true" className="size-3.5 shrink-0 text-[#93B4FF]" />
+                    <span className="truncate">
+                      {locale === "en" ? "Ask AI Copilot:" : "Hỏi Trợ lý AI ngay:"} “{query.trim()}”
+                    </span>
+                  </span>
+                  <ArrowRight aria-hidden="true" className="size-3.5 shrink-0" />
+                </button>
+              </div>
+
+              {liveLoading ? (
+                <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-[#505A6E]">
+                  <Loader2 aria-hidden="true" className="size-3.5 animate-spin text-[#1635C7]" />
+                  <span>
+                    {locale === "en"
+                      ? "Searching documents & verified knowledge cards..."
+                      : "Đang tìm tức thời trong Tài liệu & Thẻ tri thức..."}
+                  </span>
+                </div>
+              ) : null}
+
+              {liveDocs.length > 0 ? (
+                <div>
+                  <p className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#1635C7]">
+                    {locale === "en"
+                      ? `Live Documents & Passages (${liveDocs.length})`
+                      : `Tài liệu & Đoạn trích khớp trực tiếp (${liveDocs.length})`}
+                  </p>
+                  <ul className="space-y-1">
+                    {liveDocs.map((hit, idx) => (
+                      <li key={`${hit.document.id}-${idx}`}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigateTo(
+                              hit.chunkId
+                                ? `/documents/${encodeURIComponent(hit.document.id)}?chunk=${encodeURIComponent(hit.chunkId)}#chunk-${encodeURIComponent(hit.chunkId)}`
+                                : `/documents/${encodeURIComponent(hit.document.id)}`,
+                            )
+                          }
+                          className="flex w-full items-start justify-between gap-2.5 rounded-xl border border-[#0D1321]/8 bg-[#FAFBFF] px-3 py-2 text-left hover:border-[#1B44FF]/35 hover:bg-[#EEF3FF]/60"
+                        >
+                          <span className="flex min-w-0 items-start gap-2.5">
+                            <FileText
+                              aria-hidden="true"
+                              className="mt-0.5 size-4 shrink-0 text-[#1635C7]"
+                            />
+                            <span className="min-w-0">
+                              <span className="block truncate text-xs font-bold text-[#0D1321]">
+                                {hit.document.name}{" "}
+                                <span className="font-normal text-[#505A6E]">
+                                  · {hit.document.space.name} · {hit.locator}
+                                </span>
+                              </span>
+                              <span className="mt-0.5 line-clamp-1 block text-[11px] text-[#323B4D]">
+                                {hit.snippet}
+                              </span>
+                            </span>
+                          </span>
+                          <span className="shrink-0 rounded bg-[#EEF1FF] px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[#1635C7]">
+                            {hit.document.fileType}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {liveCards.length > 0 ? (
+                <div>
+                  <p className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#6D28D9]">
+                    {locale === "en"
+                      ? `Knowledge Cards (${liveCards.length})`
+                      : `Thẻ tri thức khớp (${liveCards.length})`}
+                  </p>
+                  <ul className="space-y-1">
+                    {liveCards.map((card) => (
+                      <li key={card.id}>
+                        <button
+                          type="button"
+                          onClick={() => navigateTo("/knowledge")}
+                          className="flex w-full items-center justify-between gap-2 rounded-xl border border-[#DDD6FE] bg-[#F5F3FF]/60 px-3 py-2 text-left text-xs hover:bg-[#EDE9FE]"
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <BookOpenCheck
+                              aria-hidden="true"
+                              className="size-3.5 shrink-0 text-[#6D28D9]"
+                            />
+                            <span className="truncate font-semibold text-[#0D1321]">
+                              {card.title}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-[10px] font-medium text-[#6D28D9]">
+                            {card.spaceName}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
           ) : null}
 
           <p className="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#505A6E]">

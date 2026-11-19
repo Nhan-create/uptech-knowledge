@@ -1,8 +1,19 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { QueryResultRow } from "pg";
+
 import {
   requestTransactionContextFromSession,
   withRequestTransaction,
   type DatabaseClient,
 } from "@/server/db/core";
+import { getPreviewWorkspaceContext } from "@/server/knowledge/access-context";
+import {
+  listKnowledgeCards,
+  listPersistedChatSessions,
+  loadKnowledgeDocumentsAndSpaces,
+} from "@/server/knowledge/repository";
 import type { AdminApiContext } from "./auth";
 
 export interface AdminDomainRecord {
@@ -152,6 +163,35 @@ export interface AdminSettingsRecord {
   readonly updatedAt: string | null;
 }
 
+export interface AdminContentGapItem {
+  readonly prompt: string;
+  readonly scope: string;
+  readonly evidenceState: string;
+  readonly feedback: string | null;
+  readonly askCount: number;
+  readonly lastAskedAt: string;
+}
+
+export interface AdminTopCitedDocItem {
+  readonly documentId: string;
+  readonly title: string;
+  readonly spaceName: string;
+  readonly citationCount: number;
+}
+
+export interface AdminKnowledgeAnalyticsRecord {
+  readonly turns30d: number;
+  readonly groundedTurns30d: number;
+  readonly cautionTurns30d: number;
+  readonly emptyTurns30d: number;
+  readonly positiveFeedback30d: number;
+  readonly negativeFeedback30d: number;
+  readonly verifiedCardsCount: number;
+  readonly draftCardsCount: number;
+  readonly contentGaps: readonly AdminContentGapItem[];
+  readonly topCitedDocs: readonly AdminTopCitedDocItem[];
+}
+
 export interface AdminBillingProfileRecord {
   readonly planCode: "STARTER" | "GROWTH" | "ENTERPRISE";
   readonly billingCycle: "MONTHLY" | "ANNUAL";
@@ -190,10 +230,499 @@ function toNullableString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+interface PreviewAdminState {
+  provisioningPolicy: "INVITE_ONLY" | "GOOGLE_GROUP_CONTROLLED" | "DOMAIN_AUTO_PROVISION";
+  members: Array<Record<string, unknown>>;
+  invites: Array<Record<string, unknown>>;
+  mappings: Array<Record<string, unknown>>;
+  settings: Record<string, unknown>;
+  billing: Record<string, unknown>;
+  auditEvents: Array<Record<string, unknown>>;
+}
+
+const PREVIEW_ADMIN_FILE = resolve(process.cwd(), ".uptech-data", "admin-preview.json");
+
+async function loadPreviewAdminState(workspaceId: string): Promise<PreviewAdminState> {
+  const nowIso = new Date().toISOString();
+  const defaults: PreviewAdminState = {
+    provisioningPolicy: "INVITE_ONLY",
+    members: [
+      {
+        membership_id: "00000000-0000-4000-8000-000000000003",
+        user_id: "00000000-0000-4000-8000-000000000002",
+        role: "OWNER",
+        status: "ACTIVE",
+        email: "admin@uptechlab.online",
+        full_name: "Quản trị viên Tổ chức (OWNER)",
+        picture_url: null,
+        hosted_domain: "uptechlab.online",
+        department: "Công nghệ & Quản trị Tri thức (IT)",
+        org_unit_path: "/Ban Điều Hành",
+        google_is_admin: true,
+        active_session_count: 1,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+    ],
+    invites: [],
+    mappings: [
+      {
+        mapping_id: "00000000-0000-4000-8000-000000000101",
+        source_kind: "DEPARTMENT",
+        source_value: "Engineering",
+        target_role: "MEMBER",
+        target_department_key: "IT",
+        status: "ACTIVE",
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      {
+        mapping_id: "00000000-0000-4000-8000-000000000102",
+        source_kind: "DEPARTMENT",
+        source_value: "Human Resources",
+        target_role: "MEMBER",
+        target_department_key: "HR",
+        status: "ACTIVE",
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+    ],
+    settings: {
+      workspace_id: workspaceId,
+      organization_name: "UPTECH Knowledge Enterprise (uptechlab.online)",
+      default_locale: "vi",
+      retention_days: 365,
+      max_upload_mb: 25,
+      allow_member_uploads: true,
+      require_verified_cards_in_chat: false,
+      pii_redaction_enabled: true,
+      audit_export_enabled: true,
+      updated_at: nowIso,
+    },
+    billing: {
+      workspace_id: workspaceId,
+      plan_code: "ENTERPRISE",
+      billing_cycle: "ANNUAL",
+      seat_limit: 1000,
+      storage_limit_mb: 204800,
+      monthly_ai_turn_limit: 100000,
+      billing_contact_email: "admin@uptechlab.online",
+      company_legal_name: "Công ty Cổ phần Công nghệ UPTECH",
+      tax_id: "0318000000",
+      updated_at: nowIso,
+    },
+    auditEvents: [
+      {
+        event_id: "00000000-0000-4000-8000-000000000901",
+        actor_kind: "USER",
+        actor_id: "00000000-0000-4000-8000-000000000002",
+        actor_email: "admin@uptechlab.online",
+        actor_name: "Quản trị viên Tổ chức (OWNER)",
+        action: "WORKSPACE_BOOTSTRAP_COMPLETED",
+        target_type: "WORKSPACE",
+        target_id: workspaceId,
+        outcome: "SUCCEEDED",
+        request_id: "00000000-0000-4000-8000-000000000999",
+        metadata: { domain: "uptechlab.online", policy: "INVITE_ONLY" },
+        occurred_at: nowIso,
+      },
+    ],
+  };
+
+  try {
+    const raw = await readFile(PREVIEW_ADMIN_FILE, "utf8");
+    const parsed = JSON.parse(raw) as Partial<PreviewAdminState>;
+    return {
+      provisioningPolicy: parsed.provisioningPolicy ?? defaults.provisioningPolicy,
+      members: Array.isArray(parsed.members) ? parsed.members : defaults.members,
+      invites: Array.isArray(parsed.invites) ? parsed.invites : defaults.invites,
+      mappings: Array.isArray(parsed.mappings) ? parsed.mappings : defaults.mappings,
+      settings: parsed.settings ? { ...defaults.settings, ...parsed.settings } : defaults.settings,
+      billing: parsed.billing ? { ...defaults.billing, ...parsed.billing } : defaults.billing,
+      auditEvents: Array.isArray(parsed.auditEvents) ? parsed.auditEvents : defaults.auditEvents,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+async function savePreviewAdminState(state: PreviewAdminState): Promise<void> {
+  try {
+    await mkdir(resolve(process.cwd(), ".uptech-data"), { recursive: true });
+    await writeFile(PREVIEW_ADMIN_FILE, JSON.stringify(state, null, 2), "utf8");
+  } catch {
+    // Ignore write failure
+  }
+}
+
+function createPreviewAdminClient(admin: AdminApiContext): DatabaseClient {
+  const previewAccess = getPreviewWorkspaceContext();
+  return {
+    release() {},
+    async query<R extends QueryResultRow = QueryResultRow>(
+      text: string,
+      values: readonly unknown[] = [],
+    ): Promise<{ readonly rows: readonly R[]; readonly rowCount: number | null }> {
+      const sql = text.trim();
+      const state = await loadPreviewAdminState(admin.workspaceId);
+      const nowIso = new Date().toISOString();
+
+      if (sql.includes("admin_get_workspace_overview_v1()")) {
+        const [{ spaces, documents }, cards, sessions] = await Promise.all([
+          loadKnowledgeDocumentsAndSpaces(previewAccess),
+          listKnowledgeCards(previewAccess),
+          listPersistedChatSessions(previewAccess),
+        ]);
+        const readyDocs = documents.filter((d) => d.summary.processing.kind === "ready");
+        const chunkCount = documents.reduce((acc, d) => acc + d.chunks.length, 0);
+        const storageBytes = documents.reduce((acc, d) => acc + (d.byteSize || 0), 0);
+        const aiTurns = sessions.reduce((acc, s) => acc + s.turns.length, 0);
+        const activeMembers = state.members.filter((m) => m.status === "ACTIVE");
+        const adminMembers = activeMembers.filter(
+          (m) => m.role === "OWNER" || m.role === "ADMIN",
+        );
+        const pendingInvites = state.invites.filter((i) => i.status === "PENDING");
+
+        const row = {
+          workspace_id: admin.workspaceId,
+          workspace_status: "ACTIVE",
+          provisioning_policy: state.provisioningPolicy,
+          google_customer_id: "C03uptech01",
+          created_at: nowIso,
+          updated_at: nowIso,
+          caller_role: admin.role,
+          active_member_count: activeMembers.length,
+          admin_member_count: adminMembers.length,
+          pending_invite_count: pendingInvites.length,
+          pending_access_request_count: 0,
+          active_session_count: 1,
+          space_count: spaces.length,
+          document_count: documents.length,
+          ready_document_count: readyDocs.length,
+          chunk_count: chunkCount,
+          storage_bytes: storageBytes,
+          knowledge_card_count: cards.length,
+          ai_turns_30d: aiTurns,
+          domains_json: [
+            {
+              domain: "uptechlab.online",
+              status: "VERIFIED",
+              domainKind: "PRIMARY",
+              verifiedAt: nowIso,
+            },
+          ],
+        };
+        return { rows: [row as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_get_knowledge_analytics_v1()")) {
+        const [{ documents }, cards, sessions] = await Promise.all([
+          loadKnowledgeDocumentsAndSpaces(previewAccess),
+          listKnowledgeCards(previewAccess),
+          listPersistedChatSessions(previewAccess),
+        ]);
+        const allTurns = sessions.flatMap((s) => s.turns);
+        const grounded = allTurns.filter((t) => t.evidenceState === "grounded").length;
+        const caution = allTurns.filter((t) => t.evidenceState === "caution").length;
+        const empty = allTurns.filter((t) => t.evidenceState === "empty").length;
+        const up = allTurns.filter((t) => t.feedback === "up").length;
+        const down = allTurns.filter((t) => t.feedback === "down").length;
+
+        const gapTurns = allTurns
+          .filter((t) => t.evidenceState === "empty" || t.feedback === "down")
+          .slice(0, 8)
+          .map((t) => ({
+            prompt: t.prompt,
+            scope: t.scope,
+            evidenceState: t.evidenceState,
+            feedback: t.feedback,
+            askCount: 1,
+            lastAskedAt: nowIso,
+          }));
+
+        const citationCounts = new Map<string, number>();
+        for (const t of allTurns) {
+          for (const c of t.citations) {
+            citationCounts.set(c.id, (citationCounts.get(c.id) ?? 0) + 1);
+          }
+        }
+        const topCitedDocs = documents
+          .map((d) => ({
+            documentId: d.summary.id,
+            title: d.summary.name,
+            spaceName: d.summary.space.name,
+            citationCount: citationCounts.get(d.summary.id) ?? d.chunks.length,
+          }))
+          .sort((a, b) => b.citationCount - a.citationCount)
+          .slice(0, 6);
+
+        const row = {
+          turns_30d: allTurns.length,
+          grounded_turns_30d: grounded,
+          caution_turns_30d: caution,
+          empty_turns_30d: empty,
+          positive_feedback_30d: up,
+          negative_feedback_30d: down,
+          verified_cards_count: cards.filter((c) => c.status === "verified").length,
+          draft_cards_count: cards.filter((c) => c.status === "draft").length,
+          content_gaps_json: gapTurns,
+          top_cited_docs_json: topCitedDocs,
+        };
+        return { rows: [row as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_list_members_v1()")) {
+        return { rows: state.members as unknown as R[], rowCount: state.members.length };
+      }
+
+      if (sql.includes("FROM uptech.workspace_member_invites")) {
+        return { rows: state.invites as unknown as R[], rowCount: state.invites.length };
+      }
+
+      if (sql.includes("admin_invite_member_v1(")) {
+        const email = String(values[0] ?? "").toLowerCase();
+        const role = String(values[1] ?? "MEMBER");
+        const dept = values[2] ? String(values[2]) : null;
+        const note = values[3] ? String(values[3]) : null;
+        const id = randomUUID();
+        const expiresAt = new Date(Date.now() + 14 * 86400_000).toISOString();
+        const inv = {
+          id,
+          invite_id: id,
+          normalized_email: email,
+          role,
+          department_key: dept,
+          status: "PENDING",
+          note,
+          provisioned_immediately: false,
+          created_at: nowIso,
+          expires_at: expiresAt,
+          accepted_at: null,
+        };
+        state.invites = [inv, ...state.invites];
+        await savePreviewAdminState(state);
+        return { rows: [inv as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("UPDATE uptech.workspace_member_invites")) {
+        const targetId = String(values[1] ?? "");
+        const matched = state.invites.find((i) => i.id === targetId);
+        if (!matched) return { rows: [], rowCount: 0 };
+        matched.status = "REVOKED";
+        await savePreviewAdminState(state);
+        return { rows: [matched as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_update_member_v1(")) {
+        const membershipId = String(values[0] ?? "");
+        const nextRole = values[1] ? String(values[1]) : null;
+        const nextStatus = values[2] ? String(values[2]) : null;
+        const member = state.members.find((m) => m.membership_id === membershipId);
+        if (member) {
+          if (nextRole) member.role = nextRole;
+          if (nextStatus) member.status = nextStatus;
+          member.updated_at = nowIso;
+          await savePreviewAdminState(state);
+          return { rows: [member as unknown as R], rowCount: 1 };
+        }
+        throw Object.assign(new Error("member not found"), { code: "P0002" });
+      }
+
+      if (sql.includes("admin_list_access_requests_v1()")) {
+        return { rows: [], rowCount: 0 };
+      }
+
+      if (sql.includes("admin_list_directory_groups_v1()")) {
+        const groups = [
+          { google_group_id: "grp-admins", group_name: "admins@uptechlab.online", member_count: 2 },
+          { google_group_id: "grp-eng", group_name: "engineering@uptechlab.online", member_count: 14 },
+          { google_group_id: "grp-hr", group_name: "hr@uptechlab.online", member_count: 5 },
+        ];
+        return { rows: groups as unknown as R[], rowCount: groups.length };
+      }
+
+      if (sql.includes("admin_list_directory_org_units_v1()")) {
+        const ous = [
+          { google_org_unit_id: "ou-root", org_unit_path: "/", parent_org_unit_id: null },
+          { google_org_unit_id: "ou-eng", org_unit_path: "/Khối Công Nghệ", parent_org_unit_id: "ou-root" },
+          { google_org_unit_id: "ou-hr", org_unit_path: "/Khối Nhân Sự & Vận Hành", parent_org_unit_id: "ou-root" },
+        ];
+        return { rows: ous as unknown as R[], rowCount: ous.length };
+      }
+
+      if (sql.includes("admin_list_permission_mappings_v1()")) {
+        return { rows: state.mappings as unknown as R[], rowCount: state.mappings.length };
+      }
+
+      if (sql.includes("admin_upsert_permission_mapping_v1(")) {
+        const sourceKind = String(values[0] ?? "DEPARTMENT");
+        const sourceValue = String(values[1] ?? "");
+        const targetDept = values[2] ? String(values[2]) : null;
+        const status = String(values[3] ?? "ACTIVE");
+        const mapping = {
+          mapping_id: randomUUID(),
+          source_kind: sourceKind,
+          source_value: sourceValue,
+          target_role: sourceKind === "ADMIN_GROUP" ? "ADMIN" : "MEMBER",
+          target_department_key: sourceKind === "ADMIN_GROUP" ? null : targetDept,
+          status,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+        state.mappings = [
+          mapping,
+          ...state.mappings.filter(
+            (m) => !(m.source_kind === sourceKind && m.source_value === sourceValue),
+          ),
+        ];
+        await savePreviewAdminState(state);
+        return { rows: [mapping as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_delete_permission_mapping_v1(")) {
+        const id = String(values[0] ?? "");
+        state.mappings = state.mappings.filter((m) => m.mapping_id !== id);
+        await savePreviewAdminState(state);
+        return {
+          rows: [{ admin_delete_permission_mapping_v1: true } as unknown as R],
+          rowCount: 1,
+        };
+      }
+
+      if (sql.includes("admin_list_connectors_v1()")) {
+        const conn = {
+          connector_id: "00000000-0000-4000-8000-000000000501",
+          purpose: "DIRECTORY",
+          status: "ACTIVE",
+          provider_customer_id: "C03uptech01",
+          authorized_scopes: [
+            "https://www.googleapis.com/auth/admin.directory.user.readonly",
+            "https://www.googleapis.com/auth/admin.directory.group.readonly",
+            "https://www.googleapis.com/auth/admin.directory.orgunit.readonly",
+            "https://www.googleapis.com/auth/admin.directory.domain.readonly",
+          ],
+          has_credential: true,
+          created_at: nowIso,
+          updated_at: nowIso,
+          latest_generation_status: "ACTIVE",
+          latest_generation_completed_at: nowIso,
+          latest_generation_fresh_until: new Date(Date.now() + 86400_000).toISOString(),
+          synced_user_count: state.members.length,
+          synced_group_count: 3,
+        };
+        return { rows: [conn as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_list_sync_jobs_v1(")) {
+        const job = {
+          job_id: "00000000-0000-4000-8000-000000000601",
+          connector_id: "00000000-0000-4000-8000-000000000501",
+          job_kind: "GOOGLE_DIRECTORY_SYNC",
+          status: "SUCCEEDED",
+          attempt_count: 1,
+          max_attempts: 5,
+          last_error_code: null,
+          created_at: nowIso,
+          completed_at: nowIso,
+        };
+        return { rows: [job as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_list_audit_events_v1(")) {
+        return {
+          rows: state.auditEvents as unknown as R[],
+          rowCount: state.auditEvents.length,
+        };
+      }
+
+      if (sql.includes("admin_write_audit_event_v1(")) {
+        const evt = {
+          event_id: randomUUID(),
+          actor_kind: "USER",
+          actor_id: admin.actorId,
+          actor_email: "admin@uptechlab.online",
+          actor_name: "Quản trị viên Tổ chức (OWNER)",
+          action: String(values[0] ?? "ADMIN_ACTION"),
+          target_type: String(values[1] ?? "WORKSPACE"),
+          target_id: values[2] ? String(values[2]) : admin.workspaceId,
+          outcome: String(values[3] ?? "SUCCEEDED"),
+          request_id: String(values[4] ?? admin.requestId),
+          metadata:
+            typeof values[5] === "string"
+              ? (JSON.parse(values[5]) as Record<string, unknown>)
+              : {},
+          occurred_at: nowIso,
+        };
+        state.auditEvents = [evt, ...state.auditEvents].slice(0, 100);
+        await savePreviewAdminState(state);
+        return { rows: [], rowCount: 1 };
+      }
+
+      if (sql.includes("INSERT INTO uptech.workspace_settings")) {
+        state.settings = {
+          ...state.settings,
+          organization_name: String(values[1] ?? state.settings.organization_name),
+          default_locale: String(values[2] ?? "vi"),
+          retention_days: Number(values[3] ?? 365),
+          max_upload_mb: Number(values[4] ?? 25),
+          allow_member_uploads: Boolean(values[5]),
+          require_verified_cards_in_chat: Boolean(values[6]),
+          audit_export_enabled: Boolean(values[7]),
+          updated_at: nowIso,
+        };
+        await savePreviewAdminState(state);
+        return { rows: [state.settings as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("FROM uptech.workspace_settings")) {
+        return { rows: [state.settings as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("admin_update_provisioning_policy_v1(")) {
+        const pol = String(values[0] ?? "INVITE_ONLY");
+        state.provisioningPolicy =
+          pol === "GOOGLE_GROUP_CONTROLLED"
+            ? "GOOGLE_GROUP_CONTROLLED"
+            : pol === "DOMAIN_AUTO_PROVISION"
+              ? "DOMAIN_AUTO_PROVISION"
+              : "INVITE_ONLY";
+        await savePreviewAdminState(state);
+        return { rows: [], rowCount: 1 };
+      }
+
+      if (sql.includes("INSERT INTO uptech.workspace_billing_profiles")) {
+        state.billing = {
+          ...state.billing,
+          plan_code: String(values[1] ?? "ENTERPRISE"),
+          billing_cycle: String(values[2] ?? "ANNUAL"),
+          seat_limit: Number(values[3] ?? 1000),
+          storage_limit_mb: Number(values[4] ?? 204800),
+          monthly_ai_turn_limit: Number(values[5] ?? 100000),
+          billing_contact_email: values[6] ? String(values[6]) : null,
+          company_legal_name: values[7] ? String(values[7]) : null,
+          tax_id: values[8] ? String(values[8]) : null,
+          updated_at: nowIso,
+        };
+        await savePreviewAdminState(state);
+        return { rows: [state.billing as unknown as R], rowCount: 1 };
+      }
+
+      if (sql.includes("FROM uptech.workspace_billing_profiles")) {
+        return { rows: [state.billing as unknown as R], rowCount: 1 };
+      }
+
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as DatabaseClient;
+}
+
 async function runAdminTx<T>(
   admin: AdminApiContext,
   work: (client: DatabaseClient) => Promise<T>,
 ): Promise<T> {
+  if (admin.isPreviewMode) {
+    return work(createPreviewAdminClient(admin));
+  }
   return withRequestTransaction(
     requestTransactionContextFromSession(
       admin.session.context,
@@ -928,12 +1457,71 @@ const PLAN_DEFAULTS: Record<
   ENTERPRISE: { seatLimit: 1000, storageLimitMb: 204800, monthlyAiTurnLimit: 100000 },
 };
 
+async function queryKnowledgeAnalyticsInTx(
+  client: DatabaseClient,
+): Promise<AdminKnowledgeAnalyticsRecord> {
+  try {
+    const res = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_get_knowledge_analytics_v1()",
+    );
+    const row = res.rows[0];
+    if (!row) {
+      throw new Error("no analytics row");
+    }
+    const rawGaps = Array.isArray(row.content_gaps_json) ? row.content_gaps_json : [];
+    const rawDocs = Array.isArray(row.top_cited_docs_json) ? row.top_cited_docs_json : [];
+
+    return {
+      turns30d: Number(row.turns_30d ?? 0),
+      groundedTurns30d: Number(row.grounded_turns_30d ?? 0),
+      cautionTurns30d: Number(row.caution_turns_30d ?? 0),
+      emptyTurns30d: Number(row.empty_turns_30d ?? 0),
+      positiveFeedback30d: Number(row.positive_feedback_30d ?? 0),
+      negativeFeedback30d: Number(row.negative_feedback_30d ?? 0),
+      verifiedCardsCount: Number(row.verified_cards_count ?? 0),
+      draftCardsCount: Number(row.draft_cards_count ?? 0),
+      contentGaps: rawGaps
+        .filter((g): g is Record<string, unknown> => typeof g === "object" && g !== null)
+        .map((g) => ({
+          prompt: String(g.prompt ?? ""),
+          scope: String(g.scope ?? "workspace"),
+          evidenceState: String(g.evidenceState ?? "empty"),
+          feedback: typeof g.feedback === "string" ? g.feedback : null,
+          askCount: Number(g.askCount ?? 1),
+          lastAskedAt: toIso(g.lastAskedAt),
+        })),
+      topCitedDocs: rawDocs
+        .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
+        .map((d) => ({
+          documentId: String(d.documentId ?? ""),
+          title: String(d.title ?? ""),
+          spaceName: String(d.spaceName ?? ""),
+          citationCount: Number(d.citationCount ?? 0),
+        })),
+    };
+  } catch {
+    return {
+      turns30d: 0,
+      groundedTurns30d: 0,
+      cautionTurns30d: 0,
+      emptyTurns30d: 0,
+      positiveFeedback30d: 0,
+      negativeFeedback30d: 0,
+      verifiedCardsCount: 0,
+      draftCardsCount: 0,
+      contentGaps: [],
+      topCitedDocs: [],
+    };
+  }
+}
+
 export async function loadAdminBillingBundle(admin: AdminApiContext): Promise<{
   readonly overview: AdminWorkspaceOverview;
   readonly billing: AdminBillingProfileRecord;
+  readonly analytics: AdminKnowledgeAnalyticsRecord;
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, billingRes] = await Promise.all([
+    const [overview, billingRes, analytics] = await Promise.all([
       queryOverviewInTx(client),
       client.query<Record<string, unknown>>(
         `SELECT plan_code, billing_cycle, seat_limit, storage_limit_mb,
@@ -943,6 +1531,7 @@ export async function loadAdminBillingBundle(admin: AdminApiContext): Promise<{
          WHERE workspace_id = $1`,
         [admin.workspaceId],
       ),
+      queryKnowledgeAnalyticsInTx(client),
     ]);
 
     const row = billingRes.rows[0];
@@ -973,7 +1562,7 @@ export async function loadAdminBillingBundle(admin: AdminApiContext): Promise<{
           updatedAt: null,
         };
 
-    return { overview, billing };
+    return { overview, billing, analytics };
   });
 }
 

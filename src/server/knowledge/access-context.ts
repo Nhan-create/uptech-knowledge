@@ -1,17 +1,27 @@
-import { requireCurrentDirectoryAuthority } from "@/server/auth/directory-authority";
+import {
+  loadCurrentDirectoryPermissionContext,
+} from "@/server/auth/directory-authority";
 import { loadWebSessionRuntimeConfig } from "@/server/auth/google/config";
 import {
   authenticateWebSession,
+  type AuthenticatedWebSession,
   WebSessionAuthenticationError,
 } from "@/server/auth/web-session";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
 import { classifyRequestCredential } from "@/server/http/request-security";
+
+export type WorkspaceDepartmentKey = "SALES" | "HR" | "IT" | "FINANCE";
+export type SpaceAccessScope = "WORKSPACE" | "DEPARTMENT" | "ADMIN_ONLY";
 
 export interface WorkspaceAccessContext {
   readonly mode: "authenticated" | "preview";
   readonly workspaceId: string;
   readonly membershipId: string;
   readonly actorLabel: string;
+  readonly workspaceRole: "OWNER" | "ADMIN" | "MEMBER";
+  readonly departmentKey: WorkspaceDepartmentKey | null;
+  readonly userId?: string;
+  readonly session?: AuthenticatedWebSession;
 }
 
 export class WorkspaceAccessError extends Error {
@@ -46,7 +56,32 @@ export function getPreviewWorkspaceContext(): WorkspaceAccessContext {
     workspaceId: PREVIEW_WORKSPACE_ID,
     membershipId: PREVIEW_MEMBERSHIP_ID,
     actorLabel: "Thành viên UPTECH",
+    workspaceRole: "OWNER",
+    departmentKey: null,
   };
+}
+
+export function canAccessKnowledgeSpace(
+  access: WorkspaceAccessContext,
+  space: Readonly<{
+    accessScope?: SpaceAccessScope;
+    allowedDepartmentKey?: WorkspaceDepartmentKey | null;
+  }>,
+): boolean {
+  if (access.workspaceRole === "OWNER" || access.workspaceRole === "ADMIN") {
+    return true;
+  }
+  const scope = space.accessScope ?? "WORKSPACE";
+  if (scope === "WORKSPACE") return true;
+  if (scope === "ADMIN_ONLY") return false;
+  if (scope === "DEPARTMENT") {
+    return (
+      space.allowedDepartmentKey !== null &&
+      space.allowedDepartmentKey !== undefined &&
+      access.departmentKey === space.allowedDepartmentKey
+    );
+  }
+  return false;
 }
 
 export function isSameOriginWorkspaceRequest(request: Request): boolean {
@@ -60,6 +95,40 @@ export function isSameOriginWorkspaceRequest(request: Request): boolean {
   } catch {
     return false;
   }
+}
+
+export async function resolveWorkspaceServerAccess(
+  headers: Headers,
+): Promise<WorkspaceAccessContext | null> {
+  const credential = classifyRequestCredential(headers);
+  if (credential.ok && credential.kind === "cookie") {
+    try {
+      const config = loadWebSessionRuntimeConfig();
+      const pool = getRuntimeDatabasePool(config.databaseUrl);
+      const session = await authenticateWebSession(headers, config.sessionPepper, pool);
+      const directoryContext = await loadCurrentDirectoryPermissionContext(session, pool);
+      if (directoryContext) {
+        return {
+          mode: "authenticated",
+          workspaceId: session.context.workspaceId,
+          membershipId: session.context.membershipId,
+          actorLabel: session.context.actorId,
+          workspaceRole: directoryContext.membershipRole,
+          departmentKey: directoryContext.departmentKey,
+          userId: session.context.actorId,
+          session,
+        };
+      }
+    } catch {
+      // Fall through to preview mode only when explicitly enabled outside production.
+    }
+  }
+
+  if (isWorkspacePreviewModeEnabled()) {
+    return getPreviewWorkspaceContext();
+  }
+
+  return null;
 }
 
 export async function resolveWorkspaceApiAccess(
@@ -83,12 +152,17 @@ export async function resolveWorkspaceApiAccess(
         config.sessionPepper,
         pool,
       );
-      if (await requireCurrentDirectoryAuthority(session, pool)) {
+      const directoryContext = await loadCurrentDirectoryPermissionContext(session, pool);
+      if (directoryContext) {
         return {
           mode: "authenticated",
           workspaceId: session.context.workspaceId,
           membershipId: session.context.membershipId,
           actorLabel: session.context.actorId,
+          workspaceRole: directoryContext.membershipRole,
+          departmentKey: directoryContext.departmentKey,
+          userId: session.context.actorId,
+          session,
         };
       }
     } catch (error) {

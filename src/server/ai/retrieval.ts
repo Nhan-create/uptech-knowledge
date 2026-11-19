@@ -37,8 +37,19 @@ export interface RankedChunkMatch {
 const SUMMARY_INTENT_PATTERN =
   /tom tat|tong hop|summary|summarize|overview|tat ca|all docs/iu;
 
+const ENTERPRISE_SYNONYM_MAP: Readonly<Record<string, readonly string[]>> = {
+  wfh: ["lam", "viec", "tu", "xa", "remote"],
+  remote: ["tu", "xa", "hybrid"],
+  hr: ["nhan", "su", "nghi", "phep", "onboarding"],
+  sla: ["cam", "ket", "phan", "hoi", "xu", "ly", "incident"],
+  adr: ["quyet", "dinh", "kien", "truc", "decision"],
+  mfa: ["xac", "thuc", "hai", "lop", "bao", "mat", "vpn"],
+  security: ["bao", "mat", "an", "toan", "thong", "tin"],
+  handover: ["ban", "giao", "du", "an", "atlas"],
+};
+
 export function tokenizeQuery(query: string): string[] {
-  return Array.from(
+  const baseTokens = Array.from(
     new Set(
       normalizeFold(query)
         .split(/[\s,.;:!?()[\]{}"'\/\\-]+/u)
@@ -46,6 +57,14 @@ export function tokenizeQuery(query: string): string[] {
         .filter((token) => token.length >= 2),
     ),
   );
+  const expanded = new Set<string>(baseTokens);
+  for (const token of baseTokens) {
+    const synonyms = ENTERPRISE_SYNONYM_MAP[token];
+    if (synonyms) {
+      for (const syn of synonyms) expanded.add(syn);
+    }
+  }
+  return Array.from(expanded);
 }
 
 function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
@@ -154,6 +173,28 @@ export async function rankReadyChunksHybrid(args: Readonly<{
   }
 
   ranked.sort((a, b) => b.score - a.score);
+
+  if (ranked.length > 1 && queryEmbedding) {
+    const byLexical = [...ranked].sort((a, b) => b.score - a.score);
+    const bySemantic = [...ranked].sort((a, b) => b.semanticScore - a.semanticScore);
+    const lexRankMap = new Map<string, number>();
+    const semRankMap = new Map<string, number>();
+    byLexical.forEach((item, idx) => lexRankMap.set(item.chunk.chunkId, idx + 1));
+    bySemantic.forEach((item, idx) => semRankMap.set(item.chunk.chunkId, idx + 1));
+
+    const rrfScored = ranked.map((item) => {
+      const lRank = lexRankMap.get(item.chunk.chunkId) ?? 100;
+      const sRank = semRankMap.get(item.chunk.chunkId) ?? 100;
+      const rrfBonus = (1 / (60 + lRank) + 1 / (60 + sRank)) * 120;
+      return {
+        ...item,
+        score: item.score + rrfBonus,
+      };
+    });
+    rrfScored.sort((a, b) => b.score - a.score);
+    return rrfScored;
+  }
+
   return ranked;
 }
 
@@ -221,6 +262,7 @@ export async function retrieveReadyPassagesForChat(args: Readonly<{
 
   const citations: ChatCitationSource[] = passages.map((p) => ({
     id: p.document.summary.id,
+    chunkId: p.chunk.chunkId,
     number: p.number,
     title: p.document.summary.name,
     fileType: p.document.summary.fileType,

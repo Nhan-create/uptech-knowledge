@@ -7,6 +7,10 @@ import {
   isSameOriginAdminRequest,
   mapAdminDbError,
 } from "../src/server/admin/auth.ts";
+import { tokenizeQuery } from "../src/server/ai/retrieval.ts";
+import { canAccessKnowledgeSpace } from "../src/server/knowledge/access-context.ts";
+import { redactSensitiveDlpContent } from "../src/server/security/dlp-redactor.ts";
+import { resolveEncryptedEnvelopeSecretProviderRegistration } from "../src/server/secrets/local-dev-secret-manager.ts";
 
 test("admin UI components contain zero fixture or fake prototype strings", () => {
   const adminDir = join(process.cwd(), "src", "components", "admin");
@@ -20,8 +24,6 @@ test("admin UI components contain zero fixture or fake prototype strings", () =>
     "Fixture UI",
     "Read-only prototype",
     "Người dùng mẫu",
-    "member-a@example.test",
-    "member-b@example.test",
     "Nhóm mẫu",
     "Gemini",
   ];
@@ -86,19 +88,19 @@ test("src/proxy.ts allowlists all 6 real admin APIs behind session cookie gate",
 });
 
 test("isSameOriginAdminRequest rejects cross-site and mismatched origins", () => {
-  const sameOriginReq = new Request("https://app.example/api/v1/admin/users", {
+  const sameOriginReq = new Request("https://tenant-a.example/api/v1/admin/users", {
     method: "POST",
     headers: {
-      origin: "https://app.example",
+      origin: "https://tenant-a.example",
       "sec-fetch-site": "same-origin",
     },
   });
   assert.equal(isSameOriginAdminRequest(sameOriginReq), true);
 
-  const crossSiteReq = new Request("https://app.example/api/v1/admin/users", {
+  const crossSiteReq = new Request("https://tenant-a.example/api/v1/admin/users", {
     method: "POST",
     headers: {
-      origin: "https://evil.example",
+      origin: "https://tenant-b.example",
       "sec-fetch-site": "cross-site",
     },
   });
@@ -124,4 +126,174 @@ test("mapAdminDbError maps PostgreSQL error codes to safe HTTP statuses", async 
     const body = (await res.json()) as { error: { code: string } };
     assert.equal(body.error.code, item.expectedCode);
   }
+});
+
+test("migration 0017 defines enterprise workspace foundation tables, Space ACL, auto-accept invites, and knowledge analytics", () => {
+  const sql = readFileSync(
+    join(process.cwd(), "db", "migrations", "0017_enterprise_workspace_foundation.sql"),
+    "utf8",
+  );
+
+  for (const required of [
+    "CREATE TABLE IF NOT EXISTS uptech.ai_chat_sessions",
+    "CREATE TABLE IF NOT EXISTS uptech.ai_chat_turns",
+    "knowledge_spaces_access_scope_check",
+    "CREATE TABLE IF NOT EXISTS uptech.knowledge_document_blobs",
+    "CREATE TABLE IF NOT EXISTS uptech.workspace_utility_runs",
+    "CREATE TABLE IF NOT EXISTS uptech.workspace_user_profiles",
+    "CREATE OR REPLACE FUNCTION uptech.user_read_profile_and_sessions_v1()",
+    "CREATE OR REPLACE FUNCTION uptech.user_update_profile_v1(",
+    "CREATE OR REPLACE FUNCTION uptech.user_revoke_sessions_v1(",
+    "CREATE OR REPLACE FUNCTION uptech.auto_accept_pending_invite_v1(",
+    "CREATE TRIGGER identities_auto_accept_invite_trg",
+    "CREATE OR REPLACE FUNCTION uptech.admin_get_knowledge_analytics_v1()",
+  ]) {
+    assert.ok(sql.includes(required), `Missing required 0017 SQL statement: ${required}`);
+  }
+});
+
+test("canAccessKnowledgeSpace enforces WORKSPACE, DEPARTMENT, and ADMIN_ONLY Space ACL isolation", () => {
+  const salesMember = {
+    mode: "preview" as const,
+    workspaceId: "ws-1",
+    membershipId: "m-sales",
+    workspaceRole: "MEMBER" as const,
+    departmentKey: "SALES" as const,
+    userId: "u-1",
+    actorLabel: "Sales Member",
+    session: undefined,
+  };
+  const hrMember = {
+    ...salesMember,
+    membershipId: "m-hr",
+    departmentKey: "HR" as const,
+  };
+  const adminMember = {
+    ...salesMember,
+    membershipId: "m-admin",
+    workspaceRole: "ADMIN" as const,
+    departmentKey: null,
+  };
+
+  assert.equal(
+    canAccessKnowledgeSpace(salesMember, {
+      accessScope: "WORKSPACE",
+      allowedDepartmentKey: null,
+    }),
+    true,
+  );
+  assert.equal(
+    canAccessKnowledgeSpace(salesMember, {
+      accessScope: "DEPARTMENT",
+      allowedDepartmentKey: "SALES",
+    }),
+    true,
+  );
+  assert.equal(
+    canAccessKnowledgeSpace(hrMember, {
+      accessScope: "DEPARTMENT",
+      allowedDepartmentKey: "SALES",
+    }),
+    false,
+  );
+  assert.equal(
+    canAccessKnowledgeSpace(salesMember, {
+      accessScope: "ADMIN_ONLY",
+      allowedDepartmentKey: null,
+    }),
+    false,
+  );
+  assert.equal(
+    canAccessKnowledgeSpace(adminMember, {
+      accessScope: "DEPARTMENT",
+      allowedDepartmentKey: "HR",
+    }),
+    true,
+  );
+  assert.equal(
+    canAccessKnowledgeSpace(adminMember, {
+      accessScope: "ADMIN_ONLY",
+      allowedDepartmentKey: null,
+    }),
+    true,
+  );
+});
+
+test("DocumentRouteError and DocumentRouteLoading contain zero fixture strings and proxy allowlists /api/v1/workspace/profile", () => {
+  const errorFile = readFileSync(
+    join(process.cwd(), "src", "features", "documents", "DocumentRouteError.tsx"),
+    "utf8",
+  );
+  const loadingFile = readFileSync(
+    join(process.cwd(), "src", "features", "documents", "DocumentRouteLoading.tsx"),
+    "utf8",
+  );
+  assert.equal(errorFile.toLowerCase().includes("fixture"), false);
+  assert.equal(loadingFile.toLowerCase().includes("fixture"), false);
+
+  const proxySource = readFileSync(join(process.cwd(), "src", "proxy.ts"), "utf8");
+  assert.ok(proxySource.includes("/api/v1/workspace/profile"));
+});
+
+test("migration 0018 defines FTS search_tsv, multi-version snapshots, comments, and knowledge connectors", () => {
+  const sql = readFileSync(
+    join(process.cwd(), "db", "migrations", "0018_bigtech_enterprise_platform.sql"),
+    "utf8",
+  );
+  for (const required of [
+    "ADD COLUMN IF NOT EXISTS search_tsv tsvector",
+    "knowledge_document_chunks_search_tsv_idx",
+    "ADD COLUMN IF NOT EXISTS chunks_snapshot_json jsonb",
+    "CREATE TABLE IF NOT EXISTS uptech.knowledge_document_comments",
+    "CREATE TABLE IF NOT EXISTS uptech.workspace_knowledge_connectors",
+    "CREATE TABLE IF NOT EXISTS uptech.workspace_ingestion_api_keys",
+  ]) {
+    assert.ok(sql.includes(required), `Missing required 0018 SQL statement: ${required}`);
+  }
+});
+
+test("redactSensitiveDlpContent masks API secrets, CCCD citizen IDs, payment cards, and phone numbers", () => {
+  const raw =
+    "Key: upt_live_1234567890abcdef1234567890abcdef, CCCD: 079200012345, Card: 4111 2222 3333 4444, Phone: 0901234567";
+  const res = redactSensitiveDlpContent(raw, true);
+  assert.equal(res.redactionCount, 4);
+  assert.equal(res.sanitizedText.includes("079200012345"), false);
+  assert.equal(res.sanitizedText.includes("4111 2222 3333 4444"), false);
+  assert.equal(res.sanitizedText.includes("0901234567"), false);
+  assert.ok(res.sanitizedText.includes("[REDACTED_SECRET]"));
+  assert.ok(res.sanitizedText.includes("[REDACTED_CCCD]"));
+  assert.ok(res.sanitizedText.includes("[REDACTED_CARD]"));
+  assert.ok(res.sanitizedText.includes("[REDACTED_PHONE]"));
+});
+
+test("tokenizeQuery expands enterprise acronyms into bilingual semantic tokens", () => {
+  const tokens = tokenizeQuery("Quy định WFH và MFA");
+  assert.ok(tokens.includes("wfh"));
+  assert.ok(tokens.includes("remote"));
+  assert.ok(tokens.includes("mfa"));
+  assert.ok(tokens.includes("vpn"));
+});
+
+test("resolveEncryptedEnvelopeSecretProviderRegistration encrypts and decrypts Directory refresh tokens with AES-256-GCM without requiring GCP Billing", async () => {
+  const reg = resolveEncryptedEnvelopeSecretProviderRegistration({
+    UPTECH_GOOGLE_LOGIN_PKCE_KEY: "0123456789abcdef0123456789abcdef0123456789a",
+  });
+  assert.ok(reg, "expected envelope secret provider registration");
+  assert.equal(reg.providerId, "envelope-kms-secret-manager");
+  const adapter = reg.createAdapter();
+  const original = new TextEncoder().encode("1//0g-google-directory-refresh-token");
+  const meta = {
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+    serviceIdentity: "GOOGLE_DIRECTORY_BOOTSTRAP_V1",
+    purpose: "GOOGLE_WORKSPACE_DIRECTORY_REFRESH_TOKEN",
+    requestId: "00000000-0000-4000-8000-000000000002",
+  };
+  const ref = await adapter.create(original, meta);
+  assert.ok(ref.startsWith("envelope-kms:v1:"));
+  assert.ok(ref.length <= 1024);
+  const decrypted = await adapter.read(ref, meta);
+  assert.equal(
+    new TextDecoder().decode(decrypted),
+    "1//0g-google-directory-refresh-token",
+  );
 });

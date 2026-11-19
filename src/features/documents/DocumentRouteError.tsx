@@ -14,11 +14,10 @@ export function DocumentRouteError({
       <section className="rounded-2xl border border-[#FACACA] bg-[#FFF8F8] px-5 py-12 text-center">
         <CircleAlert aria-hidden="true" className="mx-auto size-9 text-[#B32018]" />
         <h1 className="mt-4 text-xl font-bold text-[#0D1321]">
-          Không thể đọc dữ liệu fixture
+          Không thể tải tài liệu lúc này
         </h1>
         <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-[#505A6E]">
-          Đây là lỗi render hoặc adapter cục bộ; không nên diễn giải thành lỗi quyền
-          hay trạng thái của tài liệu thật.
+          Kết nối hoặc truy xuất tài liệu đang tạm thời bị gián đoạn. Vui lòng thử tải lại trang.
         </p>
         <button
           type="button"

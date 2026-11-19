@@ -7,6 +7,7 @@ import { resolveAdminContextFromHeaders } from "@/server/admin/auth";
 import { getAdminShellMetadata } from "@/server/admin/repository";
 import { readCurrentUserProfile } from "@/server/auth/user-profile";
 import { resolveWebRouteAuthority } from "@/server/auth/web-route-authority";
+import { isWorkspacePreviewModeEnabled } from "@/server/knowledge/access-context";
 
 export const dynamic = "force-dynamic";
 
@@ -14,11 +15,13 @@ export default async function AdminLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
   const requestHeaders = await headers();
-  const authority = await resolveWebRouteAuthority(requestHeaders, "ADMIN");
-  if (authority === "HOME") redirect("/home");
-  if (authority === "LOGIN") redirect("/login?error=session_expired");
-  if (authority !== "ALLOW") {
-    throw new Error("Unexpected admin route authority");
+  if (!isWorkspacePreviewModeEnabled()) {
+    const authority = await resolveWebRouteAuthority(requestHeaders, "ADMIN");
+    if (authority === "HOME") redirect("/home");
+    if (authority === "LOGIN") redirect("/login?error=session_expired");
+    if (authority !== "ALLOW") {
+      throw new Error("Unexpected admin route authority");
+    }
   }
 
   const [userProfile, adminContext] = await Promise.all([

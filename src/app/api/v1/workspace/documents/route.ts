@@ -9,7 +9,9 @@ import { embedTextWithGemini, readGeminiConfig } from "@/server/ai/gemini-client
 import {
   createUploadedKnowledgeDocument,
   loadKnowledgeDocumentsAndSpaces,
+  loadWorkspacePolicySettings,
 } from "@/server/knowledge/repository";
+import { redactSensitiveDlpContent } from "@/server/security/dlp-redactor";
 import type { Locale } from "@/lib/preferences";
 import {
   authorizeWorkspaceApi,
@@ -47,6 +49,16 @@ export async function POST(request: Request): Promise<Response> {
   const auth = await authorizeWorkspaceApi(request, requestId);
   if (!auth.ok) return auth.response;
 
+  const policy = await loadWorkspacePolicySettings(auth.access);
+  if (auth.access.workspaceRole === "MEMBER" && !policy.allowMemberUploads) {
+    return workspaceError(
+      403,
+      "MEMBER_UPLOADS_DISABLED",
+      "Quản trị viên tổ chức hiện đang giới hạn quyền tải lên tài liệu chỉ dành cho OWNER và ADMIN.",
+      requestId,
+    );
+  }
+
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -75,11 +87,15 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  if (fileEntry.size <= 0 || fileEntry.size > MAX_SERVER_UPLOAD_BYTES) {
+  const maxAllowedBytes = Math.min(
+    Math.max(1, policy.maxUploadMb) * 1024 * 1024,
+    100 * 1024 * 1024,
+  );
+  if (fileEntry.size <= 0 || fileEntry.size > maxAllowedBytes) {
     return workspaceError(
       413,
       "INVALID_FILE_SIZE",
-      "Uploaded file size must be between 1 byte and 10 MB.",
+      `Kích thước tệp phải nằm trong khoảng 1 byte đến ${policy.maxUploadMb} MB theo thiết lập của tổ chức.`,
       requestId,
     );
   }
@@ -93,12 +109,18 @@ export async function POST(request: Request): Promise<Response> {
       : "space-hr";
 
   const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-  const chunks = await parseUploadedDocumentChunks({
+  const rawChunks = await parseUploadedDocumentChunks({
     fileName,
     extension,
     bytes,
     locale,
   });
+  const chunks = policy.piiRedactionEnabled
+    ? rawChunks.map((chunk) => ({
+        ...chunk,
+        content: redactSensitiveDlpContent(chunk.content, true).sanitizedText,
+      }))
+    : rawChunks;
 
   const embeddings: Array<readonly number[] | null> = readGeminiConfig()
     ? await Promise.all(

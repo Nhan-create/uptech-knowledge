@@ -287,7 +287,10 @@ const CHAT_COPY = {
 } as const;
 
 function isContextScopeType(value: string): value is ContextScopeType {
-  return CONTEXT_SCOPE_VALUES.includes(value as ContextScopeType);
+  return (
+    CONTEXT_SCOPE_VALUES.includes(value as ContextScopeType) ||
+    /^space:[a-zA-Z0-9_-]{2,80}$/u.test(value)
+  );
 }
 
 function getCitationPreviewPosition(
@@ -630,7 +633,11 @@ function SourceReaderFooter({
         </p>
       ) : (
         <Link
-          href={`/documents/${encodeURIComponent(source.id)}`}
+          href={
+            source.chunkId
+              ? `/documents/${encodeURIComponent(source.id)}?chunk=${encodeURIComponent(source.chunkId)}#chunk-${encodeURIComponent(source.chunkId)}`
+              : `/documents/${encodeURIComponent(source.id)}`
+          }
           className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-full border border-[#0D1321]/14 bg-white px-4 text-xs font-semibold text-[#0D1321] transition-colors hover:border-[#1B44FF] hover:bg-[#EEF1FF] hover:text-[#1635C7]"
         >
           <Link2 aria-hidden="true" className="size-3.5" />
@@ -999,7 +1006,10 @@ export function ChatDemo({
       try {
         const response = await fetch("/api/v1/workspace/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream, application/json",
+          },
           signal: controller.signal,
           body: JSON.stringify({
             prompt: currentPending.prompt,
@@ -1010,8 +1020,62 @@ export function ChatDemo({
             replaceTurnId: currentPending.replaceTurnId,
             locale,
             history: historyPayload,
+            stream: true,
           }),
         });
+
+        const contentType = response.headers.get("content-type") ?? "";
+        if (response.ok && contentType.includes("text/event-stream") && response.body) {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let finished = false;
+
+          while (!finished) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+
+            for (const block of blocks) {
+              let eventName = "message";
+              let dataLine = "";
+              for (const line of block.split("\n")) {
+                if (line.startsWith("event:")) {
+                  eventName = line.slice(6).trim();
+                } else if (line.startsWith("data:")) {
+                  dataLine += line.slice(5).trim();
+                }
+              }
+              if (!dataLine) continue;
+              try {
+                const parsed = JSON.parse(dataLine) as {
+                  stage?: RetrievalStage;
+                  ok?: boolean;
+                  session?: ChatSession;
+                  turn?: ChatTurn;
+                  error?: { message?: string };
+                };
+                if (eventName === "stage" && parsed.stage) {
+                  setRetrievalStage(parsed.stage);
+                } else if (eventName === "done" && parsed.ok && parsed.session && parsed.turn) {
+                  finishWithTurn(parsed.session, parsed.turn);
+                  finished = true;
+                } else if (eventName === "error") {
+                  setPendingTurn(null);
+                  setRetrievalStage("idle");
+                  setComposerMessage(parsed.error?.message ?? copy.chatApiError);
+                  setDraft((prev) => prev || currentPending.prompt);
+                  finished = true;
+                }
+              } catch {
+                // Ignore malformed SSE chunks
+              }
+            }
+          }
+          return;
+        }
 
         const payload = (await response.json().catch(() => null)) as {
           ok?: boolean;
@@ -2026,9 +2090,29 @@ export function ChatDemo({
                           scopeVal === "selected-documents" && selectedSources.length === 0
                         }
                       >
-                        {getContextScopeLabel(scopeVal, locale, selectedSources.length)}
+                        {getContextScopeLabel(scopeVal, locale, selectedSources.length, spaces)}
                       </option>
                     ))}
+                    {spaces
+                      .filter(
+                        (s) =>
+                          s.id !== "spc_8f2a01" &&
+                          s.id !== "spc_c14d72" &&
+                          s.id !== "spc_6be903",
+                      )
+                      .map((s) => {
+                        const customScope = `space:${s.id}` as ContextScopeType;
+                        return (
+                          <option key={customScope} value={customScope}>
+                            {getContextScopeLabel(
+                              customScope,
+                              locale,
+                              selectedSources.length,
+                              spaces,
+                            )}
+                          </option>
+                        );
+                      })}
                   </select>
                 </div>
 

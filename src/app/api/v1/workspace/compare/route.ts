@@ -1,4 +1,4 @@
-import { runtimeKnowledgeReadAdapter } from "@/server/knowledge/runtime-read-adapter";
+import { createKnowledgeReadAdapterForAccess } from "@/server/knowledge/runtime-read-adapter";
 import {
   authorizeWorkspaceApi,
   resolveRequestId,
@@ -24,7 +24,8 @@ export async function POST(request: Request): Promise<Response> {
   const leftId = typeof body.leftId === "string" ? body.leftId.trim() : "";
   const rightId = typeof body.rightId === "string" ? body.rightId.trim() : "";
 
-  const outcome = await runtimeKnowledgeReadAdapter.compare({
+  const adapter = createKnowledgeReadAdapterForAccess(auth.access);
+  const outcome = await adapter.compare({
     leftId: leftId || undefined,
     rightId: rightId || undefined,
   });

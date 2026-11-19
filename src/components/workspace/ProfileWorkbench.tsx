@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useSyncExternalStore, type FormEvent } from "react";
+import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -173,11 +173,50 @@ export function ProfileWorkbench({
   const [emailError, setEmailError] = useState<string | null>(null);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [dbProfile, setDbProfile] = useState<{
+    displayName: string | null;
+    jobTitle: string | null;
+    phone: string | null;
+    departmentOverride: string | null;
+  } | null>(null);
+  const [activeSessions, setActiveSessions] = useState<
+    ReadonlyArray<{
+      sessionId: string;
+      clientType: string;
+      createdAt: string;
+      lastSeenAt: string;
+      isCurrent: boolean;
+    }>
+  >([]);
+  const [sessionBusyId, setSessionBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/v1/workspace/profile", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.ok) return;
+        if (data.profile) {
+          setDbProfile(data.profile);
+        }
+        if (Array.isArray(data.sessions)) {
+          setActiveSessions(data.sessions);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const baseForm = buildInitialFormState(initialProfile);
   const form: ProfileFormState = {
     fullName:
-      initialProfile.fullName ?? edits.fullName ?? savedDraft?.fullName ?? baseForm.fullName,
+      initialProfile.fullName ??
+      edits.fullName ??
+      dbProfile?.displayName ??
+      savedDraft?.fullName ??
+      baseForm.fullName,
     email:
       initialProfile.email ?? edits.email ?? savedDraft?.email ?? baseForm.email,
     hostedDomain:
@@ -187,10 +226,19 @@ export function ProfileWorkbench({
       baseForm.hostedDomain,
     department:
       edits.department ??
+      dbProfile?.departmentOverride ??
       savedDraft?.department ??
       baseForm.department,
-    jobTitle: edits.jobTitle ?? savedDraft?.jobTitle ?? baseForm.jobTitle,
-    phone: edits.phone ?? savedDraft?.phone ?? baseForm.phone,
+    jobTitle:
+      edits.jobTitle ??
+      dbProfile?.jobTitle ??
+      savedDraft?.jobTitle ??
+      baseForm.jobTitle,
+    phone:
+      edits.phone ??
+      dbProfile?.phone ??
+      savedDraft?.phone ??
+      baseForm.phone,
     orgUnitPath:
       initialProfile.orgUnitPath ??
       edits.orgUnitPath ??
@@ -255,6 +303,30 @@ export function ProfileWorkbench({
           ? "Đã lưu thông tin hồ sơ trên trình duyệt này."
           : "Profile details saved in this browser.",
       );
+      void fetch("/api/v1/workspace/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          displayName: payload.fullName,
+          jobTitle: payload.jobTitle,
+          phone: payload.phone,
+          department: payload.department,
+        }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.ok && data.profile) {
+            setDbProfile(data.profile);
+            if (data.persisted === "database") {
+              setSaveMessage(
+                isVi
+                  ? "Đã lưu thông tin hồ sơ lên cơ sở dữ liệu tổ chức."
+                  : "Profile details saved to organization database.",
+              );
+            }
+          }
+        })
+        .catch(() => undefined);
     } catch {
       setSaveMessage(
         isVi
@@ -823,6 +895,97 @@ export function ProfileWorkbench({
             )}
           </Card>
         </div>
+
+        {activeSessions.length > 0 ? (
+          <Card className="mt-4 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#0D1321]/8 pb-3">
+              <div>
+                <h3 className="font-bold text-[#0D1321]">
+                  {isVi
+                    ? `Thiết bị & phiên đăng nhập đang hoạt động (${activeSessions.length})`
+                    : `Active devices & sessions (${activeSessions.length})`}
+                </h3>
+                <p className="text-xs text-[#505A6E]">
+                  {isVi
+                    ? "Bạn có thể thu hồi từ xa bất kỳ phiên đăng nhập nào trên thiết bị khác."
+                    : "You can remotely revoke any active session on another device."}
+                </p>
+              </div>
+              {activeSessions.length > 1 ? (
+                <button
+                  type="button"
+                  disabled={sessionBusyId === "ALL_OTHERS"}
+                  onClick={async () => {
+                    setSessionBusyId("ALL_OTHERS");
+                    try {
+                      const res = await fetch("/api/v1/workspace/profile?allOthers=true", {
+                        method: "DELETE",
+                      });
+                      const data = await res.json().catch(() => null);
+                      if (res.ok && data?.ok && Array.isArray(data.sessions)) {
+                        setActiveSessions(data.sessions);
+                      }
+                    } finally {
+                      setSessionBusyId(null);
+                    }
+                  }}
+                  className="rounded-full border border-rose-200 bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
+                >
+                  {isVi ? "Đăng xuất tất cả thiết bị khác" : "Sign out all other devices"}
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-3 divide-y divide-[#0D1321]/6">
+              {activeSessions.map((sess) => (
+                <div
+                  key={sess.sessionId}
+                  className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-semibold text-[#0D1321]">
+                      {sess.clientType} · {sess.sessionId.slice(0, 8)}…
+                    </span>
+                    {sess.isCurrent ? (
+                      <Badge variant="success" size="sm">
+                        {isVi ? "Thiết bị hiện tại" : "Current session"}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-3 text-[#505A6E]">
+                    <span>
+                      {isVi ? "Hoạt động:" : "Last seen:"}{" "}
+                      {new Date(sess.lastSeenAt).toLocaleString(isVi ? "vi-VN" : "en-US")}
+                    </span>
+                    {!sess.isCurrent ? (
+                      <button
+                        type="button"
+                        disabled={sessionBusyId === sess.sessionId}
+                        onClick={async () => {
+                          setSessionBusyId(sess.sessionId);
+                          try {
+                            const res = await fetch(
+                              `/api/v1/workspace/profile?sessionId=${encodeURIComponent(sess.sessionId)}`,
+                              { method: "DELETE" },
+                            );
+                            const data = await res.json().catch(() => null);
+                            if (res.ok && data?.ok && Array.isArray(data.sessions)) {
+                              setActiveSessions(data.sessions);
+                            }
+                          } finally {
+                            setSessionBusyId(null);
+                          }
+                        }}
+                        className="rounded-lg border border-rose-200 px-2.5 py-1 font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                      >
+                        {isVi ? "Thu hồi" : "Revoke"}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        ) : null}
       </section>
     </WorkspacePage>
   );

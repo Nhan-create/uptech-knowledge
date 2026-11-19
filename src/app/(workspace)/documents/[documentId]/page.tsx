@@ -6,12 +6,28 @@ export const metadata: Metadata = { title: "Chi tiết tài liệu" };
 
 export const dynamic = "force-dynamic";
 
-export default async function DocumentDetailPage({ params }: { params: Promise<{ documentId: string }> }) {
+export default async function DocumentDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ documentId: string }>;
+  searchParams?: Promise<{ chunk?: string | string[] }>;
+}) {
   const { documentId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
+  const highlightedChunkId = Array.isArray(resolvedSearch.chunk)
+    ? resolvedSearch.chunk[0]
+    : resolvedSearch.chunk;
   const adapter = getKnowledgeReadAdapter();
   const [outcome, spaces] = await Promise.all([
     adapter.getDocument(documentId),
     adapter.listSpaces(),
   ]);
-  return <DocumentDetailScreen outcome={outcome} spaces={spaces} />;
+  return (
+    <DocumentDetailScreen
+      outcome={outcome}
+      spaces={spaces}
+      highlightedChunkId={highlightedChunkId}
+    />
+  );
 }

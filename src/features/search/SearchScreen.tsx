@@ -302,7 +302,11 @@ function SearchOutcomeView({
 
                     <h3 className="mt-2 break-words text-base font-bold text-[#0D1321]">
                       <Link
-                        href={`/documents/${result.document.id}`}
+                        href={
+                          result.chunkId
+                            ? `/documents/${result.document.id}?chunk=${encodeURIComponent(result.chunkId)}#chunk-${encodeURIComponent(result.chunkId)}`
+                            : `/documents/${result.document.id}`
+                        }
                         className="hover:text-[#1635C7] hover:underline"
                       >
                         {result.document.name}
@@ -333,11 +337,15 @@ function SearchOutcomeView({
 
                     <div className="mt-4 flex flex-wrap gap-2">
                       <Link
-                        href={`/documents/${result.document.id}`}
+                        href={
+                          result.chunkId
+                            ? `/documents/${result.document.id}?chunk=${encodeURIComponent(result.chunkId)}#chunk-${encodeURIComponent(result.chunkId)}`
+                            : `/documents/${result.document.id}`
+                        }
                         className="inline-flex min-h-9 items-center justify-center gap-2 rounded-full border border-[#0D1321]/14 bg-white px-4 text-xs font-semibold text-[#0D1321] transition-colors hover:border-[#1B44FF] hover:bg-[#EEF1FF] hover:text-[#1635C7]"
                       >
                         <BookOpen aria-hidden="true" className="size-3.5" />
-                        Mở chi tiết tài liệu
+                        Mở đúng đoạn trích dẫn
                       </Link>
                       <a
                         href={`/api/v1/workspace/documents/${encodeURIComponent(result.document.id)}/download`}

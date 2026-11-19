@@ -12,7 +12,10 @@ import {
   type ApprovedSecretProviderRegistration,
 } from "../../secrets/core.ts";
 import { createGoogleCloudSecretManagerRegistration } from "../../secrets/google-cloud-secret-manager.ts";
-import { resolveLocalDevSecretProviderRegistration } from "../../secrets/local-dev-secret-manager.ts";
+import {
+  resolveEncryptedEnvelopeSecretProviderRegistration,
+  resolveLocalDevSecretProviderRegistration,
+} from "../../secrets/local-dev-secret-manager.ts";
 import { createConfiguredGoogleDirectoryProductionWorker } from "../../../worker/google-directory-production.ts";
 import {
   createGoogleWorkspaceBootstrapRepository,
@@ -67,6 +70,7 @@ const productionComposition: GoogleWorkspaceBootstrapRuntimeComposition =
     createSecretProviderRegistration(environment: Environment) {
       return (
         resolveLocalDevSecretProviderRegistration(environment) ??
+        resolveEncryptedEnvelopeSecretProviderRegistration(environment) ??
         createGoogleCloudSecretManagerRegistration(
           loadGoogleCloudDirectoryRuntimeConfiguration(environment),
         )

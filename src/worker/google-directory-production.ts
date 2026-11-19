@@ -80,8 +80,12 @@ export function createConfiguredGoogleDirectoryProductionWorker(
   environment: Environment = process.env,
 ) {
   const configuration = loadGoogleDirectoryProductionConfiguration(environment);
+  const directDatabaseUrl = configuration.databaseUrl.replace(
+    /(@ep-[a-z0-9-]+)-pooler(\.[a-z0-9.-]+\.neon\.tech\b)/iu,
+    "$1$2",
+  );
   const pool = createDatabasePool({
-    connectionString: configuration.databaseUrl,
+    connectionString: directDatabaseUrl,
     options: "-c role=uptech_worker_runtime",
     max: 2,
     idleTimeoutMillis: 30_000,
