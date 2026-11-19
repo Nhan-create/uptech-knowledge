@@ -8,6 +8,74 @@
 -- 6. Real Knowledge Connectors (Web/Wiki URL Crawler + Enterprise Ingestion API Keys)
 
 -- ============================================================================
+-- 0. Ensure knowledge_document_versions & knowledge_document_chunks exist
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS uptech.knowledge_document_versions (
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
+  document_id text NOT NULL,
+  version_id text NOT NULL,
+  version_label text NOT NULL,
+  note text NOT NULL DEFAULT '',
+  updated_label text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT pg_catalog.transaction_timestamp(),
+  PRIMARY KEY (workspace_id, document_id, version_id)
+);
+
+CREATE TABLE IF NOT EXISTS uptech.knowledge_document_chunks (
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
+  chunk_id text NOT NULL,
+  document_id text NOT NULL,
+  chunk_index integer NOT NULL,
+  heading text NOT NULL DEFAULT '',
+  locator text NOT NULL DEFAULT '',
+  content text NOT NULL,
+  embedding_json jsonb,
+  created_at timestamptz NOT NULL DEFAULT pg_catalog.transaction_timestamp(),
+  PRIMARY KEY (workspace_id, chunk_id),
+  CONSTRAINT knowledge_document_chunks_index_check CHECK (chunk_index >= 0)
+);
+
+ALTER TABLE uptech.knowledge_document_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uptech.knowledge_document_versions FORCE ROW LEVEL SECURITY;
+ALTER TABLE uptech.knowledge_document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uptech.knowledge_document_chunks FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS knowledge_document_versions_migration_owner ON uptech.knowledge_document_versions;
+CREATE POLICY knowledge_document_versions_migration_owner ON uptech.knowledge_document_versions
+  TO uptech_migration_owner USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS knowledge_document_versions_tenant_policy ON uptech.knowledge_document_versions;
+CREATE POLICY knowledge_document_versions_tenant_policy ON uptech.knowledge_document_versions
+  TO uptech_api_runtime
+  USING (workspace_id = COALESCE(
+    NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
+    NULLIF(current_setting('app.workspace_id', true), '')::uuid
+  ))
+  WITH CHECK (workspace_id = COALESCE(
+    NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
+    NULLIF(current_setting('app.workspace_id', true), '')::uuid
+  ));
+
+DROP POLICY IF EXISTS knowledge_document_chunks_migration_owner ON uptech.knowledge_document_chunks;
+CREATE POLICY knowledge_document_chunks_migration_owner ON uptech.knowledge_document_chunks
+  TO uptech_migration_owner USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS knowledge_document_chunks_tenant_policy ON uptech.knowledge_document_chunks;
+CREATE POLICY knowledge_document_chunks_tenant_policy ON uptech.knowledge_document_chunks
+  TO uptech_api_runtime
+  USING (workspace_id = COALESCE(
+    NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
+    NULLIF(current_setting('app.workspace_id', true), '')::uuid
+  ))
+  WITH CHECK (workspace_id = COALESCE(
+    NULLIF(current_setting('app.current_workspace_id', true), '')::uuid,
+    NULLIF(current_setting('app.workspace_id', true), '')::uuid
+  ));
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+  uptech.knowledge_document_versions,
+  uptech.knowledge_document_chunks
+TO uptech_api_runtime;
+
+-- ============================================================================
 -- 1. Full-Text Search index on knowledge_document_chunks & DB-native search
 -- ============================================================================
 ALTER TABLE uptech.knowledge_document_chunks
