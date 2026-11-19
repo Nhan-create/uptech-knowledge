@@ -31,6 +31,15 @@ const WORKSPACE_API_EXACT_PATHS = new Set([
   "/api/v1/workspace/notifications",
 ]);
 
+const ADMIN_API_EXACT_PATHS = new Set([
+  "/api/v1/admin/users",
+  "/api/v1/admin/permissions",
+  "/api/v1/admin/connectors",
+  "/api/v1/admin/billing",
+  "/api/v1/admin/audit-logs",
+  "/api/v1/admin/settings",
+]);
+
 const WORKSPACE_API_DOCUMENT_PATTERN =
   /^\/api\/v1\/workspace\/(?:documents|knowledge)\/[a-zA-Z0-9_-]{3,80}(?:\/download)?$/u;
 
@@ -52,6 +61,25 @@ function isWorkspaceApiRoute(pathname: string, method: string): boolean {
   );
 }
 
+function isAdminApiRoute(pathname: string, method: string): boolean {
+  if (!WORKSPACE_API_METHODS.has(method)) {
+    return false;
+  }
+  return ADMIN_API_EXACT_PATHS.has(pathname);
+}
+
+function isWorkspacePageRoute(pathname: string, method: string): boolean {
+  if (method !== "GET" && method !== "HEAD") {
+    return false;
+  }
+  if (WORKSPACE_PREVIEW_EXACT_PATHS.has(pathname)) {
+    return true;
+  }
+  return WORKSPACE_PREVIEW_DYNAMIC_PATTERNS.some((pattern) =>
+    pattern.test(pathname),
+  );
+}
+
 function hasSessionCookieCredential(request: NextRequest): boolean {
   const cookieHeader = request.headers.get("cookie") ?? "";
   return cookieHeader.includes("__Host-uptech_session=");
@@ -70,17 +98,7 @@ function isLocalWorkspacePreviewRequest(pathname: string, method: string) {
     return true;
   }
 
-  if (method !== "GET" && method !== "HEAD") {
-    return false;
-  }
-
-  if (WORKSPACE_PREVIEW_EXACT_PATHS.has(pathname)) {
-    return true;
-  }
-
-  return WORKSPACE_PREVIEW_DYNAMIC_PATTERNS.some((pattern) =>
-    pattern.test(pathname),
-  );
+  return isWorkspacePageRoute(pathname, method);
 }
 
 export function proxy(request: NextRequest) {
@@ -92,9 +110,16 @@ export function proxy(request: NextRequest) {
     request.nextUrl.pathname,
     request.method,
   );
+  const hasSessionCookie = hasSessionCookieCredential(request);
   const allowAuthenticatedWorkspaceApi =
     isWorkspaceApiRoute(request.nextUrl.pathname, request.method) &&
-    hasSessionCookieCredential(request);
+    hasSessionCookie;
+  const allowAuthenticatedAdminApi =
+    isAdminApiRoute(request.nextUrl.pathname, request.method) &&
+    hasSessionCookie;
+  const allowAuthenticatedWorkspacePage =
+    isWorkspacePageRoute(request.nextUrl.pathname, request.method) &&
+    hasSessionCookie;
   const requestId = crypto.randomUUID();
 
   if (
@@ -102,7 +127,9 @@ export function proxy(request: NextRequest) {
     routeDecision === "allow-auth-ingress" ||
     routeDecision === "allow-protected" ||
     allowWorkspacePreview ||
-    allowAuthenticatedWorkspaceApi
+    allowAuthenticatedWorkspaceApi ||
+    allowAuthenticatedAdminApi ||
+    allowAuthenticatedWorkspacePage
   ) {
     const requestHeaders = new Headers(request.headers);
     requestHeaders.set("x-uptech-request-id", requestId);
