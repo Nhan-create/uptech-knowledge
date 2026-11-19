@@ -113,7 +113,7 @@ ALTER TABLE uptech.workspace_notifications
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS uptech.knowledge_document_blobs (
-  workspace_id uuid NOT NULL,
+  workspace_id uuid NOT NULL REFERENCES uptech.workspaces (workspace_id) ON DELETE RESTRICT,
   document_id text NOT NULL,
   file_extension text NOT NULL,
   content_type text NOT NULL,
@@ -121,8 +121,6 @@ CREATE TABLE IF NOT EXISTS uptech.knowledge_document_blobs (
   content_bytes bytea NOT NULL,
   created_at timestamptz NOT NULL DEFAULT pg_catalog.transaction_timestamp(),
   PRIMARY KEY (workspace_id, document_id),
-  FOREIGN KEY (workspace_id, document_id)
-    REFERENCES uptech.knowledge_documents (workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT knowledge_document_blobs_size_check CHECK (byte_size > 0)
 );
 

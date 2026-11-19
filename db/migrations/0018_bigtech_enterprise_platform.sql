@@ -58,8 +58,6 @@ CREATE TABLE IF NOT EXISTS uptech.knowledge_document_comments (
   resolved boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, id),
-  FOREIGN KEY (workspace_id, document_id)
-    REFERENCES uptech.knowledge_documents (workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT knowledge_document_comments_kind_check
     CHECK (comment_kind IN ('COMMENT', 'OUTDATED_FLAG', 'APPROVAL_NOTE'))
 );
