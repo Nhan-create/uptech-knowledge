@@ -14,7 +14,10 @@ import {
 import { clearedWebSessionCookie } from "../../auth/web-session.ts";
 import { getRuntimeDatabasePool } from "../../db/runtime-pool.ts";
 import { createSafeProblem, requestIdFromHeaders, type ProblemCode } from "../../http/problem.ts";
-import { createGoogleDirectoryConsentProvider } from "../../people-data/google-directory-consent-provider.ts";
+import {
+  createGoogleDirectoryConsentProvider,
+  GoogleDirectoryConsentProviderError,
+} from "../../people-data/google-directory-consent-provider.ts";
 import { hasExactGoogleDirectoryReadOnlyScopes } from "../../people-data/google-directory-scopes.ts";
 import type { SecretReference } from "../../secrets/core.ts";
 import {
@@ -229,6 +232,36 @@ function redirectToLogin(appOrigin: string | null, error: string, requestId: str
   return new Response(null, { status: 303, headers });
 }
 
+function logDirectSignupFailure(
+  requestId: string,
+  stage: string,
+  error?: unknown,
+  outcome?: string,
+): void {
+  const errorName = error instanceof Error && /^[A-Za-z0-9_]+$/u.test(error.name)
+    ? error.name
+    : undefined;
+  const diagnosticCode = error instanceof GoogleDirectoryConsentProviderError &&
+      /^[A-Z0-9_]+$/u.test(error.diagnosticCode)
+    ? error.diagnosticCode
+    : undefined;
+  const pgCodeRaw = typeof error === "object" && error !== null && "code" in error
+    ? (error as { readonly code?: unknown }).code
+    : undefined;
+  const pgCode = typeof pgCodeRaw === "string" && /^[0-9A-Z]{5}$/u.test(pgCodeRaw)
+    ? pgCodeRaw
+    : undefined;
+  console.error(JSON.stringify({
+    event: "UPTECH_DIRECT_SIGNUP_ERROR_V1",
+    request_id: requestId,
+    stage,
+    ...(errorName !== undefined ? { error_name: errorName } : {}),
+    ...(diagnosticCode !== undefined ? { diagnostic_code: diagnosticCode } : {}),
+    ...(pgCode !== undefined ? { pg_code: pgCode } : {}),
+    ...(outcome !== undefined ? { outcome } : {}),
+  }));
+}
+
 /**
  * Initiates a single-step Google Workspace Super Admin sign-up that requests
  * Directory consent immediately from `/login` without a prior OIDC hop.
@@ -399,7 +432,8 @@ export async function handleDirectOrgSignupCallbackGet(request: Request): Promis
         nonce: transaction.nonce,
         pkceVerifier: transaction.pkceVerifier,
       });
-    } catch {
+    } catch (error) {
+      logDirectSignupFailure(requestId, "provider_exchange", error);
       return redirectToLogin(appOrigin, "PROVIDER_UNAVAILABLE", requestId);
     }
 
@@ -467,13 +501,20 @@ export async function handleDirectOrgSignupCallbackGet(request: Request): Promis
       const errorCode = signupRow?.outcome === "ALREADY_REGISTERED"
         ? "ORGANIZATION_ALREADY_REGISTERED"
         : "PROVIDER_UNAVAILABLE";
+      logDirectSignupFailure(
+        requestId,
+        "complete_signup_outcome",
+        undefined,
+        typeof signupRow?.outcome === "string" ? signupRow.outcome : "NONE",
+      );
       return redirectToLogin(appOrigin, errorCode, requestId);
     }
 
     const bootstrapRuntime = createConfiguredGoogleWorkspaceBootstrapRuntime();
     try {
       await bootstrapRuntime.runDirectoryWorker();
-    } catch {
+    } catch (error) {
+      logDirectSignupFailure(requestId, "directory_worker", error);
       return redirectToLogin(appOrigin, "DIRECTORY_SYNC_PENDING", requestId);
     }
 
@@ -490,6 +531,12 @@ export async function handleDirectOrgSignupCallbackGet(request: Request): Promis
     ])).rows as QueryResultRow[];
 
     if (sessionRows.length !== 1 || sessionRows[0]?.outcome !== "SESSION_ISSUED") {
+      logDirectSignupFailure(
+        requestId,
+        "issue_session",
+        undefined,
+        typeof sessionRows[0]?.outcome === "string" ? sessionRows[0].outcome : "NONE",
+      );
       return redirectToLogin(appOrigin, "DIRECTORY_SYNC_PENDING", requestId);
     }
 
@@ -498,7 +545,8 @@ export async function handleDirectOrgSignupCallbackGet(request: Request): Promis
     headers.append("Set-Cookie", clearDirectCookie());
     headers.append("Set-Cookie", serializeWebSessionCookie(session.raw_token));
     return new Response(null, { status: 303, headers });
-  } catch {
+  } catch (error) {
+    logDirectSignupFailure(requestId, "callback_unexpected", error);
     return redirectToLogin(appOrigin, "PROVIDER_UNAVAILABLE", requestId);
   }
 }

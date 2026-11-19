@@ -480,3 +480,27 @@ test("Directory redirects and timeouts fail closed without leaking bearer materi
     );
   }
 });
+
+test("Directory HTTP 403 attaches non-sensitive probe diagnosticCode without leaking response body", async () => {
+  const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
+    fetch: async () => new Response(JSON.stringify({ error: { message: "secret-detail for tenant-a.example" } }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    }),
+  }));
+
+  await assert.rejects(
+    provider.exchangeAndProbe({
+      callbackSearch: `?code=provider-code&state=${TRANSACTION.state}`,
+      state: TRANSACTION.state,
+      nonce: TRANSACTION.nonce,
+      pkceVerifier: TRANSACTION.pkceVerifier,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof GoogleDirectoryConsentProviderError);
+      assert.equal(error.message, "Google Directory consent could not be verified");
+      assert.equal(error.diagnosticCode, "PROBE_CUSTOMER_HTTP_403");
+      return true;
+    },
+  );
+});

@@ -39,9 +39,11 @@ export const GOOGLE_DIRECTORY_CONSENT_SCOPES = Object.freeze([
 
 export class GoogleDirectoryConsentProviderError extends Error {
   override readonly name = "GoogleDirectoryConsentProviderError";
+  readonly diagnosticCode: string;
 
-  constructor() {
+  constructor(diagnosticCode = "CONSENT_VERIFICATION_FAILED") {
     super("Google Directory consent could not be verified");
+    this.diagnosticCode = diagnosticCode;
   }
 }
 
@@ -116,8 +118,8 @@ export interface GoogleDirectoryConsentProvider {
   ): Promise<GoogleDirectoryConsentEvidence>;
 }
 
-function fail(): never {
-  throw new GoogleDirectoryConsentProviderError();
+function fail(diagnosticCode = "CONSENT_VERIFICATION_FAILED"): never {
+  throw new GoogleDirectoryConsentProviderError(diagnosticCode);
 }
 
 function requireConfig(
@@ -253,7 +255,7 @@ function records(
 
 function requireExactScopes(value: unknown): void {
   if (typeof value !== "string" || value.length > 8_192) {
-    return fail();
+    return fail("SCOPES_TYPE_INVALID");
   }
   const scopes = value.trim().split(/\s+/u).filter(Boolean).map((scope) => {
     if (scope === "https://www.googleapis.com/auth/userinfo.email") return "email";
@@ -266,7 +268,7 @@ function requireExactScopes(value: unknown): void {
     new Set(scopes).size !== exact.size ||
     !scopes.every((scope) => exact.has(scope))
   ) {
-    return fail();
+    return fail(`SCOPES_MISMATCH_${scopes.length}`);
   }
 }
 
@@ -342,6 +344,7 @@ export function createGoogleDirectoryConsentProvider(
   async function requestJson(
     url: URL,
     accessToken: string,
+    probeName: string,
   ): Promise<Readonly<Record<string, unknown>>> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -358,14 +361,18 @@ export function createGoogleDirectoryConsentProvider(
         referrerPolicy: "no-referrer",
         signal: controller.signal,
       });
-      if (!response.ok || response.redirected) return fail();
+      if (response.redirected) return fail(`PROBE_${probeName}_REDIRECTED`);
+      if (!response.ok) return fail(`PROBE_${probeName}_HTTP_${response.status}`);
       const payload: unknown = await response.json();
       if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-        return fail();
+        return fail(`PROBE_${probeName}_SHAPE_INVALID`);
       }
       return payload as Readonly<Record<string, unknown>>;
-    } catch {
-      return fail();
+    } catch (error) {
+      if (error instanceof GoogleDirectoryConsentProviderError) {
+        throw error;
+      }
+      return fail(`PROBE_${probeName}_NETWORK_OR_JSON`);
     } finally {
       clearTimeout(timeout);
     }
@@ -409,16 +416,22 @@ export function createGoogleDirectoryConsentProvider(
           pkceVerifier: transaction.pkceVerifier,
           authorizationUrl,
         });
-      } catch {
-        return fail();
+      } catch (error) {
+        if (error instanceof GoogleDirectoryConsentProviderError) {
+          throw error;
+        }
+        return fail("CONSENT_VERIFICATION_FAILED");
       }
     },
 
     async createAuthorizationTransaction() {
       try {
         return assertTransaction(await createAuthorizationTransaction());
-      } catch {
-        return fail();
+      } catch (error) {
+        if (error instanceof GoogleDirectoryConsentProviderError) {
+          throw error;
+        }
+        return fail("CONSENT_VERIFICATION_FAILED");
       }
     },
 
@@ -437,8 +450,11 @@ export function createGoogleDirectoryConsentProvider(
           prompt: "consent select_account",
           include_granted_scopes: "false",
         });
-      } catch {
-        return fail();
+      } catch (error) {
+        if (error instanceof GoogleDirectoryConsentProviderError) {
+          throw error;
+        }
+        return fail("CONSENT_VERIFICATION_FAILED");
       }
     },
 
@@ -453,27 +469,42 @@ export function createGoogleDirectoryConsentProvider(
           pkceVerifier: input.pkceVerifier,
           pkceChallenge: await openid.calculatePKCECodeChallenge(input.pkceVerifier),
         });
-        const exchange = await exchangeAuthorizationCode({ ...input, config });
+        let exchange: GoogleDirectoryConsentExchange;
+        try {
+          exchange = await exchangeAuthorizationCode({ ...input, config });
+        } catch (error) {
+          if (error instanceof GoogleDirectoryConsentProviderError) {
+            throw error;
+          }
+          return fail("EXCHANGE_AUTHORIZATION_CODE_FAILED");
+        }
         requireExactScopes(exchange.scope);
         let accessToken = requireText(exchange.accessToken, 8_192);
         const refreshToken = requireText(exchange.refreshToken, 4_096);
-        const claims = verifyGoogleWorkspaceClaims({
-          claims: exchange.claims,
-          expectedClientId: config.clientId,
-          expectedNonce: input.nonce,
-          nowEpochSeconds: nowEpochSeconds(),
-        });
+        let claims;
+        try {
+          claims = verifyGoogleWorkspaceClaims({
+            claims: exchange.claims,
+            expectedClientId: config.clientId,
+            expectedNonce: input.nonce,
+            nowEpochSeconds: nowEpochSeconds(),
+          });
+        } catch {
+          return fail("ID_TOKEN_CLAIMS_FAILED");
+        }
 
         try {
           const customer = await requestJson(
             url("/customers/my_customer"),
             accessToken,
+            "CUSTOMER",
           );
           const customerId = requireText(customer.id, 512);
           const customerDomain = normalizeDomain(customer.customerDomain);
           const domainPayload = await requestJson(
             url(`/customer/${encodeURIComponent(customerId)}/domains`),
             accessToken,
+            "DOMAINS",
           );
           const verifiedDomains = normalizeVerifiedGoogleWorkspaceDomains({
             customerDomain,
@@ -484,7 +515,7 @@ export function createGoogleDirectoryConsentProvider(
             primaryDomain === undefined ||
             !verifiedDomains.some((domain) => domain.normalizedDomain === claims.hostedDomain)
           ) {
-            return fail();
+            return fail("PRIMARY_OR_HOSTED_DOMAIN_MISMATCH");
           }
 
           const currentUser = await requestJson(
@@ -493,6 +524,7 @@ export function createGoogleDirectoryConsentProvider(
               viewType: "admin_view",
             }),
             accessToken,
+            "CURRENT_USER",
           );
           const directoryUserCustomerId = requireText(currentUser.customerId, 512);
           if (
@@ -502,7 +534,7 @@ export function createGoogleDirectoryConsentProvider(
             currentUser.suspended === true ||
             currentUser.archived === true
           ) {
-            return fail();
+            return fail("CURRENT_USER_MISMATCH_OR_INACTIVE");
           }
 
           const users = await requestJson(
@@ -513,12 +545,14 @@ export function createGoogleDirectoryConsentProvider(
               maxResults: "1",
             }),
             accessToken,
+            "USERS",
           );
           records(users, "users");
 
           const groups = await requestJson(
             url("/groups", { customer: "my_customer", maxResults: "1" }),
             accessToken,
+            "GROUPS",
           );
           const listedGroups = records(groups, "groups");
           if (listedGroups.length > 0) {
@@ -529,6 +563,7 @@ export function createGoogleDirectoryConsentProvider(
                 maxResults: "1",
               }),
               accessToken,
+              "GROUP_MEMBERS",
             );
             records(members, "members");
           }
@@ -538,6 +573,7 @@ export function createGoogleDirectoryConsentProvider(
               type: "ALL_INCLUDING_PARENT",
             }),
             accessToken,
+            "ORGUNITS",
           );
           records(orgUnits, "organizationUnits");
 
@@ -565,8 +601,11 @@ export function createGoogleDirectoryConsentProvider(
         } finally {
           accessToken = "";
         }
-      } catch {
-        return fail();
+      } catch (error) {
+        if (error instanceof GoogleDirectoryConsentProviderError) {
+          throw error;
+        }
+        return fail("CONSENT_VERIFICATION_FAILED");
       }
     },
   });
