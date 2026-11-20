@@ -271,3 +271,45 @@ test("upload supports at least 100 MB and parses extended formats cleanly", asyn
   assert.match(htmlChunks[0]?.content ?? "", /UPTECH ho tro 100 MB/);
   assert.equal((htmlChunks[0]?.content ?? "").includes("bad()"), false);
 });
+
+test("buildLegacySafeInsert converts 64-hex sha256 into 32-byte Buffer for bytea checksum_sha256", () => {
+  const hex64 = "a".repeat(64);
+  const inserted = buildLegacySafeInsert({
+    tableName: "knowledge_documents",
+    baseColumns: ["workspace_id", "id"],
+    baseValues: ["00000000-0000-4000-8000-000000000001", "doc_bytea_1"],
+    requiredColumns: [
+      {
+        columnName: "checksum_sha256",
+        udtName: "bytea",
+        isRequiredNoDefault: false,
+        hasCheckConstraint: true,
+        requires32ByteLength: true,
+      },
+      {
+        columnName: "version_number",
+        udtName: "int4",
+        isRequiredNoDefault: false,
+        hasCheckConstraint: true,
+        requiresPositiveNumber: true,
+      },
+    ],
+    access: {
+      mode: "authenticated",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      membershipId: "00000000-0000-4000-8000-000000000002",
+      actorLabel: "user-1",
+      workspaceRole: "OWNER",
+      departmentKey: null,
+    },
+    contextDefaults: {
+      checksum_sha256: hex64,
+    },
+  });
+
+  const digestArg = inserted.values[2];
+  assert.ok(Buffer.isBuffer(digestArg));
+  assert.equal(digestArg.length, 32);
+  assert.equal(inserted.values[3], 1);
+  assert.match(inserted.sql, /"checksum_sha256".*"version_number"/);
+});

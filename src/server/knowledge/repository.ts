@@ -431,6 +431,8 @@ export interface RequiredColumnMeta {
   readonly requiresSha256Prefix?: boolean;
   readonly requiresSha256DashPrefix?: boolean;
   readonly requiresUppercaseHex?: boolean;
+  readonly requires32ByteLength?: boolean;
+  readonly requiresPositiveNumber?: boolean;
 }
 
 type TenantPgQuery = (
@@ -572,6 +574,10 @@ async function loadRequiredColumnsByTable(
     const requiresUppercaseHex = matchingDefs.some(
       (def) => /\[A-F/u.test(def) && !/a-f/u.test(def),
     );
+    const requires32ByteLength = matchingDefs.some((def) =>
+      /octet_length\([^)]*\)\s*=\s*32/iu.test(def),
+    );
+    const requiresPositiveNumber = matchingDefs.some((def) => />\s*0\b/iu.test(def));
 
     const list = byTable.get(tbl) ?? [];
     list.push({
@@ -583,6 +589,8 @@ async function loadRequiredColumnsByTable(
       requiresSha256Prefix,
       requiresSha256DashPrefix,
       requiresUppercaseHex,
+      requires32ByteLength,
+      requiresPositiveNumber,
     });
     byTable.set(tbl, list);
   }
@@ -609,6 +617,7 @@ function defaultValueForLegacyColumn(
   access: WorkspaceAccessContext,
 ): unknown {
   if (udtName === "uuid") return access.userId || access.membershipId || access.workspaceId;
+  if (udtName === "bytea") return Buffer.alloc(32);
   if (
     udtName === "int2" ||
     udtName === "int4" ||
@@ -671,7 +680,15 @@ export function buildLegacySafeInsert(args: Readonly<{
       ? rawOverride
       : defaultValueForLegacyColumn(reqCol.udtName, args.access);
     let finalValue = resolveAllowedValue(rawCandidate, reqCol.allowedValues);
-    if (typeof finalValue === "string" && finalValue.length > 0) {
+    if (reqCol.udtName === "bytea") {
+      if (typeof finalValue === "string") {
+        finalValue = /^[0-9a-f]{64}$/iu.test(finalValue)
+          ? Buffer.from(finalValue, "hex")
+          : createHash("sha256").update(finalValue).digest();
+      } else if (!(finalValue instanceof Uint8Array)) {
+        finalValue = Buffer.alloc(32);
+      }
+    } else if (typeof finalValue === "string" && finalValue.length > 0) {
       let formatted = finalValue;
       if (reqCol.requiresUppercaseHex) {
         formatted = formatted.toUpperCase();
@@ -684,12 +701,22 @@ export function buildLegacySafeInsert(args: Readonly<{
       ) {
         formatted = `sha256-${formatted}`;
       }
+      if (reqCol.requires32ByteLength && Buffer.byteLength(formatted, "utf8") !== 32) {
+        formatted = formatted.slice(0, 32).padEnd(32, "0");
+      }
       finalValue = formatted;
+    } else if (
+      reqCol.requiresPositiveNumber &&
+      typeof finalValue === "number" &&
+      finalValue <= 0
+    ) {
+      finalValue = 1;
     }
     values.push(finalValue);
     if (reqCol.udtName === "jsonb") casts[reqCol.columnName] = "::jsonb";
     else if (reqCol.udtName === "json") casts[reqCol.columnName] = "::json";
     else if (reqCol.udtName === "uuid") casts[reqCol.columnName] = "::uuid";
+    else if (reqCol.udtName === "bytea") casts[reqCol.columnName] = "::bytea";
   }
 
   const colList = columns.map((c) => `"${c}"`).join(", ");
@@ -939,7 +966,12 @@ export async function loadKnowledgeDocumentsAndSpaces(
                 title: seedDoc.summary.name,
                 slug: seedDoc.summary.id,
                 status: "ready",
+                processing_status: "READY",
+                verification_status: "UNVERIFIED",
+                version_number: 1,
+                size_bytes: Math.min(seedDoc.byteSize, 52_428_800),
                 checksum: docSha256,
+                checksum_sha256: docSha256,
                 sha256: docSha256,
                 content_hash: docSha256,
                 content_sha256: docSha256,
@@ -1406,7 +1438,12 @@ export async function createUploadedKnowledgeDocument(
           title: args.fileName,
           slug: args.id,
           status: "ready",
+          processing_status: "READY",
+          verification_status: "UNVERIFIED",
+          version_number: 1,
+          size_bytes: Math.min(args.byteSize, 52_428_800),
           checksum: uploadContentSha256,
+          checksum_sha256: uploadContentSha256,
           sha256: uploadContentSha256,
           content_hash: uploadContentSha256,
           content_sha256: uploadContentSha256,

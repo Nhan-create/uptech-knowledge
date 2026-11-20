@@ -504,3 +504,32 @@ test("Directory HTTP 403 attaches non-sensitive probe diagnosticCode without lea
     },
   );
 });
+
+test("personal Google account without hd claim surfaces PERSONAL_GOOGLE_ACCOUNT diagnosticCode", async () => {
+  const base = validExchange();
+  const { hd: _omitHd, ...claimsWithoutHd } = base.claims;
+  void _omitHd;
+  const provider = createGoogleDirectoryConsentProvider(CONFIG, dependencies({
+    exchange: validExchange({
+      claims: {
+        ...claimsWithoutHd,
+        sub: "google-subject-personal",
+        email: "person@unknown.example",
+      },
+    }),
+  }));
+
+  await assert.rejects(
+    provider.exchangeAndProbe({
+      callbackSearch: `?code=provider-code&state=${TRANSACTION.state}`,
+      state: TRANSACTION.state,
+      nonce: TRANSACTION.nonce,
+      pkceVerifier: TRANSACTION.pkceVerifier,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof GoogleDirectoryConsentProviderError);
+      assert.equal(error.diagnosticCode, "PERSONAL_GOOGLE_ACCOUNT");
+      return true;
+    },
+  );
+});

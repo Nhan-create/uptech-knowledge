@@ -7,7 +7,11 @@ import {
   GOOGLE_ISSUER,
   type GoogleLoginRuntimeConfig,
 } from "../auth/google/config.ts";
-import { verifyGoogleWorkspaceClaims } from "../auth/google/claims.ts";
+import {
+  GoogleClaimsValidationError,
+  GoogleWorkspaceAccountRequiredError,
+  verifyGoogleWorkspaceClaims,
+} from "../auth/google/claims.ts";
 import {
   googleOidcClient,
   type GoogleAuthorizationTransaction,
@@ -489,7 +493,22 @@ export function createGoogleDirectoryConsentProvider(
             expectedNonce: input.nonce,
             nowEpochSeconds: nowEpochSeconds(),
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof GoogleWorkspaceAccountRequiredError) {
+            return fail("PERSONAL_GOOGLE_ACCOUNT");
+          }
+          if (error instanceof GoogleClaimsValidationError) {
+            const c = exchange.claims;
+            console.error(
+              JSON.stringify({
+                event: "UPTECH_DIRECT_SIGNUP_CLAIMS_DIAG_V1",
+                has_hd: c.hd !== undefined,
+                iss_ok: c.iss === GOOGLE_ISSUER || c.iss === "accounts.google.com",
+                nonce_ok: c.nonce === input.nonce,
+                email_verified: c.email_verified === true,
+              }),
+            );
+          }
           return fail("ID_TOKEN_CLAIMS_FAILED");
         }
 

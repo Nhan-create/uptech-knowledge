@@ -433,7 +433,14 @@ export async function handleDirectOrgSignupCallbackGet(request: Request): Promis
         pkceVerifier: transaction.pkceVerifier,
       });
     } catch (error) {
+      const diagnosticCode =
+        error instanceof GoogleDirectoryConsentProviderError
+          ? error.diagnosticCode
+          : undefined;
       logDirectSignupFailure(requestId, "provider_exchange", error);
+      if (diagnosticCode === "PERSONAL_GOOGLE_ACCOUNT") {
+        return redirectToLogin(appOrigin, "PERSONAL_GOOGLE_ACCOUNT", requestId);
+      }
       return redirectToLogin(appOrigin, "PROVIDER_UNAVAILABLE", requestId);
     }
 
