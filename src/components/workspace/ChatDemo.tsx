@@ -38,6 +38,7 @@ import {
 import { requestPreferencesOpen } from "@/components/preferences/preferences-events";
 import { usePreferences } from "@/components/preferences/PreferencesProvider";
 import { Badge } from "@/components/ui";
+import { ChatMarkdown } from "@/components/workspace/ChatMarkdown";
 import {
   buildChatTurnResponse,
   CHAT_STARTER_PROMPTS,
@@ -877,6 +878,7 @@ export function ChatDemo({
   const [turnStatusNote, setTurnStatusNote] = useState("");
   const [composerHasError, setComposerHasError] = useState(false);
   const [composerMessage, setComposerMessage] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState("");
   const [retrievalStage, setRetrievalStage] = useState<RetrievalStage>(
     hasInitialPrompt ? "preparing" : "idle",
   );
@@ -985,6 +987,7 @@ export function ChatDemo({
       setEphemeralTurns(nextSession.turns);
       setActiveTurnId(builtTurn.id);
       setActiveSourceNumber(1);
+      setStreamingText("");
       setPendingTurn(null);
       setRetrievalStage("completed");
       setComposerMessage(null);
@@ -993,6 +996,8 @@ export function ChatDemo({
         threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     };
+
+    setStreamingText("");
 
     const existingSession =
       getChatSessionsSnapshot().find((s) => s.id === currentPending.sessionId) ?? null;
@@ -1054,6 +1059,7 @@ export function ChatDemo({
               try {
                 const parsed = JSON.parse(dataLine) as {
                   stage?: RetrievalStage;
+                  delta?: string;
                   ok?: boolean;
                   session?: ChatSession;
                   turn?: ChatTurn;
@@ -1061,10 +1067,13 @@ export function ChatDemo({
                 };
                 if (eventName === "stage" && parsed.stage) {
                   setRetrievalStage(parsed.stage);
+                } else if (eventName === "delta" && typeof parsed.delta === "string") {
+                  setStreamingText((prev) => prev + parsed.delta);
                 } else if (eventName === "done" && parsed.ok && parsed.session && parsed.turn) {
                   finishWithTurn(parsed.session, parsed.turn);
                   finished = true;
                 } else if (eventName === "error") {
+                  setStreamingText("");
                   setPendingTurn(null);
                   setRetrievalStage("idle");
                   setComposerMessage(parsed.error?.message ?? copy.chatApiError);
@@ -1806,9 +1815,7 @@ export function ChatDemo({
                             {renderEvidenceBadge(turn.evidenceState, turn.citations.length)}
                           </div>
 
-                          <p className="whitespace-pre-line text-[15px] leading-7 text-[#1F2937]">
-                            {turn.intro}
-                          </p>
+                          <ChatMarkdown content={turn.intro} />
 
                           {turn.points.length > 0 ? (
                             <ol className="space-y-2.5">
@@ -1968,7 +1975,21 @@ export function ChatDemo({
                         </div>
                       </div>
                     ) : null}
-                    <RetrievalStatusLine stage={activeRetrievalStep.stage} copy={copy} />
+                    {streamingText ? (
+                      <article className="flex items-start gap-3.5">
+                        <span className="mt-0.5 hidden size-8 shrink-0 items-center justify-center rounded-full border border-[#C8D2FF] bg-[#EEF1FF] text-[#1B44FF] sm:inline-flex">
+                          <Sparkles aria-hidden="true" className="size-4" />
+                        </span>
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <span className="text-xs font-bold text-[#0D1321]">
+                            {copy.assistantName}
+                          </span>
+                          <ChatMarkdown content={streamingText} />
+                        </div>
+                      </article>
+                    ) : (
+                      <RetrievalStatusLine stage={activeRetrievalStep.stage} copy={copy} />
+                    )}
                   </div>
                 ) : null}
 

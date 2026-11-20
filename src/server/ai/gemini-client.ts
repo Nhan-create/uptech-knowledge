@@ -200,6 +200,155 @@ async function callGenerateContentWithFallback(
   );
 }
 
+function extractRawCandidateDelta(rawResponse: unknown): string {
+  const candidates = (rawResponse as { candidates?: unknown[] } | null)?.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) return "";
+  const parts = (
+    candidates[0] as { content?: { parts?: Array<{ text?: unknown }> } } | undefined
+  )?.content?.parts;
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .map((part) => (typeof part.text === "string" ? part.text : ""))
+    .join("");
+}
+
+function streamGeminiEndpoint(
+  model: string,
+  apiKey: string,
+  payload: unknown,
+  onDelta: (delta: string) => void,
+  timeoutMs = 25_000,
+): Promise<string> {
+  const path = `/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+  const serialized = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    let fullText = "";
+    let sseBuffer = "";
+    const req = httpsRequest(
+      {
+        hostname: GEMINI_API_HOST,
+        port: 443,
+        path,
+        method: "POST",
+        family: 4,
+        timeout: timeoutMs,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(serialized),
+          "x-goog-api-key": apiKey,
+        },
+      },
+      (res) => {
+        const status = res.statusCode ?? 500;
+        if (status < 200 || status >= 300) {
+          res.resume();
+          reject(
+            new GeminiServiceError(
+              "UPSTREAM_ERROR",
+              `Gemini stream upstream returned status ${status}.`,
+            ),
+          );
+          return;
+        }
+
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          sseBuffer += chunk.replace(/\r\n/g, "\n");
+          const blocks = sseBuffer.split("\n\n");
+          sseBuffer = blocks.pop() ?? "";
+          for (const block of blocks) {
+            const dataLines = block
+              .split("\n")
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trim());
+            if (dataLines.length === 0) continue;
+            const jsonStr = dataLines.join("");
+            if (!jsonStr || jsonStr === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(jsonStr) as unknown;
+              const delta = extractRawCandidateDelta(parsed);
+              if (delta) {
+                fullText += delta;
+                onDelta(delta);
+              }
+            } catch {
+              // Ignore partial non-JSON lines
+            }
+          }
+        });
+
+        res.on("end", () => {
+          const trimmed = fullText.trim();
+          if (!trimmed) {
+            reject(
+              new GeminiServiceError(
+                "INVALID_RESPONSE",
+                "Gemini stream ended without content.",
+              ),
+            );
+            return;
+          }
+          resolve(trimmed);
+        });
+      },
+    );
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Gemini HTTPS stream timed out"));
+    });
+    req.on("error", (err) => {
+      reject(
+        new GeminiServiceError(
+          "UPSTREAM_ERROR",
+          err instanceof Error ? err.message : "Gemini stream connection error.",
+        ),
+      );
+    });
+    req.write(serialized);
+    req.end();
+  });
+}
+
+async function callStreamContentWithFallback(
+  primaryModel: string,
+  apiKey: string,
+  payload: unknown,
+  onDelta: (delta: string) => void,
+  timeoutMs = 25_000,
+): Promise<{ readonly model: string; readonly text: string }> {
+  const modelChain = Array.from(new Set([primaryModel, ...FALLBACK_CHAT_MODELS]));
+  let lastError: GeminiServiceError | null = null;
+
+  for (const candidateModel of modelChain) {
+    let emitted = false;
+    try {
+      const text = await streamGeminiEndpoint(
+        candidateModel,
+        apiKey,
+        payload,
+        (delta) => {
+          emitted = true;
+          onDelta(delta);
+        },
+        timeoutMs,
+      );
+      return { model: candidateModel, text };
+    } catch (error) {
+      if (error instanceof GeminiServiceError && !emitted) {
+        lastError = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw (
+    lastError ??
+    new GeminiServiceError("UPSTREAM_ERROR", "All configured Gemini models failed.")
+  );
+}
+
 function extractCandidateText(rawResponse: unknown): string {
   const candidates = (rawResponse as { candidates?: unknown[] } | null)?.candidates;
   if (!Array.isArray(candidates) || candidates.length === 0) return "";
@@ -377,6 +526,106 @@ export async function generateGroundedChatAnswer(args: Readonly<{
     usedSources: usedSources && sanitizedPoints.length > 0,
     intro: cleanIntro,
     points: sanitizedPoints,
+  };
+}
+
+export async function streamHybridChatAnswer(args: Readonly<{
+  prompt: string;
+  locale: "vi" | "en";
+  passages: readonly GroundedSourcePassage[];
+  history?: readonly GroundedConversationMessage[];
+  uptechOverview?: string;
+  onDelta?: (delta: string) => void;
+}>): Promise<GeminiGroundedAnswer> {
+  const config = readGeminiConfig();
+  if (!config) {
+    throw new GeminiServiceError(
+      "NOT_CONFIGURED",
+      "Gemini API key is not configured on the server.",
+    );
+  }
+
+  const hasPassages = args.passages.length > 0;
+  const languageRule =
+    args.locale === "vi"
+      ? "Trả lời bằng tiếng Việt tự nhiên, thân thiện, thông minh và linh hoạt như ChatGPT."
+      : "Respond in natural, friendly, clear conversational English like ChatGPT.";
+
+  const combinedContextText = [
+    args.prompt,
+    ...(args.history ?? []).map((h) => `${h.prompt} ${h.answerSummary}`),
+  ].join(" ");
+  const mentionsUptech =
+    /uptech|b[aá]o\s*gi[aá]|g[oó]i|d[iị]ch\s*v[uụ]|hoa\s*h[oồ]ng|website|logo|profile|h[oồ]\s*s[oơ]|chatgpt|claude|gemini|canva|capcut|vat|h[oó]a\s*[đd][oơ]n/iu.test(
+      combinedContextText,
+    );
+
+  const systemParts = [
+    "You are a smart, helpful, natural conversational AI assistant (style and warmth of ChatGPT).",
+    languageRule,
+    "STYLE & BEHAVIOR:",
+    "- Match the user's tone and intent directly. For casual greetings ('hi', 'chào bạn', 'hello'), reply briefly and warmly like a human/ChatGPT without reciting a robotic company bio or listing your capabilities unless asked.",
+    "- For general questions, coding, brainstorming, drafting messages/emails, or explanations, give thoughtful, practical ChatGPT-style answers formatted cleanly in Markdown (short paragraphs, **bold** emphasis, bullet lists `- `, or fenced code blocks).",
+    "- Never put literal `[1]` or `[2]` citation brackets inside your prose (the UI displays source badges below automatically when company documents are used).",
+  ];
+
+  if (hasPassages) {
+    systemParts.push(
+      "- Grounding UPTECH & workspace data: Below are verified internal excerpts. Whenever the question asks about UPTECH services, packages, pricing, SLAs, policies, commissions, or uploaded files, follow those exact figures and rules without inventing numbers. Feel free to combine general advice, explanations, or copywriting seamlessly around those verified facts.",
+    );
+  } else if (args.uptechOverview && mentionsUptech) {
+    systemParts.push(
+      "- If asked about UPTECH, use the verified company overview below and never invent unpublished pricing figures.",
+      args.uptechOverview,
+    );
+  }
+
+  const contextBlock = args.passages
+    .map(
+      (p) =>
+        `[${p.number}] ${p.title} (${p.knowledgeSpace} · ${p.location}${p.governanceWarning ? " · DEPRECATED" : ""})\n${p.heading}: ${p.content}`,
+    )
+    .join("\n\n");
+
+  const historyContents = (args.history ?? []).slice(-6).flatMap((turn) => [
+    { role: "user", parts: [{ text: turn.prompt }] },
+    { role: "model", parts: [{ text: turn.answerSummary }] },
+  ]);
+
+  const userMessageText = hasPassages
+    ? `TÀI LIỆU THAM KHẢO ĐÃ XÁC MINH:\n${contextBlock}\n\nCÂU HỎI CỦA NGƯỜI DÙNG:\n${args.prompt}`
+    : args.prompt;
+
+  const { model: usedModel, text } = await callStreamContentWithFallback(
+    config.chatModel,
+    config.apiKey,
+    {
+      systemInstruction: {
+        parts: [{ text: systemParts.join("\n") }],
+      },
+      contents: [
+        ...historyContents,
+        {
+          role: "user",
+          parts: [{ text: userMessageText }],
+        },
+      ],
+      generationConfig: {
+        temperature: hasPassages ? 0.45 : 0.7,
+        maxOutputTokens: 2_048,
+      },
+    },
+    (delta) => {
+      args.onDelta?.(delta);
+    },
+  );
+
+  const cleanedText = text.replace(/[^\S\r\n]*\[\d+\][^\S\r\n]*/g, " ").trim();
+  return {
+    model: usedModel,
+    usedSources: hasPassages,
+    intro: cleanedText,
+    points: [],
   };
 }
 

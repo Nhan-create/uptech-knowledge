@@ -313,7 +313,7 @@ export async function retrieveReadyPassagesForChat(args: Readonly<{
   const isPinnedScope =
     args.scope === "selected-documents" && selectedIdSet.size > 0;
   const hasSemanticOrLexicalHit = selected.some(
-    (item) => item.lexicalHit || item.semanticScore >= 0.45,
+    (item) => (item.lexicalHit && item.score >= 8) || item.semanticScore >= 0.45,
   );
   const hasRelevantMatch =
     isPinnedScope || isSummaryIntent || hasSemanticOrLexicalHit;

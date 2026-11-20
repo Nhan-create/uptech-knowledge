@@ -8,10 +8,9 @@ import {
 } from "@/features/chat/chat-engine";
 import type { DocumentId, SpaceId } from "@/features/knowledge/model";
 import {
-  generateGeneralChatAnswer,
-  generateGroundedChatAnswer,
   GeminiServiceError,
   readGeminiConfig,
+  streamHybridChatAnswer,
 } from "@/server/ai/gemini-client";
 import { retrieveReadyPassagesForChat } from "@/server/ai/retrieval";
 import { UPTECH_CORE_SYSTEM_SUMMARY } from "@/server/knowledge/uptech-baogia-pack";
@@ -248,7 +247,7 @@ export async function POST(request: Request): Promise<Response> {
         : getContextScopeLabel(scope, locale, selectedDocumentIds.length, spaces);
 
     const geminiConfig = readGeminiConfig();
-    const canUseGeneralGemini =
+    const canUseGemini =
       Boolean(geminiConfig) &&
       !(
         scope === "selected-documents" &&
@@ -256,46 +255,47 @@ export async function POST(request: Request): Promise<Response> {
         retrieval.passages.length === 0
       );
 
-    if (geminiConfig && retrieval.passages.length > 0 && retrieval.hasRelevantMatch) {
+    if (canUseGemini) {
       emitEvent?.("stage", { stage: "generating" });
+      const useSources =
+        retrieval.passages.length > 0 && retrieval.hasRelevantMatch;
       const dlpPrompt = redactSensitiveDlpContent(
         prompt,
         policy.piiRedactionEnabled,
       );
-      const geminiAnswer = await generateGroundedChatAnswer({
+      const geminiAnswer = await streamHybridChatAnswer({
         prompt: dlpPrompt.sanitizedText,
         locale,
-        scopeLabel,
-        excludedCount: retrieval.excludedCount,
-        allowGeneralKnowledge: true,
         history,
-        passages: retrieval.passages.map((passage) => ({
-          number: passage.number,
-          documentId: passage.document.summary.id,
-          title: passage.document.summary.name,
-          location: passage.chunk.locator,
-          heading: passage.chunk.heading,
-          knowledgeSpace: passage.document.summary.space.name,
-          governanceWarning: passage.isDeprecated,
-          content: redactSensitiveDlpContent(
-            passage.chunk.content,
-            policy.piiRedactionEnabled,
-          ).sanitizedText,
-        })),
+        uptechOverview: UPTECH_CORE_SYSTEM_SUMMARY,
+        passages: useSources
+          ? retrieval.passages.map((passage) => ({
+              number: passage.number,
+              documentId: passage.document.summary.id,
+              title: passage.document.summary.name,
+              location: passage.chunk.locator,
+              heading: passage.chunk.heading,
+              knowledgeSpace: passage.document.summary.space.name,
+              governanceWarning: passage.isDeprecated,
+              content: redactSensitiveDlpContent(
+                passage.chunk.content,
+                policy.piiRedactionEnabled,
+              ).sanitizedText,
+            }))
+          : [],
+        onDelta: (delta) => emitEvent?.("delta", { delta }),
       });
 
       provider = "gemini";
       modelName = geminiAnswer.model;
-      const usedSources =
-        geminiAnswer.usedSources !== false && geminiAnswer.points.length > 0;
       const deprecationWarning =
-        usedSources && retrieval.evidenceState === "caution"
+        useSources && retrieval.evidenceState === "caution"
           ? locale === "vi"
             ? "Lưu ý: có nguồn được đánh dấu phiên bản cũ/ngừng dùng; cần đối chiếu trước khi áp dụng."
             : "Caution: at least one cited source is marked deprecated; verify before applying."
           : "";
       const excludedNote =
-        usedSources && retrieval.excludedCount > 0
+        useSources && retrieval.excludedCount > 0
           ? locale === "vi"
             ? `Đã loại trừ ${retrieval.excludedCount} tệp đang xử lý/OCR theo quy tắc Ready-Only.`
             : `Excluded ${retrieval.excludedCount} non-Ready file(s) under Ready-Only rules.`
@@ -306,40 +306,12 @@ export async function POST(request: Request): Promise<Response> {
         prompt,
         scope,
         scopeLabel,
-        evidenceState: usedSources ? retrieval.evidenceState : "grounded",
-        intro: geminiAnswer.intro,
-        points: usedSources ? geminiAnswer.points : [],
-        footnote: [deprecationWarning, excludedNote].filter(Boolean).join(" "),
-        citations: usedSources ? [...retrieval.citations] : [],
-        excludedProcessingCount: usedSources ? retrieval.excludedCount : 0,
-        feedback: null,
-      };
-    } else if (canUseGeneralGemini) {
-      emitEvent?.("stage", { stage: "generating" });
-      const dlpPrompt = redactSensitiveDlpContent(
-        prompt,
-        policy.piiRedactionEnabled,
-      );
-      const geminiAnswer = await generateGeneralChatAnswer({
-        prompt: dlpPrompt.sanitizedText,
-        locale,
-        history,
-        uptechOverview: UPTECH_CORE_SYSTEM_SUMMARY,
-      });
-
-      provider = "gemini";
-      modelName = geminiAnswer.model;
-      turn = {
-        id: turnId,
-        prompt,
-        scope,
-        scopeLabel,
-        evidenceState: "grounded",
+        evidenceState: useSources ? retrieval.evidenceState : "grounded",
         intro: geminiAnswer.intro,
         points: [],
-        footnote: "",
-        citations: [],
-        excludedProcessingCount: 0,
+        footnote: [deprecationWarning, excludedNote].filter(Boolean).join(" "),
+        citations: useSources ? [...retrieval.citations] : [],
+        excludedProcessingCount: useSources ? retrieval.excludedCount : 0,
         feedback: null,
       };
     } else if (retrieval.evidenceState === "empty" || retrieval.passages.length === 0) {
