@@ -143,6 +143,11 @@ export async function GET(request: Request): Promise<Response> {
     const runtimeContext = createGoogleLoginRuntime();
     appOrigin = runtimeContext.config.appOrigin;
     const incoming = new URL(request.url);
+    if (incoming.searchParams.has("code") && !incoming.searchParams.has("error")) {
+      await (
+        runtimeContext as { readonly refreshDueDirectorySync?: () => Promise<void> }
+      ).refreshDueDirectorySync?.();
+    }
     const result = await runtimeContext.service.callback({
       canonicalClientIp: trustedVercelClientIp(request.headers),
       callbackSearch: incoming.search,
