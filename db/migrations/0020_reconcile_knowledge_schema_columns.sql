@@ -13,6 +13,15 @@ SET LOCAL ROLE uptech_migration_owner;
 DO $reconcile_knowledge$
 DECLARE
   rec record;
+  target_tables text[] := ARRAY[
+    'knowledge_spaces',
+    'knowledge_documents',
+    'knowledge_document_versions',
+    'knowledge_document_chunks',
+    'knowledge_cards',
+    'ai_chat_sessions',
+    'ai_chat_turns'
+  ];
   target_cols text[][] := ARRAY[
     ARRAY['knowledge_spaces', 'id'],
     ARRAY['knowledge_documents', 'id'],
@@ -33,46 +42,53 @@ DECLARE
   col_name text;
   col_type text;
 BEGIN
-  -- 0. Drop all existing RLS policies on knowledge_* and ai_chat_* (e.g. legacy *_api_read)
+  -- 0. Drop ALL existing RLS policies on target tables AND any policy on other tables
+  --    in uptech (e.g. legacy knowledge_activities_api_read) depending on target tables
   --    so PostgreSQL allows altering column types from uuid -> text cleanly.
   FOR rec IN
-    SELECT schemaname, tablename, policyname
-    FROM pg_policies
-    WHERE schemaname = 'uptech'
-      AND tablename IN (
-        'knowledge_spaces',
-        'knowledge_documents',
-        'knowledge_document_versions',
-        'knowledge_document_chunks',
-        'knowledge_cards',
-        'ai_chat_sessions',
-        'ai_chat_turns'
+    SELECT DISTINCT n.nspname AS schemaname, c.relname AS tablename, pol.polname AS policyname
+    FROM pg_policy pol
+    JOIN pg_class c ON c.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'uptech'
+      AND (
+        c.relname = ANY(target_tables)
+        OR pol.oid IN (
+          SELECT d.objid
+          FROM pg_depend d
+          JOIN pg_class rc ON rc.oid = d.refobjid
+          JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+          WHERE d.classid = 'pg_policy'::regclass
+            AND d.refclassid = 'pg_class'::regclass
+            AND rn.nspname = 'uptech'
+            AND rc.relname = ANY(target_tables)
+        )
       )
   LOOP
     EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', rec.policyname, rec.schemaname, rec.tablename);
   END LOOP;
 
-  -- 1. Drop inter-table FKs among knowledge_* and ai_chat_* before widening uuid -> text
+  -- 1. Drop inter-table FKs belonging to OR referencing target knowledge_* / ai_chat_* tables
   FOR rec IN
     SELECT DISTINCT n.nspname AS schema_name, c.relname AS table_name, con.conname AS constraint_name
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_class rc ON rc.oid = con.confrelid
+    LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace
     WHERE n.nspname = 'uptech'
       AND con.contype = 'f'
-      AND c.relname IN (
-        'knowledge_spaces',
-        'knowledge_documents',
-        'knowledge_document_versions',
-        'knowledge_document_chunks',
-        'knowledge_cards',
-        'ai_chat_sessions',
-        'ai_chat_turns',
-        'knowledge_document_blobs',
-        'knowledge_document_comments'
+      AND (
+        (
+          c.relname = ANY(target_tables)
+          AND con.confrelid <> 'uptech.workspaces'::regclass
+          AND con.confrelid <> 'uptech.workspace_memberships'::regclass
+        )
+        OR (
+          rn.nspname = 'uptech'
+          AND rc.relname = ANY(target_tables)
+        )
       )
-      AND con.confrelid <> 'uptech.workspaces'::regclass
-      AND con.confrelid <> 'uptech.workspace_memberships'::regclass
   LOOP
     EXECUTE format(
       'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
