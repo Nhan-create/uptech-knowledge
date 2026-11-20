@@ -149,6 +149,7 @@ const CHAT_COPY = {
       caution: { label: "Nguồn Deprecated", variant: "warning" as const },
       empty: { label: "Chưa có nguồn Sẵn sàng", variant: "danger" as const },
     },
+    aiGeneralBadge: { label: "Trả lời AI · Gemini", variant: "info" as const },
     referencesLabel: "Nguồn tham khảo",
     broadenScope: "Thử Toàn workspace",
     openSearch: "Tìm trên /search",
@@ -177,10 +178,10 @@ const CHAT_COPY = {
     pickerEmpty: "Không có tài liệu nào trong phạm vi này.",
     pickerDone: "Xong",
     composerLabel: "Nhập câu hỏi cho Trợ lý AI",
-    composerPlaceholder: "Hỏi bất kỳ điều gì về tài liệu nội bộ…",
+    composerPlaceholder: "Hỏi bất kỳ điều gì (kiến thức chung hoặc dữ liệu UPTECH)…",
     composerShortcut: "Enter gửi · Shift+Enter xuống dòng",
     composerFootnote:
-      "UPTECH AI · Chỉ trích xuất tài liệu Sẵn sàng và luôn gắn thẻ nguồn [1]..[N].",
+      "UPTECH AI · Trò chuyện tự nhiên bằng Gemini AI và tự động trích dẫn tài liệu Sẵn sàng [1]..[N].",
     chatApiError: "Không thể kết nối máy chủ AI lúc này. Vui lòng thử lại.",
     composerEmptyError: "Vui lòng nhập câu hỏi trước khi gửi.",
     composerBusyError: "Đang xử lý câu hỏi hiện tại; vui lòng chờ hoàn tất.",
@@ -235,6 +236,7 @@ const CHAT_COPY = {
       caution: { label: "Deprecated source", variant: "warning" as const },
       empty: { label: "No Ready sources", variant: "danger" as const },
     },
+    aiGeneralBadge: { label: "General AI · Gemini", variant: "info" as const },
     referencesLabel: "Sources cited",
     broadenScope: "Try All workspace",
     openSearch: "Search /search",
@@ -262,10 +264,10 @@ const CHAT_COPY = {
     pickerEmpty: "No documents available in this scope.",
     pickerDone: "Done",
     composerLabel: "Message AI Assistant",
-    composerPlaceholder: "Ask anything across company documents…",
+    composerPlaceholder: "Ask anything (general chat or UPTECH workspace docs)…",
     composerShortcut: "Enter to send · Shift+Enter for new line",
     composerFootnote:
-      "UPTECH AI · Grounded strictly in Ready documents with verifiable [1]..[N] citations.",
+      "UPTECH AI · Conversational Gemini AI with automatic citations [1]..[N] from Ready docs.",
     chatApiError: "Unable to reach the AI backend right now. Please try again.",
     composerEmptyError: "Please enter a question before sending.",
     composerBusyError: "Processing the current message; please wait a moment.",
@@ -1450,8 +1452,14 @@ export function ChatDemo({
     }).catch(() => undefined);
   }
 
-  function renderEvidenceBadge(state: ChatTurnEvidenceState) {
-    const badgeInfo = copy.evidenceLabels[state];
+  function renderEvidenceBadge(
+    state: ChatTurnEvidenceState,
+    citationCount: number,
+  ) {
+    const badgeInfo =
+      state === "grounded" && citationCount === 0
+        ? copy.aiGeneralBadge
+        : copy.evidenceLabels[state];
     return (
       <Badge variant={badgeInfo.variant} size="sm">
         {badgeInfo.label}
@@ -1795,10 +1803,12 @@ export function ChatDemo({
                               {copy.assistantName}
                             </span>
                             <span className="text-xs text-[#505A6E]">· {turn.scopeLabel}</span>
-                            {renderEvidenceBadge(turn.evidenceState)}
+                            {renderEvidenceBadge(turn.evidenceState, turn.citations.length)}
                           </div>
 
-                          <p className="text-[15px] leading-7 text-[#1F2937]">{turn.intro}</p>
+                          <p className="whitespace-pre-line text-[15px] leading-7 text-[#1F2937]">
+                            {turn.intro}
+                          </p>
 
                           {turn.points.length > 0 ? (
                             <ol className="space-y-2.5">
@@ -1833,7 +1843,7 @@ export function ChatDemo({
                                 );
                               })}
                             </ol>
-                          ) : (
+                          ) : turn.evidenceState === "empty" ? (
                             <div className="flex flex-wrap gap-2 pt-1">
                               {turn.scope !== "workspace" ? (
                                 <button
@@ -1852,7 +1862,7 @@ export function ChatDemo({
                                 {copy.openSearch}
                               </Link>
                             </div>
-                          )}
+                          ) : null}
 
                           {/* Compact Clickable Citations Strip */}
                           {turn.citations.length > 0 ? (

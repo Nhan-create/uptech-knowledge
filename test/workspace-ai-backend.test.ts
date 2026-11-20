@@ -6,6 +6,7 @@ import test from "node:test";
 import { FIXTURE_DOCUMENTS, FIXTURE_SPACES } from "../src/features/knowledge/fixtures/catalog.ts";
 import { parseUploadedDocumentChunks, extractDocxParagraphs } from "../src/server/ai/document-parser.ts";
 import { rankReadyChunksHybrid, retrieveReadyPassagesForChat } from "../src/server/ai/retrieval.ts";
+import { UPTECH_BAOGIA_SEED_DOCUMENTS } from "../src/server/knowledge/uptech-baogia-pack.ts";
 import type { StoredKnowledgeDocument } from "../src/server/knowledge/repository.ts";
 import type { DocumentId, SpaceId } from "../src/features/knowledge/model.ts";
 
@@ -178,4 +179,32 @@ test("Utility, Notifications, and Dashboard remove all fake fixture/DemoNotice s
   assert.equal(notifSource.includes("/api/v1/workspace/notifications"), true);
   assert.equal(proxySource.includes("/api/v1/workspace/utility"), true);
   assert.equal(proxySource.includes("/api/v1/workspace/notifications"), true);
+});
+
+test("UPTECH knowledge pack indexes ready chunks and distinguishes general greetings from UPTECH queries", async () => {
+  assert.equal(UPTECH_BAOGIA_SEED_DOCUMENTS.length, 5);
+  for (const doc of UPTECH_BAOGIA_SEED_DOCUMENTS) {
+    assert.equal(doc.summary.processing.kind, "ready");
+    assert.ok(doc.summary.id.startsWith("kb_uptech_"));
+    assert.ok(doc.chunks.length >= 3);
+  }
+
+  const greetingOutcome = await retrieveReadyPassagesForChat({
+    prompt: "hi",
+    scope: "workspace",
+    selectedDocumentIds: [],
+    documents: UPTECH_BAOGIA_SEED_DOCUMENTS,
+  });
+  assert.equal(greetingOutcome.hasRelevantMatch, false);
+
+  const uptechPriceOutcome = await retrieveReadyPassagesForChat({
+    prompt: "giá thiết kế logo gói phát triển bao nhiêu?",
+    scope: "workspace",
+    selectedDocumentIds: [],
+    documents: UPTECH_BAOGIA_SEED_DOCUMENTS,
+  });
+  assert.equal(uptechPriceOutcome.hasRelevantMatch, true);
+  assert.equal(uptechPriceOutcome.evidenceState, "grounded");
+  assert.ok(uptechPriceOutcome.citations.length >= 1);
+  assert.match(uptechPriceOutcome.passages[0]?.chunk.content ?? "", /28\.900\.000đ/);
 });

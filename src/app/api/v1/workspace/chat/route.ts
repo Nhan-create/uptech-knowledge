@@ -8,11 +8,13 @@ import {
 } from "@/features/chat/chat-engine";
 import type { DocumentId, SpaceId } from "@/features/knowledge/model";
 import {
+  generateGeneralChatAnswer,
   generateGroundedChatAnswer,
   GeminiServiceError,
   readGeminiConfig,
 } from "@/server/ai/gemini-client";
 import { retrieveReadyPassagesForChat } from "@/server/ai/retrieval";
+import { UPTECH_CORE_SYSTEM_SUMMARY } from "@/server/knowledge/uptech-baogia-pack";
 import {
   listKnowledgeCards,
   loadKnowledgeDocumentsAndSpaces,
@@ -230,7 +232,7 @@ export async function POST(request: Request): Promise<Response> {
 
     emitEvent?.("citations", {
       evidenceState: retrieval.evidenceState,
-      citations: retrieval.citations,
+      citations: retrieval.hasRelevantMatch ? retrieval.citations : [],
       excludedCount: retrieval.excludedCount,
     });
 
@@ -245,29 +247,16 @@ export async function POST(request: Request): Promise<Response> {
           : `Pinned documents (${selectedDocumentIds.length})`
         : getContextScopeLabel(scope, locale, selectedDocumentIds.length, spaces);
 
-    if (retrieval.evidenceState === "empty" || retrieval.passages.length === 0) {
-      turn = {
-        id: turnId,
-        prompt,
-        scope,
-        scopeLabel,
-        evidenceState: "empty",
-        intro:
-          locale === "vi"
-            ? `Chưa có tài liệu ở trạng thái Sẵn sàng trong phạm vi "${scopeLabel}" để trả lời câu hỏi này.`
-            : `No Ready documents are available in "${scopeLabel}" to answer this question.`,
-        points: [],
-        footnote:
-          retrieval.excludedCount > 0
-            ? locale === "vi"
-              ? `Đã loại trừ ${retrieval.excludedCount} tệp đang xử lý/OCR theo quy tắc Ready-Only.`
-              : `Excluded ${retrieval.excludedCount} non-Ready document(s) under Ready-Only rules.`
-            : "",
-        citations: [],
-        excludedProcessingCount: retrieval.excludedCount,
-        feedback: null,
-      };
-    } else if (readGeminiConfig()) {
+    const geminiConfig = readGeminiConfig();
+    const canUseGeneralGemini =
+      Boolean(geminiConfig) &&
+      !(
+        scope === "selected-documents" &&
+        selectedDocumentIds.length > 0 &&
+        retrieval.passages.length === 0
+      );
+
+    if (geminiConfig && retrieval.passages.length > 0 && retrieval.hasRelevantMatch) {
       emitEvent?.("stage", { stage: "generating" });
       const dlpPrompt = redactSensitiveDlpContent(
         prompt,
@@ -278,6 +267,7 @@ export async function POST(request: Request): Promise<Response> {
         locale,
         scopeLabel,
         excludedCount: retrieval.excludedCount,
+        allowGeneralKnowledge: true,
         history,
         passages: retrieval.passages.map((passage) => ({
           number: passage.number,
@@ -296,14 +286,16 @@ export async function POST(request: Request): Promise<Response> {
 
       provider = "gemini";
       modelName = geminiAnswer.model;
+      const usedSources =
+        geminiAnswer.usedSources !== false && geminiAnswer.points.length > 0;
       const deprecationWarning =
-        retrieval.evidenceState === "caution"
+        usedSources && retrieval.evidenceState === "caution"
           ? locale === "vi"
             ? "Lưu ý: có nguồn được đánh dấu phiên bản cũ/ngừng dùng; cần đối chiếu trước khi áp dụng."
             : "Caution: at least one cited source is marked deprecated; verify before applying."
           : "";
       const excludedNote =
-        retrieval.excludedCount > 0
+        usedSources && retrieval.excludedCount > 0
           ? locale === "vi"
             ? `Đã loại trừ ${retrieval.excludedCount} tệp đang xử lý/OCR theo quy tắc Ready-Only.`
             : `Excluded ${retrieval.excludedCount} non-Ready file(s) under Ready-Only rules.`
@@ -314,11 +306,61 @@ export async function POST(request: Request): Promise<Response> {
         prompt,
         scope,
         scopeLabel,
-        evidenceState: retrieval.evidenceState,
+        evidenceState: usedSources ? retrieval.evidenceState : "grounded",
         intro: geminiAnswer.intro,
-        points: geminiAnswer.points,
+        points: usedSources ? geminiAnswer.points : [],
         footnote: [deprecationWarning, excludedNote].filter(Boolean).join(" "),
-        citations: [...retrieval.citations],
+        citations: usedSources ? [...retrieval.citations] : [],
+        excludedProcessingCount: usedSources ? retrieval.excludedCount : 0,
+        feedback: null,
+      };
+    } else if (canUseGeneralGemini) {
+      emitEvent?.("stage", { stage: "generating" });
+      const dlpPrompt = redactSensitiveDlpContent(
+        prompt,
+        policy.piiRedactionEnabled,
+      );
+      const geminiAnswer = await generateGeneralChatAnswer({
+        prompt: dlpPrompt.sanitizedText,
+        locale,
+        history,
+        uptechOverview: UPTECH_CORE_SYSTEM_SUMMARY,
+      });
+
+      provider = "gemini";
+      modelName = geminiAnswer.model;
+      turn = {
+        id: turnId,
+        prompt,
+        scope,
+        scopeLabel,
+        evidenceState: "grounded",
+        intro: geminiAnswer.intro,
+        points: [],
+        footnote: "",
+        citations: [],
+        excludedProcessingCount: 0,
+        feedback: null,
+      };
+    } else if (retrieval.evidenceState === "empty" || retrieval.passages.length === 0) {
+      turn = {
+        id: turnId,
+        prompt,
+        scope,
+        scopeLabel,
+        evidenceState: "empty",
+        intro:
+          locale === "vi"
+            ? `Chưa có tài liệu ở trạng thái Sẵn sàng trong phạm vi "${scopeLabel}" để trả lời câu hỏi này.`
+            : `No Ready documents are available in "${scopeLabel}" to answer this question.`,
+        points: [],
+        footnote:
+          retrieval.excludedCount > 0
+            ? locale === "vi"
+              ? `Đã loại trừ ${retrieval.excludedCount} tệp đang xử lý/OCR theo quy tắc Ready-Only.`
+              : `Excluded ${retrieval.excludedCount} non-Ready document(s) under Ready-Only rules.`
+            : "",
+        citations: [],
         excludedProcessingCount: retrieval.excludedCount,
         feedback: null,
       };

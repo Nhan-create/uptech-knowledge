@@ -15,6 +15,7 @@ import type { ChatTurn, ContextScopeType } from "@/features/chat/chat-engine";
 import type { ChatSession } from "@/features/chat/chat-sessions";
 import type { ExtractedDocumentChunk } from "@/server/ai/document-parser";
 import { getRuntimeDatabasePool } from "@/server/db/runtime-pool";
+import { UPTECH_BAOGIA_SEED_DOCUMENTS } from "@/server/knowledge/uptech-baogia-pack";
 import {
   canAccessKnowledgeSpace,
   isWorkspacePreviewModeEnabled,
@@ -226,7 +227,7 @@ function buildSeedState(): PersistedWorkspaceState {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     spaces: [...DEFAULT_SPACES],
-    documents: [],
+    documents: [...UPTECH_BAOGIA_SEED_DOCUMENTS],
     sessions: [],
     cards: [],
     notifications: [],
@@ -420,13 +421,87 @@ export async function loadKnowledgeDocumentsAndSpaces(
         }
       }
 
-      const docRows = await query(
+      let docRows = await query(
         `SELECT id, space_id, name, file_type, version_label, detail, owner_label,
                 updated_label, processing_kind, processing_label, governance_kind,
                 governance_label, byte_size, is_user_uploaded
          FROM uptech.knowledge_documents
          ORDER BY created_at DESC`,
       );
+
+      if (
+        spaceRows.length > 0 &&
+        !docRows.rows.some((r) => String(r.id).startsWith("kb_uptech_"))
+      ) {
+        const availableSpaceIds = new Set(spaceRows.map((s) => String(s.id)));
+        const fallbackSpaceId = String(spaceRows[0]!.id);
+        for (const seedDoc of UPTECH_BAOGIA_SEED_DOCUMENTS) {
+          const targetSpaceId = availableSpaceIds.has(seedDoc.summary.space.id)
+            ? seedDoc.summary.space.id
+            : fallbackSpaceId;
+          await query(
+            `INSERT INTO uptech.knowledge_documents (
+               workspace_id, id, space_id, name, file_type, version_label, detail,
+               owner_label, updated_label, processing_kind, processing_label,
+               governance_kind, governance_label, byte_size, is_user_uploaded
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', $10, 'active', $11, $12, false)
+             ON CONFLICT (workspace_id, id) DO NOTHING`,
+            [
+              access.workspaceId,
+              seedDoc.summary.id,
+              targetSpaceId,
+              seedDoc.summary.name,
+              seedDoc.summary.fileType,
+              seedDoc.summary.versionLabel,
+              seedDoc.summary.detail,
+              seedDoc.summary.ownerLabel,
+              seedDoc.summary.updatedLabel,
+              seedDoc.summary.processing.label,
+              seedDoc.summary.governance[0]?.label ?? "Dữ liệu UPTECH",
+              seedDoc.byteSize,
+            ],
+          );
+          await query(
+            `INSERT INTO uptech.knowledge_document_versions (
+               workspace_id, document_id, version_id, version_label, note, updated_label
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (workspace_id, document_id, version_id) DO NOTHING`,
+            [
+              access.workspaceId,
+              seedDoc.summary.id,
+              seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+              seedDoc.summary.versionLabel,
+              seedDoc.summary.detail,
+              seedDoc.summary.updatedLabel,
+            ],
+          );
+          for (const chunk of seedDoc.chunks) {
+            await query(
+              `INSERT INTO uptech.knowledge_document_chunks (
+                 workspace_id, chunk_id, document_id, chunk_index, heading, locator, content
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (workspace_id, chunk_id) DO NOTHING`,
+              [
+                access.workspaceId,
+                chunk.chunkId,
+                seedDoc.summary.id,
+                chunk.chunkIndex,
+                chunk.heading,
+                chunk.locator,
+                chunk.content,
+              ],
+            );
+          }
+        }
+        docRows = await query(
+          `SELECT id, space_id, name, file_type, version_label, detail, owner_label,
+                  updated_label, processing_kind, processing_label, governance_kind,
+                  governance_label, byte_size, is_user_uploaded
+           FROM uptech.knowledge_documents
+           ORDER BY created_at DESC`,
+        );
+      }
+
       const chunkRows = await query(
         `SELECT chunk_id, document_id, chunk_index, heading, locator, content, embedding_json
          FROM uptech.knowledge_document_chunks

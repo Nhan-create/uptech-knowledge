@@ -19,6 +19,7 @@ export interface GroundedConversationMessage {
 export interface GeminiGroundedAnswer {
   readonly model: string;
   readonly intro: string;
+  readonly usedSources?: boolean;
   readonly points: readonly Readonly<{
     heading: string;
     detail: string;
@@ -219,6 +220,7 @@ export async function generateGroundedChatAnswer(args: Readonly<{
   history?: readonly GroundedConversationMessage[];
   scopeLabel: string;
   excludedCount: number;
+  allowGeneralKnowledge?: boolean;
 }>): Promise<GeminiGroundedAnswer> {
   const config = readGeminiConfig();
   if (!config) {
@@ -231,21 +233,34 @@ export async function generateGroundedChatAnswer(args: Readonly<{
   const maxCitationNumber = args.passages.length;
   const languageInstruction =
     args.locale === "vi"
-      ? "Trả lời bằng tiếng Việt tự nhiên, rõ ràng, chuyên nghiệp, đi thẳng vào trọng tâm."
-      : "Respond in concise, natural professional English.";
+      ? "Trả lời bằng tiếng Việt tự nhiên, thân thiện, rõ ràng, chuyên nghiệp như một trợ lý AI hiện đại (giống ChatGPT)."
+      : "Respond in clear, friendly, natural conversational English.";
 
-  const systemInstruction = [
-    "You are UPTECH Knowledge Assistant — an enterprise RAG assistant operating under strict Ready-Only evidence rules.",
-    languageInstruction,
-    `Current scope: "${args.scopeLabel}". Non-ready documents excluded from search: ${args.excludedCount}.`,
-    "CRITICAL RULES:",
-    "1. Answer ONLY using facts explicitly supported by the numbered [1]..[N] source passages below.",
-    "2. Never fabricate policy numbers, dates, obligations, or rules not present in those passages.",
-    "3. If the provided passages do not contain enough information to answer the question cleanly, say so transparently in `intro` and point out what topics the available sources cover.",
-    "4. Return strict JSON matching this exact structure:",
-    '   { "intro": "Concise 1-2 sentence direct answer", "points": [ { "heading": "Short point title", "detail": "Detailed grounded explanation without inline [1] tags", "citationNumber": 1 } ] }',
-    "5. Provide 1 to 5 points when evidence supports them. Every `citationNumber` MUST be an integer between 1 and N referencing the numbered sources below. Do NOT put literal [1] markers inside `intro` or `detail`.",
-  ].join("\n");
+  const systemInstruction = args.allowGeneralKnowledge
+    ? [
+        "You are UPTECH Assistant — a versatile enterprise AI assistant (conversational like ChatGPT, grounded with UPTECH internal knowledge & workspace documents).",
+        languageInstruction,
+        `Current scope: "${args.scopeLabel}". Non-ready documents excluded from search: ${args.excludedCount}.`,
+        "GUIDELINES:",
+        "1. First check whether the numbered [1]..[N] source passages below are relevant to the user's question.",
+        "2. When relevant to UPTECH products, prices, policies, workflows, or uploaded documents: anchor every factual claim, price, duration, and rule strictly in [1]..[N]. Never fabricate UPTECH prices or policies not in the sources. You may combine general AI reasoning, comparison, drafting, or explanation to make the answer helpful and natural.",
+        "3. When the user is chatting generally (greeting, general knowledge, coding, writing, brainstorming) and [1]..[N] are NOT relevant: answer naturally like ChatGPT using your general knowledge, set `usedSources` to `false`, and keep `points` as `[]`.",
+        "4. Return strict JSON matching this exact structure:",
+        '   { "usedSources": true, "intro": "Clear natural answer (can span 1-4 concise paragraphs with line breaks)", "points": [ { "heading": "Short point title", "detail": "Detailed explanation without literal [1] markers", "citationNumber": 1 } ] }',
+        "5. Only include `points` (1 to 5 items) when `usedSources` is `true` and every `citationNumber` is an integer 1..N pointing to a source that genuinely supports it. Never put literal [1] markers inside `intro` or `detail`.",
+      ].join("\n")
+    : [
+        "You are UPTECH Knowledge Assistant — an enterprise RAG assistant operating under strict Ready-Only evidence rules.",
+        languageInstruction,
+        `Current scope: "${args.scopeLabel}". Non-ready documents excluded from search: ${args.excludedCount}.`,
+        "CRITICAL RULES:",
+        "1. Answer ONLY using facts explicitly supported by the numbered [1]..[N] source passages below.",
+        "2. Never fabricate policy numbers, dates, obligations, or rules not present in those passages.",
+        "3. If the provided passages do not contain enough information to answer the question cleanly, say so transparently in `intro` and point out what topics the available sources cover.",
+        "4. Return strict JSON matching this exact structure:",
+        '   { "usedSources": true, "intro": "Concise 1-2 sentence direct answer", "points": [ { "heading": "Short point title", "detail": "Detailed grounded explanation without inline [1] tags", "citationNumber": 1 } ] }',
+        "5. Provide 1 to 5 points when evidence supports them. Every `citationNumber` MUST be an integer between 1 and N referencing the numbered sources below. Do NOT put literal [1] markers inside `intro` or `detail`.",
+      ].join("\n");
 
   const contextBlock = args.passages
     .map(
@@ -281,8 +296,8 @@ export async function generateGroundedChatAnswer(args: Readonly<{
         },
       ],
       generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 1_200,
+        temperature: args.allowGeneralKnowledge ? 0.35 : 0.2,
+        maxOutputTokens: args.allowGeneralKnowledge ? 2_048 : 1_200,
         responseMimeType: "application/json",
       },
     },
@@ -290,6 +305,7 @@ export async function generateGroundedChatAnswer(args: Readonly<{
 
   const text = extractCandidateText(raw);
   const parsed = parseJsonResponseSafely<{
+    usedSources?: unknown;
     intro?: unknown;
     points?: Array<{ heading?: unknown; detail?: unknown; citationNumber?: unknown }>;
   }>(text);
@@ -303,9 +319,10 @@ export async function generateGroundedChatAnswer(args: Readonly<{
     }
     return {
       model: usedModel,
+      usedSources: maxCitationNumber > 0 && !args.allowGeneralKnowledge,
       intro: text,
       points:
-        maxCitationNumber > 0
+        maxCitationNumber > 0 && !args.allowGeneralKnowledge
           ? [
               {
                 heading: args.passages[0]!.heading,
@@ -317,17 +334,19 @@ export async function generateGroundedChatAnswer(args: Readonly<{
     };
   }
 
-  const cleanIntro = parsed.intro.replace(/\s*\[\d+\]\s*/g, " ").trim();
-  const rawPoints = Array.isArray(parsed.points) ? parsed.points : [];
+  const usedSources =
+    args.allowGeneralKnowledge && parsed.usedSources === false ? false : true;
+  const cleanIntro = parsed.intro.replace(/[^\S\r\n]*\[\d+\][^\S\r\n]*/g, " ").trim();
+  const rawPoints = usedSources && Array.isArray(parsed.points) ? parsed.points : [];
   const sanitizedPoints = rawPoints
     .map((point) => {
       const heading =
         typeof point.heading === "string"
-          ? point.heading.replace(/\s*\[\d+\]\s*/g, " ").trim()
+          ? point.heading.replace(/[^\S\r\n]*\[\d+\][^\S\r\n]*/g, " ").trim()
           : "";
       const detail =
         typeof point.detail === "string"
-          ? point.detail.replace(/\s*\[\d+\]\s*/g, " ").trim()
+          ? point.detail.replace(/[^\S\r\n]*\[\d+\][^\S\r\n]*/g, " ").trim()
           : "";
       const rawNumber =
         typeof point.citationNumber === "number"
@@ -355,8 +374,82 @@ export async function generateGroundedChatAnswer(args: Readonly<{
 
   return {
     model: usedModel,
+    usedSources: usedSources && sanitizedPoints.length > 0,
     intro: cleanIntro,
     points: sanitizedPoints,
+  };
+}
+
+export async function generateGeneralChatAnswer(args: Readonly<{
+  prompt: string;
+  locale: "vi" | "en";
+  history?: readonly GroundedConversationMessage[];
+  uptechOverview?: string;
+}>): Promise<GeminiGroundedAnswer> {
+  const config = readGeminiConfig();
+  if (!config) {
+    throw new GeminiServiceError(
+      "NOT_CONFIGURED",
+      "Gemini API key is not configured on the server.",
+    );
+  }
+
+  const languageInstruction =
+    args.locale === "vi"
+      ? "Trả lời bằng tiếng Việt tự nhiên, thông minh, rõ ràng và thân thiện như ChatGPT."
+      : "Respond in clear, natural, helpful conversational English like ChatGPT.";
+
+  const systemInstruction = [
+    "You are Trợ lý AI UPTECH (UPTECH Assistant) — an enterprise AI assistant that works seamlessly for both everyday conversational tasks (chatting, writing, analysis, coding, brainstorming) and UPTECH company knowledge.",
+    languageInstruction,
+    "RULES:",
+    "1. Converse naturally and directly answer the user's request.",
+    "2. Never invent unpublished exact UPTECH price numbers or internal rules if they are not stated below; if asked for detailed pricing not included below, summarize what you know from the overview and suggest checking/asking for the specific package name.",
+    "3. Keep responses well-structured using short paragraphs or simple bullet dashes when helpful.",
+    args.uptechOverview ? `\n${args.uptechOverview}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const historyContents = (args.history ?? []).slice(-6).flatMap((turn) => [
+    { role: "user", parts: [{ text: turn.prompt }] },
+    { role: "model", parts: [{ text: turn.answerSummary }] },
+  ]);
+
+  const { model: usedModel, raw } = await callGenerateContentWithFallback(
+    config.chatModel,
+    config.apiKey,
+    {
+      systemInstruction: {
+        parts: [{ text: systemInstruction }],
+      },
+      contents: [
+        ...historyContents,
+        {
+          role: "user",
+          parts: [{ text: args.prompt }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.6,
+        maxOutputTokens: 2_048,
+      },
+    },
+  );
+
+  const text = extractCandidateText(raw);
+  if (!text) {
+    throw new GeminiServiceError(
+      "INVALID_RESPONSE",
+      "Gemini returned an empty conversational response.",
+    );
+  }
+
+  return {
+    model: usedModel,
+    usedSources: false,
+    intro: text,
+    points: [],
   };
 }
 

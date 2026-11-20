@@ -22,6 +22,7 @@ export interface RetrievedReadyPassage {
 export interface RetrievalOutcome {
   readonly evidenceState: ChatTurnEvidenceState;
   readonly excludedCount: number;
+  readonly hasRelevantMatch: boolean;
   readonly passages: readonly RetrievedReadyPassage[];
   readonly citations: readonly ChatCitationSource[];
 }
@@ -83,25 +84,52 @@ function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
   return denom > 0 ? dot / denom : 0;
 }
 
+function matchesLexicalToken(haystack: string, token: string): boolean {
+  if (token.length <= 3) {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "u").test(
+      haystack,
+    );
+  }
+  return haystack.includes(token);
+}
+
 function lexicalChunkMatch(
   tokens: readonly string[],
   foldedQuery: string,
   doc: StoredKnowledgeDocument,
   chunk: StoredDocumentChunk,
 ): { readonly score: number; readonly hit: boolean } {
+  const chunkHeading = normalizeFold(chunk.heading);
+  const titleHaystack = normalizeFold(`${doc.summary.name} ${chunk.heading}`);
   const haystack = normalizeFold(
     `${doc.summary.name} ${doc.summary.space.name} ${chunk.heading} ${chunk.content}`,
   );
-  const titleHaystack = normalizeFold(`${doc.summary.name} ${chunk.heading}`);
   let score = 0;
 
   if (foldedQuery.length >= 3 && haystack.includes(foldedQuery)) {
     score += 18;
   }
+  const rawTokens = foldedQuery
+    .split(/[\s,.;:!?()[\]{}"'/\\-]+/u)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+  for (let i = 0; i + 1 < rawTokens.length; i += 1) {
+    const bigram = `${rawTokens[i]} ${rawTokens[i + 1]}`;
+    if (haystack.includes(bigram)) {
+      score += 10;
+      if (chunkHeading.includes(bigram)) {
+        score += 6;
+      }
+    }
+  }
   for (const token of tokens) {
-    if (haystack.includes(token)) {
+    if (matchesLexicalToken(haystack, token)) {
       score += 4;
-      if (titleHaystack.includes(token)) {
+      if (matchesLexicalToken(titleHaystack, token)) {
+        score += 3;
+      }
+      if (matchesLexicalToken(chunkHeading, token)) {
         score += 3;
       }
     }
@@ -109,7 +137,7 @@ function lexicalChunkMatch(
 
   return {
     score,
-    hit: score > 0 || (tokens.length === 0 && haystack.includes(foldedQuery)),
+    hit: score > 0 || (tokens.length === 0 && matchesLexicalToken(haystack, foldedQuery)),
   };
 }
 
@@ -227,6 +255,7 @@ export async function retrieveReadyPassagesForChat(args: Readonly<{
     return {
       evidenceState: "empty",
       excludedCount,
+      hasRelevantMatch: false,
       passages: [],
       citations: [],
     };
@@ -279,10 +308,21 @@ export async function retrieveReadyPassagesForChat(args: Readonly<{
     isLocalUpload: p.document.summary.id.startsWith("local-"),
   }));
 
+  const foldedPrompt = normalizeFold(args.prompt);
+  const isSummaryIntent = SUMMARY_INTENT_PATTERN.test(foldedPrompt);
+  const isPinnedScope =
+    args.scope === "selected-documents" && selectedIdSet.size > 0;
+  const hasSemanticOrLexicalHit = selected.some(
+    (item) => item.lexicalHit || item.semanticScore >= 0.45,
+  );
+  const hasRelevantMatch =
+    isPinnedScope || isSummaryIntent || hasSemanticOrLexicalHit;
+
   const hasCaution = passages.some((p) => p.isDeprecated);
   return {
     evidenceState: hasCaution ? "caution" : "grounded",
     excludedCount,
+    hasRelevantMatch,
     passages,
     citations,
   };
