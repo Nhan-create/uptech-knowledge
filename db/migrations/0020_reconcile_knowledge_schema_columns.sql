@@ -33,6 +33,25 @@ DECLARE
   col_name text;
   col_type text;
 BEGIN
+  -- 0. Drop all existing RLS policies on knowledge_* and ai_chat_* (e.g. legacy *_api_read)
+  --    so PostgreSQL allows altering column types from uuid -> text cleanly.
+  FOR rec IN
+    SELECT schemaname, tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'uptech'
+      AND tablename IN (
+        'knowledge_spaces',
+        'knowledge_documents',
+        'knowledge_document_versions',
+        'knowledge_document_chunks',
+        'knowledge_cards',
+        'ai_chat_sessions',
+        'ai_chat_turns'
+      )
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', rec.policyname, rec.schemaname, rec.tablename);
+  END LOOP;
+
   -- 1. Drop inter-table FKs among knowledge_* and ai_chat_* before widening uuid -> text
   FOR rec IN
     SELECT DISTINCT n.nspname AS schema_name, c.relname AS table_name, con.conname AS constraint_name
@@ -218,6 +237,11 @@ BEGIN
     pol := tbl || '_tenant_policy';
     EXECUTE format('ALTER TABLE uptech.%I ENABLE ROW LEVEL SECURITY', tbl);
     EXECUTE format('ALTER TABLE uptech.%I FORCE ROW LEVEL SECURITY', tbl);
+    EXECUTE format('DROP POLICY IF EXISTS %I ON uptech.%I', tbl || '_migration_owner', tbl);
+    EXECUTE format(
+      'CREATE POLICY %I ON uptech.%I TO uptech_migration_owner USING (true) WITH CHECK (true)',
+      tbl || '_migration_owner', tbl
+    );
     EXECUTE format('DROP POLICY IF EXISTS %I ON uptech.%I', pol, tbl);
     EXECUTE format(
       'CREATE POLICY %I ON uptech.%I TO uptech_api_runtime ' ||
