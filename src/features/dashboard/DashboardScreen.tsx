@@ -359,7 +359,7 @@ export function DashboardScreen({ spaces, documents }: DashboardScreenProps) {
               <span>{copy.actionCompare}</span>
             </Link>
             <Link
-              href="/documents#upload-demo-heading"
+              href="/documents#library-upload-zone"
               className="glean-btn glean-btn-secondary glean-btn-sm"
             >
               <FolderOpen aria-hidden="true" className="size-3.5" />

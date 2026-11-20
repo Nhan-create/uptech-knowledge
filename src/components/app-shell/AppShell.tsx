@@ -278,7 +278,7 @@ export default function AppShell({
             </Link>
 
             <Link
-              href="/documents#upload-demo-heading"
+              href="/documents#library-upload-zone"
               title={copy.addDocument}
               className="glean-btn glean-btn-navy glean-topnav-add"
             >

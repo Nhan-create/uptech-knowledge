@@ -315,15 +315,17 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
   async function handleSaveToKnowledgeCard() {
     if (!result || savingCards || savedCardsCount !== null) return;
     setSavingCards(true);
+    setErrorMessage(null);
     try {
       const firstDoc =
         inputMode === "library" && selectedDocIds[0]
           ? readyDocuments.find((d) => d.id === selectedDocIds[0])
           : undefined;
-      const summaryText =
+      const summaryText = (
         result.takeaways.length > 0
           ? result.takeaways.join(" • ")
-          : editableOutput.slice(0, 400);
+          : editableOutput
+      ).slice(0, 2000);
 
       const response = await fetch("/api/v1/workspace/knowledge", {
         method: "POST",
@@ -331,13 +333,14 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
         body: JSON.stringify({
           mode: "manual",
           kind: activeTool === "checklist" ? "rule" : "decision",
-          title: result.title,
+          title: result.title.slice(0, 180),
           summary: summaryText,
           rationale:
             locale === "en"
               ? `Saved from AI Utility (${selectedTool.en.title})`
               : `Lưu từ Tiện ích AI (${selectedTool.vi.title})`,
           spaceId: firstDoc?.space.id ?? spaces[0]?.id ?? "spc_8f2a01",
+          documentId: firstDoc?.id ?? undefined,
           sourceDocumentId: firstDoc?.id ?? null,
           sourceDocumentName:
             firstDoc?.name ??
@@ -346,7 +349,23 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
       });
       if (response.ok) {
         setSavedCardsCount(1);
+      } else {
+        const errPayload = (await response.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        setErrorMessage(
+          errPayload?.error?.message ??
+            (locale === "en"
+              ? "Could not save Knowledge Card."
+              : "Không thể lưu thành Thẻ tri thức."),
+        );
       }
+    } catch {
+      setErrorMessage(
+        locale === "en"
+          ? "Network error while saving Knowledge Card."
+          : "Lỗi kết nối khi lưu Thẻ tri thức.",
+      );
     } finally {
       setSavingCards(false);
     }

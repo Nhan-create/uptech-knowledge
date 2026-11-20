@@ -53,6 +53,7 @@ export async function POST(request: Request): Promise<Response> {
   let body: {
     mode?: unknown;
     documentId?: unknown;
+    sourceDocumentId?: unknown;
     kind?: unknown;
     title?: unknown;
     summary?: unknown;
@@ -174,10 +175,13 @@ export async function POST(request: Request): Promise<Response> {
   const spaceId =
     typeof body.spaceId === "string" ? body.spaceId.trim() : spaces[0]?.id ?? "spc_8f2a01";
   const matchedSpace = spaces.find((s) => s.id === spaceId) ?? spaces[0];
-  const sourceDocId =
+  const rawDocumentId =
     typeof body.documentId === "string" && body.documentId.trim()
       ? body.documentId.trim()
-      : null;
+      : typeof body.sourceDocumentId === "string" && body.sourceDocumentId.trim()
+        ? body.sourceDocumentId.trim()
+        : null;
+  const sourceDocId = rawDocumentId;
   const sourceDoc = sourceDocId
     ? documents.find((d) => d.summary.id === sourceDocId) ?? null
     : null;

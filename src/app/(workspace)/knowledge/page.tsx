@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 
 import { KnowledgeCardsWorkbench } from "@/features/knowledge/KnowledgeCardsWorkbench";
 import { getKnowledgeReadAdapter } from "@/features/knowledge/get-read-adapter";
-import {
-  getPreviewWorkspaceContext,
-  isWorkspacePreviewModeEnabled,
-} from "@/server/knowledge/access-context";
+import { resolveWorkspaceServerAccess } from "@/server/knowledge/access-context";
 import {
   listKnowledgeCards,
   type KnowledgeCardRecord,
@@ -17,15 +15,16 @@ export const dynamic = "force-dynamic";
 
 export default async function KnowledgePage() {
   const adapter = getKnowledgeReadAdapter();
-  const [spaces, docOutcome] = await Promise.all([
+  const access = await resolveWorkspaceServerAccess(await headers());
+  const [spaces, docOutcome, cards] = await Promise.all([
     adapter.listSpaces(),
     adapter.listDocuments({ query: "", processing: "ready" }),
+    access
+      ? listKnowledgeCards(access).catch(
+          (): readonly KnowledgeCardRecord[] => [],
+        )
+      : Promise.resolve<readonly KnowledgeCardRecord[]>([]),
   ]);
-
-  let cards: readonly KnowledgeCardRecord[] = [];
-  if (isWorkspacePreviewModeEnabled()) {
-    cards = await listKnowledgeCards(getPreviewWorkspaceContext()).catch(() => []);
-  }
 
   const readyDocuments =
     docOutcome.kind === "ready" ? docOutcome.documents : [];

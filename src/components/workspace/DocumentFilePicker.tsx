@@ -32,7 +32,7 @@ const COPY = {
     chooseFiles: "Chọn tệp từ máy",
     uploading: "Đang tải & lập chỉ mục…",
     unsupported: (name: string) =>
-      `Tệp "${name}" không được hỗ trợ. Chỉ nhận PDF, DOCX, DOCX, MD, TXT, CSV, JSON.`,
+      `Tệp "${name}" không được hỗ trợ. Chỉ nhận PDF, DOCX, MD, TXT, CSV, JSON.`,
     tooLarge: (name: string) => `Tệp "${name}" vượt quá giới hạn 10 MB.`,
     failed: "Không thể tải tệp lên. Vui lòng thử lại.",
     uploadedDone: (count: number) => `Đã lập chỉ mục ${count} tài liệu:`,

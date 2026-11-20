@@ -7,7 +7,10 @@ import { FIXTURE_DOCUMENTS, FIXTURE_SPACES } from "../src/features/knowledge/fix
 import { parseUploadedDocumentChunks, extractDocxParagraphs } from "../src/server/ai/document-parser.ts";
 import { rankReadyChunksHybrid, retrieveReadyPassagesForChat } from "../src/server/ai/retrieval.ts";
 import { UPTECH_BAOGIA_SEED_DOCUMENTS } from "../src/server/knowledge/uptech-baogia-pack.ts";
-import type { StoredKnowledgeDocument } from "../src/server/knowledge/repository.ts";
+import {
+  buildLegacySafeInsert,
+  type StoredKnowledgeDocument,
+} from "../src/server/knowledge/repository.ts";
 import type { DocumentId, SpaceId } from "../src/features/knowledge/model.ts";
 
 function buildMinimalZipWithDocxXml(xmlContent: string): Buffer {
@@ -207,4 +210,42 @@ test("UPTECH knowledge pack indexes ready chunks and distinguishes general greet
   assert.equal(uptechPriceOutcome.evidenceState, "grounded");
   assert.ok(uptechPriceOutcome.citations.length >= 1);
   assert.match(uptechPriceOutcome.passages[0]?.chunk.content ?? "", /28\.900\.000đ/);
+});
+
+test("buildLegacySafeInsert populates checksum even when table column has default + check constraint", () => {
+  const inserted = buildLegacySafeInsert({
+    tableName: "knowledge_documents",
+    baseColumns: ["workspace_id", "id", "name"],
+    baseValues: ["00000000-0000-4000-8000-000000000001", "doc_test_1", "Test.docx"],
+    requiredColumns: [
+      {
+        columnName: "checksum",
+        udtName: "text",
+        isRequiredNoDefault: false,
+        hasCheckConstraint: true,
+        requiresSha256Prefix: true,
+      },
+      {
+        columnName: "optional_note",
+        udtName: "text",
+        isRequiredNoDefault: false,
+        hasCheckConstraint: false,
+      },
+    ],
+    access: {
+      mode: "authenticated",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      membershipId: "00000000-0000-4000-8000-000000000002",
+      actorLabel: "user-1",
+      workspaceRole: "OWNER",
+      departmentKey: null,
+    },
+    contextDefaults: {
+      checksum: "abcdef1234567890",
+    },
+  });
+
+  assert.match(inserted.sql, /"checksum"/);
+  assert.equal(inserted.sql.includes("optional_note"), false);
+  assert.ok(inserted.values.includes("sha256:abcdef1234567890"));
 });

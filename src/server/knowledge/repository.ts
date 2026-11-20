@@ -262,10 +262,17 @@ async function readPreviewStoreFile(): Promise<PersistedWorkspaceState> {
         return migratedState;
       }
 
+      const hasUptechSeed = parsed.documents.some((doc) =>
+        doc.summary.id.startsWith("kb_uptech_"),
+      );
+      const documents = hasUptechSeed
+        ? parsed.documents
+        : [...UPTECH_BAOGIA_SEED_DOCUMENTS, ...parsed.documents];
+
       return {
         schemaVersion: CURRENT_SCHEMA_VERSION,
-        spaces: parsed.spaces,
-        documents: parsed.documents,
+        spaces: parsed.spaces.length > 0 ? parsed.spaces : [...DEFAULT_SPACES],
+        documents,
         sessions: parsed.sessions,
         cards: Array.isArray(parsed.cards) ? parsed.cards : [],
         notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
@@ -370,16 +377,40 @@ async function withTenantPostgres<T>(
   }
 }
 
-interface RequiredColumnMeta {
+export interface RequiredColumnMeta {
   readonly columnName: string;
   readonly udtName: string;
+  readonly isRequiredNoDefault: boolean;
+  readonly hasCheckConstraint: boolean;
   readonly allowedValues?: readonly string[];
+  readonly requiresSha256Prefix?: boolean;
 }
 
 type TenantPgQuery = (
   sql: string,
   params?: unknown[],
 ) => Promise<{ rows: Record<string, unknown>[] }>;
+
+async function runWithSavepoint<T>(
+  query: TenantPgQuery,
+  savepointName: string,
+  fn: () => Promise<T>,
+  fallback: () => Promise<T>,
+): Promise<T> {
+  if (!/^[a-z_][a-z0-9_]*$/iu.test(savepointName)) {
+    throw new Error(`Invalid savepoint identifier: ${savepointName}`);
+  }
+  await query(`SAVEPOINT ${savepointName}`);
+  try {
+    const result = await fn();
+    await query(`RELEASE SAVEPOINT ${savepointName}`);
+    return result;
+  } catch {
+    await query(`ROLLBACK TO SAVEPOINT ${savepointName}`).catch(() => undefined);
+    await query(`RELEASE SAVEPOINT ${savepointName}`).catch(() => undefined);
+    return fallback();
+  }
+}
 
 function extractAllowedLiterals(constraintDef: string): string[] {
   const arrayMatch = constraintDef.match(/ARRAY\[([^\]]+)\]/u);
@@ -407,54 +438,74 @@ async function loadRequiredColumnsByTable(
   const res = await query(
     `SELECT table_name::text AS table_name,
             column_name::text AS column_name,
-            udt_name::text AS udt_name
+            udt_name::text AS udt_name,
+            is_nullable::text AS is_nullable,
+            column_default::text AS column_default
      FROM information_schema.columns
      WHERE table_schema = 'uptech'
        AND table_name = ANY($1::text[])
-       AND is_nullable = 'NO'
-       AND column_default IS NULL
      ORDER BY ordinal_position ASC`,
     [tableNames],
   );
 
+  const checkDefsByTable = new Map<string, string[]>();
   const allowedByTableCol = new Map<string, Map<string, readonly string[]>>();
-  try {
-    const checkRes = await query(
-      `SELECT c.relname::text AS table_name,
-              pg_catalog.pg_get_constraintdef(con.oid) AS def
-       FROM pg_catalog.pg_constraint con
-       JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
-       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'uptech'
-         AND c.relname = ANY($1::text[])
-         AND con.contype = 'c'`,
-      [tableNames],
-    );
-    for (const row of checkRes.rows) {
-      const tbl = String(row.table_name);
-      const def = String(row.def ?? "");
-      const literals = extractAllowedLiterals(def);
-      if (literals.length === 0) continue;
-      const colMatch = def.match(/\(\s*([a-z_][a-z0-9_]*)\s*=\s*ANY/iu);
-      if (!colMatch) continue;
-      const colName = colMatch[1]!;
-      const colMap = allowedByTableCol.get(tbl) ?? new Map<string, readonly string[]>();
-      colMap.set(colName, literals);
-      allowedByTableCol.set(tbl, colMap);
-    }
-  } catch {
-    // Best-effort check-constraint inspection.
-  }
+  await runWithSavepoint(
+    query,
+    "sp_load_check_constraints",
+    async () => {
+      const checkRes = await query(
+        `SELECT c.relname::text AS table_name,
+                pg_catalog.pg_get_constraintdef(con.oid) AS def
+         FROM pg_catalog.pg_constraint con
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'uptech'
+           AND c.relname = ANY($1::text[])
+           AND con.contype = 'c'`,
+        [tableNames],
+      );
+      for (const row of checkRes.rows) {
+        const tbl = String(row.table_name);
+        const def = String(row.def ?? "");
+        const defs = checkDefsByTable.get(tbl) ?? [];
+        defs.push(def);
+        checkDefsByTable.set(tbl, defs);
+
+        const literals = extractAllowedLiterals(def);
+        if (literals.length === 0) continue;
+        const colMatch = def.match(/\(\s*([a-z_][a-z0-9_]*)\s*=\s*ANY/iu);
+        if (!colMatch) continue;
+        const colName = colMatch[1]!;
+        const colMap = allowedByTableCol.get(tbl) ?? new Map<string, readonly string[]>();
+        colMap.set(colName, literals);
+        allowedByTableCol.set(tbl, colMap);
+      }
+    },
+    async () => undefined,
+  );
 
   const byTable = new Map<string, RequiredColumnMeta[]>();
   for (const row of res.rows) {
     const tbl = String(row.table_name);
     const colName = String(row.column_name);
+    const isNullable = String(row.is_nullable ?? "YES");
+    const hasDefault = row.column_default !== null && row.column_default !== undefined;
+    const isRequiredNoDefault = isNullable === "NO" && !hasDefault;
+    const tblDefs = checkDefsByTable.get(tbl) ?? [];
+    const colPattern = new RegExp(`\\b${colName}\\b`, "iu");
+    const matchingDefs = tblDefs.filter((def) => colPattern.test(def));
+    const hasCheckConstraint = matchingDefs.length > 0;
+    const requiresSha256Prefix = matchingDefs.some((def) => /sha256:/iu.test(def));
+
     const list = byTable.get(tbl) ?? [];
     list.push({
       columnName: colName,
       udtName: String(row.udt_name),
+      isRequiredNoDefault,
+      hasCheckConstraint,
       allowedValues: allowedByTableCol.get(tbl)?.get(colName),
+      requiresSha256Prefix,
     });
     byTable.set(tbl, list);
   }
@@ -501,7 +552,7 @@ function defaultValueForLegacyColumn(
   return "";
 }
 
-function buildLegacySafeInsert(args: Readonly<{
+export function buildLegacySafeInsert(args: Readonly<{
   tableName: string;
   baseColumns: readonly string[];
   baseValues: readonly unknown[];
@@ -519,16 +570,39 @@ function buildLegacySafeInsert(args: Readonly<{
   for (const reqCol of args.requiredColumns ?? []) {
     if (present.has(reqCol.columnName)) continue;
     if (!/^[a-z_][a-z0-9_]*$/u.test(reqCol.columnName)) continue;
+
+    const rawOverride =
+      args.contextDefaults &&
+      Object.prototype.hasOwnProperty.call(args.contextDefaults, reqCol.columnName)
+        ? args.contextDefaults[reqCol.columnName]
+        : undefined;
+    const hasContextOverride =
+      rawOverride !== undefined &&
+      (reqCol.udtName !== "uuid" || Boolean(rawOverride));
+
+    if (
+      !reqCol.isRequiredNoDefault &&
+      !reqCol.hasCheckConstraint &&
+      !hasContextOverride
+    ) {
+      continue;
+    }
+
     present.add(reqCol.columnName);
     columns.push(reqCol.columnName);
-    const hasContextOverride =
-      args.contextDefaults &&
-      Object.prototype.hasOwnProperty.call(args.contextDefaults, reqCol.columnName) &&
-      args.contextDefaults[reqCol.columnName] !== undefined;
     const rawCandidate = hasContextOverride
-      ? args.contextDefaults![reqCol.columnName]
+      ? rawOverride
       : defaultValueForLegacyColumn(reqCol.udtName, args.access);
-    values.push(resolveAllowedValue(rawCandidate, reqCol.allowedValues));
+    let finalValue = resolveAllowedValue(rawCandidate, reqCol.allowedValues);
+    if (
+      reqCol.requiresSha256Prefix &&
+      typeof finalValue === "string" &&
+      finalValue.length > 0 &&
+      !finalValue.startsWith("sha256:")
+    ) {
+      finalValue = `sha256:${finalValue}`;
+    }
+    values.push(finalValue);
     if (reqCol.udtName === "jsonb") casts[reqCol.columnName] = "::jsonb";
     else if (reqCol.udtName === "json") casts[reqCol.columnName] = "::json";
     else if (reqCol.udtName === "uuid") casts[reqCol.columnName] = "::uuid";
@@ -551,22 +625,24 @@ export async function loadKnowledgeDocumentsAndSpaces(
 }> {
   if (canAttemptPostgres(access)) {
     const dbResult = await withTenantPostgres(access, async (query) => {
-      let spaceRows: Record<string, unknown>[];
-      try {
-        spaceRows = (
-          await query(
-            `SELECT id, name, description, access_scope, allowed_department_key
-             FROM uptech.knowledge_spaces
-             ORDER BY name ASC`,
-          )
-        ).rows;
-      } catch {
-        spaceRows = (
-          await query(
-            "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
-          )
-        ).rows;
-      }
+      let spaceRows = await runWithSavepoint(
+        query,
+        "sp_spaces_select_1",
+        async () =>
+          (
+            await query(
+              `SELECT id, name, description, access_scope, allowed_department_key
+               FROM uptech.knowledge_spaces
+               ORDER BY name ASC`,
+            )
+          ).rows,
+        async () =>
+          (
+            await query(
+              "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
+            )
+          ).rows,
+      );
 
       if (spaceRows.length === 0) {
         for (const seedSpace of DEFAULT_SPACES) {
@@ -577,21 +653,24 @@ export async function loadKnowledgeDocumentsAndSpaces(
             [access.workspaceId, seedSpace.id, seedSpace.name, seedSpace.description],
           );
         }
-        try {
-          spaceRows = (
-            await query(
-              `SELECT id, name, description, access_scope, allowed_department_key
-               FROM uptech.knowledge_spaces
-               ORDER BY name ASC`,
-            )
-          ).rows;
-        } catch {
-          spaceRows = (
-            await query(
-              "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
-            )
-          ).rows;
-        }
+        spaceRows = await runWithSavepoint(
+          query,
+          "sp_spaces_select_2",
+          async () =>
+            (
+              await query(
+                `SELECT id, name, description, access_scope, allowed_department_key
+                 FROM uptech.knowledge_spaces
+                 ORDER BY name ASC`,
+              )
+            ).rows,
+          async () =>
+            (
+              await query(
+                "SELECT id, name, description FROM uptech.knowledge_spaces ORDER BY name ASC",
+              )
+            ).rows,
+        );
       }
 
       let docRows = await query(
@@ -1242,29 +1321,32 @@ export async function createUploadedKnowledgeDocument(
       }
 
       if (args.rawBytes && args.rawBytes.length > 0) {
-        try {
-          await query(
-            `INSERT INTO uptech.knowledge_document_blobs (
-               workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
-             ) VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (workspace_id, document_id)
-             DO UPDATE SET
-               file_extension = EXCLUDED.file_extension,
-               content_type = EXCLUDED.content_type,
-               byte_size = EXCLUDED.byte_size,
-               content_bytes = EXCLUDED.content_bytes`,
-            [
-              access.workspaceId,
-              args.id,
-              args.extension.toLowerCase(),
-              "application/octet-stream",
-              args.rawBytes.length,
-              Buffer.from(args.rawBytes),
-            ],
-          );
-        } catch {
-          // Safe fallback if 0017 blob table is not yet present.
-        }
+        await runWithSavepoint(
+          query,
+          "sp_upload_blob",
+          async () => {
+            await query(
+              `INSERT INTO uptech.knowledge_document_blobs (
+                 workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
+               ) VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (workspace_id, document_id)
+               DO UPDATE SET
+                 file_extension = EXCLUDED.file_extension,
+                 content_type = EXCLUDED.content_type,
+                 byte_size = EXCLUDED.byte_size,
+                 content_bytes = EXCLUDED.content_bytes`,
+              [
+                access.workspaceId,
+                args.id,
+                args.extension.toLowerCase(),
+                "application/octet-stream",
+                args.rawBytes!.length,
+                Buffer.from(args.rawBytes!),
+              ],
+            );
+          },
+          async () => undefined,
+        );
       }
 
       const uploadedNotification = createNotificationItem({
@@ -1281,29 +1363,14 @@ export async function createUploadedKnowledgeDocument(
         actionLabel: args.locale === "en" ? "Open document" : "Mở tài liệu",
       });
 
-      try {
-        await query(
-          `INSERT INTO uptech.workspace_notifications (
-             workspace_id, id, kind, title, description, href, action_label, unread, recipient_membership_id
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)`,
-          [
-            access.workspaceId,
-            uploadedNotification.id,
-            uploadedNotification.kind,
-            uploadedNotification.title,
-            uploadedNotification.description,
-            uploadedNotification.href,
-            uploadedNotification.actionLabel,
-            true,
-            access.membershipId,
-          ],
-        );
-      } catch {
-        try {
+      await runWithSavepoint(
+        query,
+        "sp_upload_notif_with_recipient",
+        async () => {
           await query(
             `INSERT INTO uptech.workspace_notifications (
-               workspace_id, id, kind, title, description, href, action_label, unread
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+               workspace_id, id, kind, title, description, href, action_label, unread, recipient_membership_id
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)`,
             [
               access.workspaceId,
               uploadedNotification.id,
@@ -1313,12 +1380,35 @@ export async function createUploadedKnowledgeDocument(
               uploadedNotification.href,
               uploadedNotification.actionLabel,
               true,
+              access.membershipId,
             ],
           );
-        } catch {
-          // Ignore if notifications table not yet migrated.
-        }
-      }
+        },
+        async () => {
+          await runWithSavepoint(
+            query,
+            "sp_upload_notif_legacy",
+            async () => {
+              await query(
+                `INSERT INTO uptech.workspace_notifications (
+                   workspace_id, id, kind, title, description, href, action_label, unread
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                [
+                  access.workspaceId,
+                  uploadedNotification.id,
+                  uploadedNotification.kind,
+                  uploadedNotification.title,
+                  uploadedNotification.description,
+                  uploadedNotification.href,
+                  uploadedNotification.actionLabel,
+                  true,
+                ],
+              );
+            },
+            async () => undefined,
+          );
+        },
+      );
 
       const firstChunk = storedChunks[0]!;
       return {
@@ -1468,27 +1558,32 @@ export async function createKnowledgeSpace(
 
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
-      try {
-        await query(
-          `INSERT INTO uptech.knowledge_spaces (
-             workspace_id, id, name, description, access_scope, allowed_department_key
-           ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            access.workspaceId,
-            args.id,
-            args.name,
-            args.description,
-            accessScope,
-            allowedDepartmentKey,
-          ],
-        );
-      } catch {
-        await query(
-          `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
-           VALUES ($1, $2, $3, $4)`,
-          [access.workspaceId, args.id, args.name, args.description],
-        );
-      }
+      await runWithSavepoint(
+        query,
+        "sp_create_knowledge_space",
+        async () => {
+          await query(
+            `INSERT INTO uptech.knowledge_spaces (
+               workspace_id, id, name, description, access_scope, allowed_department_key
+             ) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              access.workspaceId,
+              args.id,
+              args.name,
+              args.description,
+              accessScope,
+              allowedDepartmentKey,
+            ],
+          );
+        },
+        async () => {
+          await query(
+            `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
+             VALUES ($1, $2, $3, $4)`,
+            [access.workspaceId, args.id, args.name, args.description],
+          );
+        },
+      );
       return {
         id: args.id as SpaceId,
         name: args.name,
@@ -2085,14 +2180,30 @@ export async function createKnowledgeCards(
 
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
+      const requiredCols = await loadRequiredColumnsByTable(query, [
+        "knowledge_cards",
+      ]);
       for (const card of cards) {
-        await query(
-          `INSERT INTO uptech.knowledge_cards (
-             workspace_id, id, kind, status, title, summary, rationale,
-             space_id, space_name, source_document_id, source_document_name,
-             source_locator, owner_label, updated_label, version
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-          [
+        const cardInsert = buildLegacySafeInsert({
+          tableName: "knowledge_cards",
+          baseColumns: [
+            "workspace_id",
+            "id",
+            "kind",
+            "status",
+            "title",
+            "summary",
+            "rationale",
+            "space_id",
+            "space_name",
+            "source_document_id",
+            "source_document_name",
+            "source_locator",
+            "owner_label",
+            "updated_label",
+            "version",
+          ],
+          baseValues: [
             access.workspaceId,
             card.id,
             card.kind,
@@ -2109,7 +2220,14 @@ export async function createKnowledgeCards(
             card.updatedLabel,
             card.version,
           ],
-        );
+          requiredColumns: requiredCols.get("knowledge_cards"),
+          access,
+          contextDefaults: {
+            membership_id: access.membershipId,
+            created_by_membership_id: access.membershipId,
+          },
+        });
+        await query(cardInsert.sql, cardInsert.values);
       }
       return cards;
     });
@@ -2626,33 +2744,36 @@ export async function recordWorkspaceDataAuditEvent(
 ): Promise<void> {
   if (!canAttemptPostgres(access)) return;
   await withTenantPostgres(access, async (query) => {
-    try {
-      await query(
-        `INSERT INTO uptech.audit_events (
-           workspace_id, actor_user_id, actor_membership_id, event_type,
-           target_type, target_id, request_id, outcome, metadata
-         ) VALUES (
-           $1::uuid, $2::uuid, $3::uuid, $4,
-           'knowledge_resource', $5, $6, 'SUCCESS', $7::jsonb
-         )`,
-        [
-          access.workspaceId,
-          access.userId ?? null,
-          access.membershipId ?? null,
-          eventType,
-          targetId,
-          `req_${randomUUID().slice(0, 12)}`,
-          JSON.stringify({
-            actorLabel: access.actorLabel,
-            workspaceRole: access.workspaceRole,
-            ...metadata,
-          }),
-        ],
-      );
-    } catch {
-      // Never block primary user flow if audit table permissions differ.
-    }
-  });
+    await runWithSavepoint(
+      query,
+      "sp_workspace_audit_event",
+      async () => {
+        await query(
+          `INSERT INTO uptech.audit_events (
+             workspace_id, actor_user_id, actor_membership_id, event_type,
+             target_type, target_id, request_id, outcome, metadata
+           ) VALUES (
+             $1::uuid, $2::uuid, $3::uuid, $4,
+             'knowledge_resource', $5, $6, 'SUCCESS', $7::jsonb
+           )`,
+          [
+            access.workspaceId,
+            access.userId ?? null,
+            access.membershipId ?? null,
+            eventType,
+            targetId,
+            `req_${randomUUID().slice(0, 12)}`,
+            JSON.stringify({
+              actorLabel: access.actorLabel,
+              workspaceRole: access.workspaceRole,
+              ...metadata,
+            }),
+          ],
+        );
+      },
+      async () => undefined,
+    );
+  }).catch(() => undefined);
 }
 
 // ============================================================================
@@ -2709,65 +2830,138 @@ export async function uploadNewDocumentVersion(
 
   if (canAttemptPostgres(access)) {
     const result = await withTenantPostgres(access, async (query) => {
+      const requiredCols = await loadRequiredColumnsByTable(query, [
+        "knowledge_document_versions",
+        "knowledge_document_chunks",
+      ]);
+
       // Snapshot previous active version chunks if not already stored
       const prevVersion = existing.versions[0];
       if (prevVersion) {
-        try {
-          await query(
-            `UPDATE uptech.knowledge_document_versions
-             SET chunks_snapshot_json = COALESCE(chunks_snapshot_json, $3::jsonb)
-             WHERE document_id = $1 AND version_id = $2`,
-            [documentId, prevVersion.id, JSON.stringify(existing.chunks)],
-          );
-        } catch {
-          // Ignore if column not yet migrated
-        }
+        await runWithSavepoint(
+          query,
+          "sp_ver_prev_snapshot",
+          async () => {
+            await query(
+              `UPDATE uptech.knowledge_document_versions
+               SET chunks_snapshot_json = COALESCE(chunks_snapshot_json, $3::jsonb)
+               WHERE document_id = $1 AND version_id = $2`,
+              [documentId, prevVersion.id, JSON.stringify(existing.chunks)],
+            );
+          },
+          async () => undefined,
+        );
       }
 
-      try {
-        await query(
-          `INSERT INTO uptech.knowledge_document_versions (
-             workspace_id, document_id, version_id, version_label, note, updated_label,
-             chunks_snapshot_json, author_label, byte_size
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`,
-          [
-            access.workspaceId,
-            documentId,
-            nextVersionId,
-            nextVersionLabel,
-            noteText,
-            nowLabel,
-            JSON.stringify(storedChunks),
-            access.actorLabel,
-            args.byteSize,
-          ],
-        );
-      } catch {
-        await query(
-          `INSERT INTO uptech.knowledge_document_versions (
-             workspace_id, document_id, version_id, version_label, note, updated_label
-           ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            access.workspaceId,
-            documentId,
-            nextVersionId,
-            nextVersionLabel,
-            noteText,
-            nowLabel,
-          ],
-        );
-      }
+      const verContentSha256 = createHash("sha256")
+        .update(
+          args.rawBytes && args.rawBytes.length > 0
+            ? Buffer.from(args.rawBytes)
+            : storedChunks.map((c) => `${c.heading}\n${c.content}`).join("\n\n"),
+        )
+        .digest("hex");
+
+      await runWithSavepoint(
+        query,
+        "sp_ver_insert_snapshot",
+        async () => {
+          const verInsert = buildLegacySafeInsert({
+            tableName: "knowledge_document_versions",
+            baseColumns: [
+              "workspace_id",
+              "document_id",
+              "version_id",
+              "version_label",
+              "note",
+              "updated_label",
+              "chunks_snapshot_json",
+              "author_label",
+              "byte_size",
+            ],
+            baseValues: [
+              access.workspaceId,
+              documentId,
+              nextVersionId,
+              nextVersionLabel,
+              noteText,
+              nowLabel,
+              JSON.stringify(storedChunks),
+              access.actorLabel,
+              args.byteSize,
+            ],
+            requiredColumns: requiredCols.get("knowledge_document_versions"),
+            access,
+            contextDefaults: {
+              id: nextVersionId,
+              title: args.fileName,
+              status: "ready",
+              checksum: verContentSha256,
+              sha256: verContentSha256,
+              content_hash: verContentSha256,
+              membership_id: access.membershipId,
+              author_label: access.actorLabel,
+              byte_size: args.byteSize,
+            },
+            columnCasts: { chunks_snapshot_json: "::jsonb" },
+          });
+          await query(verInsert.sql, verInsert.values);
+        },
+        async () => {
+          const legacyVerInsert = buildLegacySafeInsert({
+            tableName: "knowledge_document_versions",
+            baseColumns: [
+              "workspace_id",
+              "document_id",
+              "version_id",
+              "version_label",
+              "note",
+              "updated_label",
+            ],
+            baseValues: [
+              access.workspaceId,
+              documentId,
+              nextVersionId,
+              nextVersionLabel,
+              noteText,
+              nowLabel,
+            ],
+            requiredColumns: requiredCols.get("knowledge_document_versions"),
+            access,
+            contextDefaults: {
+              id: nextVersionId,
+              title: args.fileName,
+              status: "ready",
+              checksum: verContentSha256,
+              sha256: verContentSha256,
+              content_hash: verContentSha256,
+              membership_id: access.membershipId,
+            },
+          });
+          await query(legacyVerInsert.sql, legacyVerInsert.values);
+        },
+      );
 
       await query(
         "DELETE FROM uptech.knowledge_document_chunks WHERE document_id = $1",
         [documentId],
       );
       for (const chunk of storedChunks) {
-        await query(
-          `INSERT INTO uptech.knowledge_document_chunks (
-             workspace_id, chunk_id, document_id, chunk_index, heading, locator, content, embedding_json
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
-          [
+        const chunkSha256 = createHash("sha256")
+          .update(chunk.content)
+          .digest("hex");
+        const chunkInsert = buildLegacySafeInsert({
+          tableName: "knowledge_document_chunks",
+          baseColumns: [
+            "workspace_id",
+            "chunk_id",
+            "document_id",
+            "chunk_index",
+            "heading",
+            "locator",
+            "content",
+            "embedding_json",
+          ],
+          baseValues: [
             access.workspaceId,
             chunk.chunkId,
             documentId,
@@ -2777,31 +2971,47 @@ export async function uploadNewDocumentVersion(
             chunk.content,
             chunk.embedding ? JSON.stringify(chunk.embedding) : null,
           ],
-        );
+          requiredColumns: requiredCols.get("knowledge_document_chunks"),
+          access,
+          contextDefaults: {
+            id: chunk.chunkId,
+            version_id: nextVersionId,
+            title: chunk.heading,
+            checksum: chunkSha256,
+            sha256: chunkSha256,
+            content_hash: chunkSha256,
+            token_count: chunk.content.length,
+          },
+          columnCasts: { embedding_json: "::jsonb" },
+        });
+        await query(chunkInsert.sql, chunkInsert.values);
       }
 
       if (args.rawBytes && args.rawBytes.length > 0) {
-        try {
-          await query(
-            `INSERT INTO uptech.knowledge_document_blobs (
-               workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
-             ) VALUES ($1, $2, $3, 'application/octet-stream', $4, $5)
-             ON CONFLICT (workspace_id, document_id)
-             DO UPDATE SET
-               file_extension = EXCLUDED.file_extension,
-               byte_size = EXCLUDED.byte_size,
-               content_bytes = EXCLUDED.content_bytes`,
-            [
-              access.workspaceId,
-              documentId,
-              args.extension.toLowerCase(),
-              args.rawBytes.length,
-              Buffer.from(args.rawBytes),
-            ],
-          );
-        } catch {
-          // Ignore if blob table not yet migrated
-        }
+        await runWithSavepoint(
+          query,
+          "sp_ver_blob_upsert",
+          async () => {
+            await query(
+              `INSERT INTO uptech.knowledge_document_blobs (
+                 workspace_id, document_id, file_extension, content_type, byte_size, content_bytes
+               ) VALUES ($1, $2, $3, 'application/octet-stream', $4, $5)
+               ON CONFLICT (workspace_id, document_id)
+               DO UPDATE SET
+                 file_extension = EXCLUDED.file_extension,
+                 byte_size = EXCLUDED.byte_size,
+                 content_bytes = EXCLUDED.content_bytes`,
+              [
+                access.workspaceId,
+                documentId,
+                args.extension.toLowerCase(),
+                args.rawBytes!.length,
+                Buffer.from(args.rawBytes!),
+              ],
+            );
+          },
+          async () => undefined,
+        );
       }
 
       await query(
@@ -2816,21 +3026,24 @@ export async function uploadNewDocumentVersion(
       );
 
       // Flag any verified Knowledge Cards derived from this document for re-verification
-      try {
-        await query(
-          `UPDATE uptech.knowledge_cards
-           SET status = 'draft',
-               flagged_outdated_reason = $2,
-               updated_at = transaction_timestamp()
-           WHERE source_document_id = $1 AND status = 'verified'`,
-          [
-            documentId,
-            `Tài liệu nguồn vừa nâng cấp lên ${nextVersionLabel} — cần rà soát lại thẻ tri thức.`,
-          ],
-        );
-      } catch {
-        // Ignore if column not yet migrated
-      }
+      await runWithSavepoint(
+        query,
+        "sp_ver_flag_cards",
+        async () => {
+          await query(
+            `UPDATE uptech.knowledge_cards
+             SET status = 'draft',
+                 flagged_outdated_reason = $2,
+                 updated_at = transaction_timestamp()
+             WHERE source_document_id = $1 AND status = 'verified'`,
+            [
+              documentId,
+              `Tài liệu nguồn vừa nâng cấp lên ${nextVersionLabel} — cần rà soát lại thẻ tri thức.`,
+            ],
+          );
+        },
+        async () => undefined,
+      );
 
       return true;
     });
@@ -3111,18 +3324,21 @@ export async function createDocumentComment(
       );
 
       if (comment.commentKind === "OUTDATED_FLAG") {
-        try {
-          await query(
-            `UPDATE uptech.knowledge_documents
-             SET flagged_outdated_reason = $2,
-                 flagged_outdated_by = $3,
-                 flagged_outdated_at = transaction_timestamp()
-             WHERE id = $1`,
-            [documentId, comment.body, comment.authorLabel],
-          );
-        } catch {
-          // Ignore if column not yet migrated
-        }
+        await runWithSavepoint(
+          query,
+          "sp_comment_flag_outdated",
+          async () => {
+            await query(
+              `UPDATE uptech.knowledge_documents
+               SET flagged_outdated_reason = $2,
+                   flagged_outdated_by = $3,
+                   flagged_outdated_at = transaction_timestamp()
+               WHERE id = $1`,
+              [documentId, comment.body, comment.authorLabel],
+            );
+          },
+          async () => undefined,
+        );
       }
     });
 
