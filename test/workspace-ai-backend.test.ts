@@ -4,7 +4,12 @@ import { deflateRawSync } from "node:zlib";
 import test from "node:test";
 
 import { FIXTURE_DOCUMENTS, FIXTURE_SPACES } from "../src/features/knowledge/fixtures/catalog.ts";
-import { parseUploadedDocumentChunks, extractDocxParagraphs } from "../src/server/ai/document-parser.ts";
+import {
+  ALLOWED_SERVER_UPLOAD_EXTENSIONS,
+  extractDocxParagraphs,
+  MAX_SERVER_UPLOAD_BYTES,
+  parseUploadedDocumentChunks,
+} from "../src/server/ai/document-parser.ts";
 import { rankReadyChunksHybrid, retrieveReadyPassagesForChat } from "../src/server/ai/retrieval.ts";
 import { UPTECH_BAOGIA_SEED_DOCUMENTS } from "../src/server/knowledge/uptech-baogia-pack.ts";
 import {
@@ -248,4 +253,21 @@ test("buildLegacySafeInsert populates checksum even when table column has defaul
   assert.match(inserted.sql, /"checksum"/);
   assert.equal(inserted.sql.includes("optional_note"), false);
   assert.ok(inserted.values.includes("sha256:abcdef1234567890"));
+});
+
+test("upload supports at least 100 MB and parses extended formats cleanly", async () => {
+  assert.ok(MAX_SERVER_UPLOAD_BYTES >= 100 * 1024 * 1024);
+  for (const ext of ["xlsx", "pptx", "yaml", "html", "png", "eml", "sql", "rtf"]) {
+    assert.equal(ALLOWED_SERVER_UPLOAD_EXTENSIONS.has(ext), true, ext);
+  }
+
+  const htmlChunks = await parseUploadedDocumentChunks({
+    fileName: "policy.html",
+    extension: "html",
+    bytes: Buffer.from("<html><script>bad()</script><body><h1>Bao gia</h1><p>UPTECH ho tro 100 MB.</p></body></html>"),
+    locale: "vi",
+  });
+  assert.ok(htmlChunks.length >= 1);
+  assert.match(htmlChunks[0]?.content ?? "", /UPTECH ho tro 100 MB/);
+  assert.equal((htmlChunks[0]?.content ?? "").includes("bad()"), false);
 });

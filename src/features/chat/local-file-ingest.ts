@@ -8,23 +8,44 @@ import {
 } from "@/features/knowledge/model";
 import type { Locale } from "@/lib/preferences";
 
-export const ALLOWED_LOCAL_EXTENSIONS = [
-  "pdf",
-  "docx",
-  "txt",
-  "md",
-  "csv",
-  "json",
-] as const;
+import {
+  MAX_UPLOAD_BYTES,
+  SUPPORTED_UPLOAD_EXTENSIONS,
+} from "@/features/documents/upload-spec";
+
+export const ALLOWED_LOCAL_EXTENSIONS = SUPPORTED_UPLOAD_EXTENSIONS;
 
 export const TEXT_READABLE_EXTENSIONS = new Set<string>([
   "txt",
   "md",
   "csv",
+  "tsv",
   "json",
+  "jsonl",
+  "yaml",
+  "yml",
+  "xml",
+  "html",
+  "htm",
+  "log",
+  "sql",
+  "ini",
+  "env",
+  "eml",
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "py",
+  "java",
+  "go",
+  "rs",
+  "css",
+  "scss",
+  "sh",
 ]);
 
-export const MAX_LOCAL_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_LOCAL_FILE_BYTES = MAX_UPLOAD_BYTES;
 const MAX_STORED_TEXT_CHARS = 12_000;
 
 export type LocalFileValidationError = "unsupported_type" | "file_too_large";

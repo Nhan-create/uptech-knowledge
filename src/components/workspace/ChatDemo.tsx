@@ -72,6 +72,7 @@ import type {
   DocumentSummaryView,
   SpaceSummaryView,
 } from "@/features/knowledge/model";
+import { SUPPORTED_UPLOAD_ACCEPT } from "@/features/documents/upload-spec";
 import { cn } from "@/lib/utils";
 
 export type { ChatFixtureScope };
@@ -169,11 +170,11 @@ const CHAT_COPY = {
     pickerDesc: "Chọn tài liệu trong workspace hoặc tải tệp từ thiết bị để AI trích dẫn trực tiếp.",
     pickerUploadCta: "Tải từ thiết bị",
     pickerUploadingCta: "Đang tải & phân tích…",
-    pickerUploadHint: "Kéo thả hoặc chọn PDF, DOCX, TXT, MD, CSV, JSON (tối đa 10 MB)",
+    pickerUploadHint: "Kéo thả hoặc chọn PDF, Office, Văn bản, Data, Code, Ảnh (tối thiểu 100 MB)",
     pickerUploadUnsupported: (name: string) =>
-      `Tệp "${name}" chưa hỗ trợ. Chỉ nhận PDF, DOCX, TXT, MD, CSV, JSON.`,
+      `Tệp "${name}" chưa hỗ trợ định dạng này.`,
     pickerUploadTooLarge: (name: string) =>
-      `Tệp "${name}" vượt quá giới hạn 10 MB.`,
+      `Tệp "${name}" vượt quá giới hạn 100 MB.`,
     pickerUploadFailed: "Không thể tải lên và phân tích tài liệu. Vui lòng thử lại.",
     pickerRemoveLocal: (name: string) => `Xóa tệp ${name} khỏi phiên chat`,
     pickerEmpty: "Không có tài liệu nào trong phạm vi này.",
@@ -256,10 +257,10 @@ const CHAT_COPY = {
     pickerDesc: "Select workspace documents or upload files from your device to cite directly.",
     pickerUploadCta: "Upload from device",
     pickerUploadingCta: "Uploading & indexing…",
-    pickerUploadHint: "Drop or choose PDF, DOCX, TXT, MD, CSV, JSON (max 10 MB)",
+    pickerUploadHint: "Drop or choose PDF, Office, Text, Data, Code, or Images (up to 100 MB)",
     pickerUploadUnsupported: (name: string) =>
-      `"${name}" is not supported. Allowed: PDF, DOCX, TXT, MD, CSV, JSON.`,
-    pickerUploadTooLarge: (name: string) => `"${name}" exceeds the 10 MB limit.`,
+      `"${name}" is not an allowed file type.`,
+    pickerUploadTooLarge: (name: string) => `"${name}" exceeds the 100 MB limit.`,
     pickerUploadFailed: "Failed to upload and index this document. Please try again.",
     pickerRemoveLocal: (name: string) => `Remove ${name} from this chat`,
     pickerEmpty: "No documents available in this scope.",
@@ -513,7 +514,7 @@ function SourcePicker({
           id="chat-device-upload-input"
           type="file"
           multiple
-          accept=".pdf,.docx,.txt,.md,.csv,.json"
+          accept={SUPPORTED_UPLOAD_ACCEPT}
           className="sr-only"
           onChange={(event) => {
             if (event.currentTarget.files && event.currentTarget.files.length > 0) {

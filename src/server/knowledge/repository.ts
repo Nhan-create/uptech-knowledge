@@ -220,7 +220,52 @@ export function normalizeDisplayFileType(extension: string): FileType {
   if (lower === "pdf" || lower === "docx" || lower === "md") {
     return lower;
   }
+  if (lower === "doc" || lower === "pptx" || lower === "ppt" || lower === "rtf" || lower === "odt" || lower === "odp") {
+    return "docx";
+  }
   return FILE_TYPES[2];
+}
+
+function normalizeStorageFileType(
+  extension: string,
+  allowedValues?: readonly string[],
+): string {
+  const lower = extension.toLowerCase();
+  if (allowedValues && allowedValues.includes(lower)) {
+    return lower;
+  }
+  if (lower === "pdf") return "pdf";
+  if (
+    lower === "docx" ||
+    lower === "doc" ||
+    lower === "pptx" ||
+    lower === "ppt" ||
+    lower === "rtf" ||
+    lower === "odt" ||
+    lower === "odp"
+  ) {
+    return "docx";
+  }
+  if (lower === "md") return "md";
+  if (
+    lower === "csv" ||
+    lower === "tsv" ||
+    lower === "xlsx" ||
+    lower === "xls" ||
+    lower === "ods"
+  ) {
+    return "csv";
+  }
+  if (
+    lower === "json" ||
+    lower === "jsonl" ||
+    lower === "yaml" ||
+    lower === "yml" ||
+    lower === "xml"
+  ) {
+    return "json";
+  }
+  return "txt";
 }
 
 function buildSeedState(): PersistedWorkspaceState {
@@ -1311,6 +1356,14 @@ export async function createUploadedKnowledgeDocument(
         .update(uploadContentInput)
         .digest("hex");
 
+      const fileTypeAllowed = requiredCols
+        .get("knowledge_documents")
+        ?.find((c) => c.columnName === "file_type")?.allowedValues;
+      const storageFileType = normalizeStorageFileType(
+        args.extension,
+        fileTypeAllowed,
+      );
+
       const govLabel = args.locale === "vi" ? "Tải lên bởi người dùng" : "User uploaded";
       await insertDocumentWithChecksumRecovery(query, {
         baseColumns: [
@@ -1335,7 +1388,7 @@ export async function createUploadedKnowledgeDocument(
           args.id,
           targetSpace.id,
           args.fileName,
-          args.extension.toLowerCase(),
+          storageFileType,
           "v1.0",
           detailText,
           access.actorLabel,
@@ -1473,7 +1526,11 @@ export async function createUploadedKnowledgeDocument(
         await query(chunkInsert.sql, chunkInsert.values);
       }
 
-      if (args.rawBytes && args.rawBytes.length > 0) {
+      if (
+        args.rawBytes &&
+        args.rawBytes.length > 0 &&
+        args.rawBytes.length <= 15 * 1024 * 1024
+      ) {
         await runWithSavepoint(
           query,
           "sp_upload_blob",
@@ -1711,15 +1768,24 @@ export async function createKnowledgeSpace(
 
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
+      const requiredCols = await loadRequiredColumnsByTable(query, [
+        "knowledge_spaces",
+      ]);
       await runWithSavepoint(
         query,
         "sp_create_knowledge_space",
         async () => {
-          await query(
-            `INSERT INTO uptech.knowledge_spaces (
-               workspace_id, id, name, description, access_scope, allowed_department_key
-             ) VALUES ($1, $2, $3, $4, $5, $6)`,
-            [
+          const spaceInsert = buildLegacySafeInsert({
+            tableName: "knowledge_spaces",
+            baseColumns: [
+              "workspace_id",
+              "id",
+              "name",
+              "description",
+              "access_scope",
+              "allowed_department_key",
+            ],
+            baseValues: [
               access.workspaceId,
               args.id,
               args.name,
@@ -1727,14 +1793,35 @@ export async function createKnowledgeSpace(
               accessScope,
               allowedDepartmentKey,
             ],
-          );
+            requiredColumns: requiredCols.get("knowledge_spaces"),
+            access,
+            contextDefaults: {
+              slug: args.id,
+              membership_id: access.membershipId,
+              created_by_membership_id: access.membershipId,
+            },
+          });
+          await query(spaceInsert.sql, spaceInsert.values);
         },
         async () => {
-          await query(
-            `INSERT INTO uptech.knowledge_spaces (workspace_id, id, name, description)
-             VALUES ($1, $2, $3, $4)`,
-            [access.workspaceId, args.id, args.name, args.description],
-          );
+          const legacyInsert = buildLegacySafeInsert({
+            tableName: "knowledge_spaces",
+            baseColumns: ["workspace_id", "id", "name", "description"],
+            baseValues: [
+              access.workspaceId,
+              args.id,
+              args.name,
+              args.description,
+            ],
+            requiredColumns: requiredCols.get("knowledge_spaces"),
+            access,
+            contextDefaults: {
+              slug: args.id,
+              membership_id: access.membershipId,
+              created_by_membership_id: access.membershipId,
+            },
+          });
+          await query(legacyInsert.sql, legacyInsert.values);
         },
       );
       return {
@@ -2756,7 +2843,7 @@ export async function loadWorkspacePolicySettings(
   access: WorkspaceAccessContext,
 ): Promise<WorkspacePolicySettings> {
   const defaults: WorkspacePolicySettings = {
-    maxUploadMb: 25,
+    maxUploadMb: 100,
     allowMemberUploads: true,
     requireVerifiedCardsInChat: false,
     piiRedactionEnabled: true,
@@ -2775,7 +2862,7 @@ export async function loadWorkspacePolicySettings(
       const row = res.rows[0];
       if (!row) return defaults;
       return {
-        maxUploadMb: Number(row.max_upload_mb ?? 25),
+        maxUploadMb: Math.max(100, Number(row.max_upload_mb ?? 100)),
         allowMemberUploads: row.allow_member_uploads !== false,
         requireVerifiedCardsInChat: row.require_verified_cards_in_chat === true,
         piiRedactionEnabled: row.pii_redaction_enabled !== false,
@@ -3140,7 +3227,11 @@ export async function uploadNewDocumentVersion(
         await query(chunkInsert.sql, chunkInsert.values);
       }
 
-      if (args.rawBytes && args.rawBytes.length > 0) {
+      if (
+        args.rawBytes &&
+        args.rawBytes.length > 0 &&
+        args.rawBytes.length <= 15 * 1024 * 1024
+      ) {
         await runWithSavepoint(
           query,
           "sp_ver_blob_upsert",

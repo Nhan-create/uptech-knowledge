@@ -12,11 +12,15 @@ import {
 } from "lucide-react";
 
 import { usePreferences } from "@/components/preferences/PreferencesProvider";
+import { extractLargeFileTextInBrowser } from "@/features/documents/client-large-file-extractor";
+import {
+  CLIENT_MULTIPART_THRESHOLD_BYTES,
+  MAX_UPLOAD_BYTES,
+  SUPPORTED_UPLOAD_ACCEPT,
+  SUPPORTED_UPLOAD_EXTENSION_SET,
+} from "@/features/documents/upload-spec";
 import type { DocumentDetailView, SpaceSummaryView } from "@/features/knowledge/model";
 import { cn } from "@/lib/utils";
-
-const ALLOWED_EXTENSIONS = new Set(["pdf", "docx", "txt", "md", "csv", "json"]);
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 interface UploadedReceipt {
   readonly id: string;
@@ -27,13 +31,13 @@ interface UploadedReceipt {
 const COPY = {
   vi: {
     heading: "Tải tài liệu lên kho tri thức",
-    sub: "Kéo thả hoặc chọn tệp PDF (OCR & bóc tách cấu trúc), DOCX, MD, TXT, CSV, JSON (tối đa 10 MB/tệp).",
+    sub: "Kéo thả hoặc chọn PDF, Office (DOCX, DOC, XLSX, XLS, PPTX, PPT, RTF, ODT), Văn bản/Dữ liệu (MD, TXT, CSV, TSV, JSON, YAML, XML, HTML, LOG, EML, SQL, Code) hoặc Ảnh (PNG, JPG, WEBP) — tối thiểu 100 MB/tệp.",
     spaceLabel: "Lưu vào không gian:",
     chooseFiles: "Chọn tệp từ máy",
     uploading: "Đang tải & lập chỉ mục…",
     unsupported: (name: string) =>
-      `Tệp "${name}" không được hỗ trợ. Chỉ nhận PDF, DOCX, MD, TXT, CSV, JSON.`,
-    tooLarge: (name: string) => `Tệp "${name}" vượt quá giới hạn 10 MB.`,
+      `Tệp "${name}" chưa được hỗ trợ định dạng này.`,
+    tooLarge: (name: string) => `Tệp "${name}" vượt quá giới hạn 100 MB.`,
     failed: "Không thể tải tệp lên. Vui lòng thử lại.",
     uploadedDone: (count: number) => `Đã lập chỉ mục ${count} tài liệu:`,
     sectionsBadge: (count: number) => `${count} đoạn`,
@@ -42,13 +46,12 @@ const COPY = {
   },
   en: {
     heading: "Upload documents to the workspace library",
-    sub: "Drop or browse PDF (OCR & extraction), DOCX, MD, TXT, CSV, or JSON files (max 10 MB each).",
+    sub: "Drop or browse PDF, Office (DOCX, DOC, XLSX, XLS, PPTX, PPT, RTF, ODT), Text/Data (MD, TXT, CSV, TSV, JSON, YAML, XML, HTML, LOG, EML, SQL, Code) or Images (PNG, JPG, WEBP) — up to 100 MB/file.",
     spaceLabel: "Target space:",
     chooseFiles: "Choose files",
     uploading: "Uploading & indexing…",
-    unsupported: (name: string) =>
-      `"${name}" is unsupported. Allowed: PDF, DOCX, MD, TXT, CSV, JSON.`,
-    tooLarge: (name: string) => `"${name}" exceeds the 10 MB limit.`,
+    unsupported: (name: string) => `"${name}" is not a supported file format.`,
+    tooLarge: (name: string) => `"${name}" exceeds the 100 MB limit.`,
     failed: "Unable to upload document. Please retry.",
     uploadedDone: (count: number) => `Indexed ${count} document(s):`,
     sectionsBadge: (count: number) => `${count} sections`,
@@ -88,7 +91,7 @@ export function DocumentFilePicker({
     try {
       for (const file of files) {
         const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-        if (!ALLOWED_EXTENSIONS.has(ext)) {
+        if (!SUPPORTED_UPLOAD_EXTENSION_SET.has(ext)) {
           setErrorMessage(copy.unsupported(file.name));
           continue;
         }
@@ -97,17 +100,34 @@ export function DocumentFilePicker({
           continue;
         }
 
-        const formData = new FormData();
-        formData.set("file", file);
-        formData.set("locale", locale);
-        if (selectedSpaceId) {
-          formData.set("spaceId", selectedSpaceId);
+        let res: Response;
+        if (file.size > CLIENT_MULTIPART_THRESHOLD_BYTES) {
+          const extractedText = await extractLargeFileTextInBrowser(file);
+          res = await fetch("/api/v1/workspace/documents", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: "extracted-text",
+              fileName: file.name,
+              extension: ext,
+              byteSize: file.size,
+              spaceId: selectedSpaceId,
+              locale,
+              extractedText,
+            }),
+          });
+        } else {
+          const formData = new FormData();
+          formData.set("file", file);
+          formData.set("locale", locale);
+          if (selectedSpaceId) {
+            formData.set("spaceId", selectedSpaceId);
+          }
+          res = await fetch("/api/v1/workspace/documents", {
+            method: "POST",
+            body: formData,
+          });
         }
-
-        const res = await fetch("/api/v1/workspace/documents", {
-          method: "POST",
-          body: formData,
-        });
         const data = (await res.json().catch(() => null)) as {
           ok?: boolean;
           document?: DocumentDetailView;
@@ -216,7 +236,7 @@ export function DocumentFilePicker({
             onChange={handleFileChange}
             className="hidden"
             tabIndex={-1}
-            accept=".pdf,.docx,.txt,.md,.csv,.json"
+            accept={SUPPORTED_UPLOAD_ACCEPT}
           />
           <button
             type="button"

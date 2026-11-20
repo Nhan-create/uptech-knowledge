@@ -194,20 +194,18 @@ export async function POST(
       return workspaceError(
         400,
         "UNSUPPORTED_FILE_TYPE",
-        "Only PDF, DOCX, TXT, MD, CSV, and JSON files are supported.",
+        "Định dạng tệp chưa được hỗ trợ tải lên.",
         requestId,
       );
     }
 
-    const maxAllowedBytes = Math.min(
-      Math.max(1, policy.maxUploadMb) * 1024 * 1024,
-      100 * 1024 * 1024,
-    );
+    const effectiveMaxMb = Math.max(100, policy.maxUploadMb);
+    const maxAllowedBytes = effectiveMaxMb * 1024 * 1024;
     if (fileEntry.size <= 0 || fileEntry.size > maxAllowedBytes) {
       return workspaceError(
         413,
         "INVALID_FILE_SIZE",
-        `Kích thước tệp vượt giới hạn ${policy.maxUploadMb} MB.`,
+        `Kích thước tệp vượt giới hạn ${effectiveMaxMb} MB.`,
         requestId,
       );
     }

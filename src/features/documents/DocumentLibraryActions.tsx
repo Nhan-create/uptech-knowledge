@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import type { DocumentSummaryView, SpaceSummaryView } from "@/features/knowledge/model";
+import { SUPPORTED_UPLOAD_ACCEPT } from "@/features/documents/upload-spec";
 
 export function CreateSpaceButton() {
   const router = useRouter();
@@ -592,7 +593,7 @@ export function DocumentVersionLifecyclePanel({
           <div className="grid gap-2.5 sm:grid-cols-2">
             <input
               type="file"
-              accept=".pdf,.docx,.md,.txt,.csv,.json"
+              accept={SUPPORTED_UPLOAD_ACCEPT}
               required
               onChange={(e) => setSelectedFile(e.currentTarget.files?.[0] ?? null)}
               className="block w-full rounded-xl border border-[#0D1321]/14 bg-white px-3 py-2 text-xs text-[#0D1321]"

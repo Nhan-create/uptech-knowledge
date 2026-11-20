@@ -1332,7 +1332,7 @@ export async function loadAdminSettingsBundle(admin: AdminApiContext): Promise<{
           organizationName: defaultOrgName(overview.domains),
           defaultLocale: "vi",
           retentionDays: 365,
-          maxUploadMb: 25,
+          maxUploadMb: 100,
           allowMemberUploads: true,
           requireVerifiedCardsInChat: false,
           auditExportEnabled: true,

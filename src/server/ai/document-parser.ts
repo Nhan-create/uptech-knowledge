@@ -1,5 +1,9 @@
 import { inflateRawSync } from "node:zlib";
 
+import {
+  MAX_UPLOAD_BYTES,
+  SUPPORTED_UPLOAD_EXTENSION_SET,
+} from "@/features/documents/upload-spec";
 import { extractPdfSectionsWithGemini } from "@/server/ai/gemini-client";
 import type { Locale } from "@/lib/preferences";
 
@@ -10,16 +14,9 @@ export interface ExtractedDocumentChunk {
   readonly content: string;
 }
 
-export const ALLOWED_SERVER_UPLOAD_EXTENSIONS = new Set([
-  "pdf",
-  "docx",
-  "md",
-  "txt",
-  "csv",
-  "json",
-]);
+export const ALLOWED_SERVER_UPLOAD_EXTENSIONS = SUPPORTED_UPLOAD_EXTENSION_SET;
 
-export const MAX_SERVER_UPLOAD_BYTES = 10 * 1024 * 1024;
+export const MAX_SERVER_UPLOAD_BYTES = MAX_UPLOAD_BYTES;
 
 function decodeXmlEntities(value: string): string {
   return value
@@ -37,9 +34,13 @@ function decodeXmlEntities(value: string): string {
 }
 
 /**
- * Extracts `word/document.xml` from a DOCX (ZIP archive) using Node built-in zlib.
+ * Extracts matching entries from a ZIP archive using Node built-in zlib.
  */
-function readZipEntryBuffer(archive: Buffer, targetFileName: string): Buffer | null {
+function readMatchingZipEntries(
+  archive: Buffer,
+  predicate: (entryName: string) => boolean,
+): Array<{ entryName: string; data: Buffer }> {
+  const results: Array<{ entryName: string; data: Buffer }> = [];
   let offset = 0;
   while (offset + 30 <= archive.length) {
     const signature = archive.readUInt32LE(offset);
@@ -69,11 +70,17 @@ function readZipEntryBuffer(archive: Buffer, targetFileName: string): Buffer | n
     }
 
     const dataEnd = Math.min(archive.length, dataStart + effectiveCompressedSize);
-    if (entryName === targetFileName) {
+    if (predicate(entryName)) {
       const payload = archive.subarray(dataStart, dataEnd);
-      if (compression === 0) return payload;
-      if (compression === 8) return inflateRawSync(payload);
-      return null;
+      if (compression === 0) {
+        results.push({ entryName, data: payload });
+      } else if (compression === 8) {
+        try {
+          results.push({ entryName, data: inflateRawSync(payload) });
+        } catch {
+          // Ignore corrupted entry and continue scanning remaining entries.
+        }
+      }
     }
 
     offset = dataEnd;
@@ -81,7 +88,14 @@ function readZipEntryBuffer(archive: Buffer, targetFileName: string): Buffer | n
       break;
     }
   }
-  return null;
+  return results;
+}
+
+function readZipEntryBuffer(archive: Buffer, targetFileName: string): Buffer | null {
+  return (
+    readMatchingZipEntries(archive, (name) => name === targetFileName)[0]?.data ??
+    null
+  );
 }
 
 export function extractDocxParagraphs(archive: Buffer): readonly string[] {
@@ -106,6 +120,130 @@ export function extractDocxParagraphs(archive: Buffer): readonly string[] {
   return paragraphs;
 }
 
+function extractPptxText(archive: Buffer): string {
+  const slides = readMatchingZipEntries(archive, (name) =>
+    /^ppt\/slides\/slide\d+\.xml$/iu.test(name),
+  ).sort((a, b) => {
+    const numA = Number.parseInt(/\d+/.exec(a.entryName)?.[0] ?? "0", 10);
+    const numB = Number.parseInt(/\d+/.exec(b.entryName)?.[0] ?? "0", 10);
+    return numA - numB;
+  });
+
+  const blocks: string[] = [];
+  for (const slide of slides) {
+    const slideNum = /\d+/.exec(slide.entryName)?.[0] ?? "?";
+    const xml = slide.data.toString("utf8");
+    const runs = Array.from(xml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g))
+      .map((m) => decodeXmlEntities(m[1] ?? "").trim())
+      .filter(Boolean);
+    if (runs.length > 0) {
+      blocks.push(`## Slide ${slideNum}\n${runs.join(" ")}`);
+    }
+  }
+  return blocks.join("\n\n");
+}
+
+function extractXlsxText(archive: Buffer): string {
+  const entries = readMatchingZipEntries(
+    archive,
+    (name) =>
+      name === "xl/sharedStrings.xml" ||
+      /^xl\/worksheets\/sheet\d+\.xml$/iu.test(name),
+  );
+  const sharedStringsXml = entries.find((e) => e.entryName === "xl/sharedStrings.xml");
+  const sharedStrings: string[] = [];
+  if (sharedStringsXml) {
+    const xml = sharedStringsXml.data.toString("utf8");
+    for (const siMatch of xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+      const joined = Array.from((siMatch[1] ?? "").matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g))
+        .map((t) => decodeXmlEntities(t[1] ?? ""))
+        .join("");
+      sharedStrings.push(joined.trim());
+    }
+  }
+
+  const sheets = entries
+    .filter((e) => e.entryName !== "xl/sharedStrings.xml")
+    .sort((a, b) => a.entryName.localeCompare(b.entryName));
+  const lines: string[] = [];
+  for (const sheet of sheets) {
+    const xml = sheet.data.toString("utf8");
+    const sheetTitle = sheet.entryName.split("/").pop()?.replace(/\.xml$/i, "") ?? "Sheet";
+    const rowStrings: string[] = [];
+    for (const rowMatch of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+      const cells: string[] = [];
+      for (const cellMatch of (rowMatch[1] ?? "").matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+        const attrs = cellMatch[1] ?? "";
+        const body = cellMatch[2] ?? "";
+        const isShared = /\bt="s"/i.test(attrs);
+        const vMatch = /<v>([\s\S]*?)<\/v>/i.exec(body);
+        const inlineMatch = /<t\b[^>]*>([\s\S]*?)<\/t>/i.exec(body);
+        if (inlineMatch?.[1]) {
+          cells.push(decodeXmlEntities(inlineMatch[1]).trim());
+        } else if (vMatch?.[1]) {
+          if (isShared) {
+            const idx = Number.parseInt(vMatch[1].trim(), 10);
+            const val = sharedStrings[idx];
+            if (val) cells.push(val);
+          } else {
+            cells.push(vMatch[1].trim());
+          }
+        }
+      }
+      if (cells.length > 0) rowStrings.push(cells.join(" | "));
+    }
+    if (rowStrings.length > 0) {
+      lines.push(`## ${sheetTitle}\n${rowStrings.join("\n")}`);
+    }
+  }
+  return lines.length > 0 ? lines.join("\n\n") : sharedStrings.filter(Boolean).join("\n");
+}
+
+function extractOpenDocumentText(archive: Buffer): string {
+  const xmlBuf = readZipEntryBuffer(archive, "content.xml");
+  if (!xmlBuf) return "";
+  return decodeXmlEntities(
+    xmlBuf
+      .toString("utf8")
+      .replace(/<\/(?:text:p|text:h|table:table-row)>/gi, "\n")
+      .replace(/<[^>]+>/g, " "),
+  )
+    .replace(/\s+\n/g, "\n")
+    .trim();
+}
+
+function extractHtmlOrXmlText(raw: string): string {
+  return decodeXmlEntities(
+    raw
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<\/(?:p|div|h[1-6]|li|tr|section|article)>/gi, "\n")
+      .replace(/<[^>]+>/g, " "),
+  )
+    .replace(/&nbsp;/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
+function extractRtfText(raw: string): string {
+  return raw
+    .replace(/\{\\(?:fonttbl|colortbl|stylesheet|info|pict)[\s\S]*?\}/gi, " ")
+    .replace(/\\par\b/gi, "\n")
+    .replace(/\\[a-z]+-?\d*\s?/gi, "")
+    .replace(/[{}]/g, "")
+    .trim();
+}
+
+function extractLegacyOfficeRuns(bytes: Uint8Array): string {
+  const latin = Buffer.from(bytes).toString("latin1");
+  const runs: string[] = [];
+  for (const m of latin.matchAll(/[A-Za-z0-9À-ỹ][A-Za-z0-9À-ỹ ,.;:!?()\-_/]{10,240}/g)) {
+    runs.push(m[0].trim());
+    if (runs.length >= 250) break;
+  }
+  return runs.join("\n\n");
+}
+
 /**
  * Lightweight fallback PDF literal-string reader when Gemini extraction is unavailable.
  */
@@ -119,7 +257,7 @@ function extractBasicPdfTextFallback(bytes: Uint8Array): string {
   return segments.join("\n\n");
 }
 
-function chunkTextPassages(
+export function chunkTextPassages(
   text: string,
   fileName: string,
   locale: Locale,
@@ -159,13 +297,42 @@ function chunkTextPassages(
   }
   flush();
 
-  return blocks.map((block, index) => ({
+  return blocks.slice(0, 180).map((block, index) => ({
     chunkIndex: index,
     heading: block.heading,
     locator: locale === "vi" ? `Đoạn ${index + 1}` : `Section ${index + 1}`,
     content: block.text,
   }));
 }
+
+const PLAIN_TEXT_PARSE_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "csv",
+  "tsv",
+  "json",
+  "jsonl",
+  "yaml",
+  "yml",
+  "log",
+  "sql",
+  "ini",
+  "env",
+  "eml",
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "py",
+  "java",
+  "go",
+  "rs",
+  "css",
+  "scss",
+  "sh",
+]);
+
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
 
 export async function parseUploadedDocumentChunks(args: Readonly<{
   fileName: string;
@@ -175,9 +342,19 @@ export async function parseUploadedDocumentChunks(args: Readonly<{
 }>): Promise<readonly ExtractedDocumentChunk[]> {
   const ext = args.extension.toLowerCase();
 
-  if (ext === "txt" || ext === "md" || ext === "csv" || ext === "json") {
+  if (PLAIN_TEXT_PARSE_EXTENSIONS.has(ext)) {
     const text = new TextDecoder("utf-8", { fatal: false }).decode(args.bytes);
     return chunkTextPassages(text, args.fileName, args.locale);
+  }
+
+  if (ext === "html" || ext === "htm" || ext === "xml") {
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(args.bytes);
+    return chunkTextPassages(extractHtmlOrXmlText(raw), args.fileName, args.locale);
+  }
+
+  if (ext === "rtf") {
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(args.bytes);
+    return chunkTextPassages(extractRtfText(raw), args.fileName, args.locale);
   }
 
   if (ext === "docx") {
@@ -186,19 +363,49 @@ export async function parseUploadedDocumentChunks(args: Readonly<{
     return chunkTextPassages(paragraphs.join("\n\n"), args.fileName, args.locale);
   }
 
+  if (ext === "pptx") {
+    return chunkTextPassages(extractPptxText(Buffer.from(args.bytes)), args.fileName, args.locale);
+  }
+
+  if (ext === "xlsx") {
+    return chunkTextPassages(extractXlsxText(Buffer.from(args.bytes)), args.fileName, args.locale);
+  }
+
+  if (ext === "odt" || ext === "ods" || ext === "odp") {
+    return chunkTextPassages(
+      extractOpenDocumentText(Buffer.from(args.bytes)),
+      args.fileName,
+      args.locale,
+    );
+  }
+
+  if (ext === "doc" || ext === "xls" || ext === "ppt") {
+    return chunkTextPassages(extractLegacyOfficeRuns(args.bytes), args.fileName, args.locale);
+  }
+
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    const summary =
+      args.locale === "vi"
+        ? `Tệp hình ảnh đính kèm: ${args.fileName} (${ext.toUpperCase()}, ${Math.max(1, Math.round(args.bytes.byteLength / 1024))} KB).`
+        : `Uploaded image asset: ${args.fileName} (${ext.toUpperCase()}, ${Math.max(1, Math.round(args.bytes.byteLength / 1024))} KB).`;
+    return chunkTextPassages(summary, args.fileName, args.locale);
+  }
+
   if (ext === "pdf") {
-    const geminiSections = await extractPdfSectionsWithGemini({
-      bytes: args.bytes,
-      fileName: args.fileName,
-      locale: args.locale,
-    });
-    if (geminiSections && geminiSections.length > 0) {
-      return geminiSections.map((section, index) => ({
-        chunkIndex: index,
-        heading: section.heading,
-        locator: section.locator,
-        content: section.content,
-      }));
+    if (args.bytes.byteLength <= 15 * 1024 * 1024) {
+      const geminiSections = await extractPdfSectionsWithGemini({
+        bytes: args.bytes,
+        fileName: args.fileName,
+        locale: args.locale,
+      });
+      if (geminiSections && geminiSections.length > 0) {
+        return geminiSections.map((section, index) => ({
+          chunkIndex: index,
+          heading: section.heading,
+          locator: section.locator,
+          content: section.content,
+        }));
+      }
     }
 
     const fallbackText = extractBasicPdfTextFallback(args.bytes);
