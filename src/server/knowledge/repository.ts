@@ -384,6 +384,8 @@ export interface RequiredColumnMeta {
   readonly hasCheckConstraint: boolean;
   readonly allowedValues?: readonly string[];
   readonly requiresSha256Prefix?: boolean;
+  readonly requiresSha256DashPrefix?: boolean;
+  readonly requiresUppercaseHex?: boolean;
 }
 
 type TenantPgQuery = (
@@ -435,17 +437,41 @@ async function loadRequiredColumnsByTable(
   query: TenantPgQuery,
   tableNames: readonly string[],
 ): Promise<Map<string, readonly RequiredColumnMeta[]>> {
-  const res = await query(
-    `SELECT table_name::text AS table_name,
-            column_name::text AS column_name,
-            udt_name::text AS udt_name,
-            is_nullable::text AS is_nullable,
-            column_default::text AS column_default
-     FROM information_schema.columns
-     WHERE table_schema = 'uptech'
-       AND table_name = ANY($1::text[])
-     ORDER BY ordinal_position ASC`,
-    [tableNames],
+  const res = await runWithSavepoint(
+    query,
+    "sp_load_pg_attribute_cols",
+    async () =>
+      query(
+        `SELECT c.relname::text AS table_name,
+                a.attname::text AS column_name,
+                t.typname::text AS udt_name,
+                CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+                CASE WHEN a.atthasdef THEN 'has_default' ELSE NULL END AS column_default
+         FROM pg_catalog.pg_attribute a
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+         WHERE n.nspname = 'uptech'
+           AND c.relname = ANY($1::text[])
+           AND a.attnum > 0
+           AND NOT a.attisdropped
+           AND a.attgenerated = ''
+         ORDER BY a.attnum ASC`,
+        [tableNames],
+      ),
+    async () =>
+      query(
+        `SELECT table_name::text AS table_name,
+                column_name::text AS column_name,
+                udt_name::text AS udt_name,
+                is_nullable::text AS is_nullable,
+                column_default::text AS column_default
+         FROM information_schema.columns
+         WHERE table_schema = 'uptech'
+           AND table_name = ANY($1::text[])
+         ORDER BY ordinal_position ASC`,
+        [tableNames],
+      ),
   );
 
   const checkDefsByTable = new Map<string, string[]>();
@@ -497,6 +523,10 @@ async function loadRequiredColumnsByTable(
     const matchingDefs = tblDefs.filter((def) => colPattern.test(def));
     const hasCheckConstraint = matchingDefs.length > 0;
     const requiresSha256Prefix = matchingDefs.some((def) => /sha256:/iu.test(def));
+    const requiresSha256DashPrefix = matchingDefs.some((def) => /sha256-/iu.test(def));
+    const requiresUppercaseHex = matchingDefs.some(
+      (def) => /\[A-F/u.test(def) && !/a-f/u.test(def),
+    );
 
     const list = byTable.get(tbl) ?? [];
     list.push({
@@ -506,6 +536,8 @@ async function loadRequiredColumnsByTable(
       hasCheckConstraint,
       allowedValues: allowedByTableCol.get(tbl)?.get(colName),
       requiresSha256Prefix,
+      requiresSha256DashPrefix,
+      requiresUppercaseHex,
     });
     byTable.set(tbl, list);
   }
@@ -594,13 +626,20 @@ export function buildLegacySafeInsert(args: Readonly<{
       ? rawOverride
       : defaultValueForLegacyColumn(reqCol.udtName, args.access);
     let finalValue = resolveAllowedValue(rawCandidate, reqCol.allowedValues);
-    if (
-      reqCol.requiresSha256Prefix &&
-      typeof finalValue === "string" &&
-      finalValue.length > 0 &&
-      !finalValue.startsWith("sha256:")
-    ) {
-      finalValue = `sha256:${finalValue}`;
+    if (typeof finalValue === "string" && finalValue.length > 0) {
+      let formatted = finalValue;
+      if (reqCol.requiresUppercaseHex) {
+        formatted = formatted.toUpperCase();
+      }
+      if (reqCol.requiresSha256Prefix && !formatted.startsWith("sha256:")) {
+        formatted = `sha256:${formatted}`;
+      } else if (
+        reqCol.requiresSha256DashPrefix &&
+        !formatted.startsWith("sha256-")
+      ) {
+        formatted = `sha256-${formatted}`;
+      }
+      finalValue = formatted;
     }
     values.push(finalValue);
     if (reqCol.udtName === "jsonb") casts[reqCol.columnName] = "::jsonb";
@@ -615,6 +654,116 @@ export function buildLegacySafeInsert(args: Readonly<{
     sql: `INSERT INTO uptech."${args.tableName}" (${colList}) VALUES (${placeholders})${suffix}`,
     values,
   };
+}
+
+async function insertDocumentWithChecksumRecovery(
+  query: TenantPgQuery,
+  insertArgs: Readonly<{
+    baseColumns: readonly string[];
+    baseValues: readonly unknown[];
+    requiredColumns: readonly RequiredColumnMeta[] | undefined;
+    access: WorkspaceAccessContext;
+    contextDefaults: Readonly<Record<string, unknown>>;
+    onConflictSql?: string;
+    sha256Hex: string;
+    md5Hex: string;
+  }>,
+): Promise<void> {
+  const initial = buildLegacySafeInsert({
+    tableName: "knowledge_documents",
+    baseColumns: insertArgs.baseColumns,
+    baseValues: insertArgs.baseValues,
+    requiredColumns: insertArgs.requiredColumns,
+    access: insertArgs.access,
+    contextDefaults: insertArgs.contextDefaults,
+    onConflictSql: insertArgs.onConflictSql,
+  });
+
+  await query("SAVEPOINT sp_doc_insert_main");
+  try {
+    await query(initial.sql, initial.values);
+    await query("RELEASE SAVEPOINT sp_doc_insert_main");
+    return;
+  } catch (err) {
+    await query("ROLLBACK TO SAVEPOINT sp_doc_insert_main").catch(() => undefined);
+    await query("RELEASE SAVEPOINT sp_doc_insert_main").catch(() => undefined);
+
+    const pgErr = err as { code?: string; constraint?: string };
+    if (pgErr?.code !== "23514") {
+      throw err;
+    }
+
+    await runWithSavepoint(
+      query,
+      "sp_log_doc_constraints",
+      async () => {
+        const defsRes = await query(
+          `SELECT conname::text AS name,
+                  pg_catalog.pg_get_constraintdef(oid) AS def
+           FROM pg_catalog.pg_constraint
+           WHERE conrelid = 'uptech.knowledge_documents'::regclass
+             AND contype = 'c'`,
+        );
+        console.warn("[knowledge_documents_check_diagnostic]", {
+          constraint: pgErr.constraint ?? null,
+          constraints: defsRes.rows,
+        });
+      },
+      async () => undefined,
+    );
+
+    if (!String(pgErr.constraint ?? "").includes("checksum")) {
+      throw err;
+    }
+
+    const candidates = [
+      `sha256:${insertArgs.sha256Hex}`,
+      insertArgs.sha256Hex,
+      insertArgs.sha256Hex.toUpperCase(),
+      insertArgs.md5Hex,
+      `sha256-${insertArgs.sha256Hex}`,
+    ];
+
+    for (let i = 0; i < candidates.length; i++) {
+      const candidateVal = candidates[i]!;
+      const retryCols = insertArgs.baseColumns.includes("checksum")
+        ? insertArgs.baseColumns
+        : [...insertArgs.baseColumns, "checksum"];
+      const retryVals = insertArgs.baseColumns.includes("checksum")
+        ? insertArgs.baseValues.map((v, idx) =>
+            insertArgs.baseColumns[idx] === "checksum" ? candidateVal : v,
+          )
+        : [...insertArgs.baseValues, candidateVal];
+
+      const retryInsert = buildLegacySafeInsert({
+        tableName: "knowledge_documents",
+        baseColumns: retryCols,
+        baseValues: retryVals,
+        requiredColumns: insertArgs.requiredColumns,
+        access: insertArgs.access,
+        contextDefaults: {
+          ...insertArgs.contextDefaults,
+          checksum: candidateVal,
+        },
+        onConflictSql: insertArgs.onConflictSql,
+      });
+
+      const spName = `sp_doc_checksum_retry_${i}`;
+      await query(`SAVEPOINT ${spName}`);
+      try {
+        await query(retryInsert.sql, retryInsert.values);
+        await query(`RELEASE SAVEPOINT ${spName}`);
+        return;
+      } catch (retryErr) {
+        await query(`ROLLBACK TO SAVEPOINT ${spName}`).catch(() => undefined);
+        await query(`RELEASE SAVEPOINT ${spName}`).catch(() => undefined);
+        if (i === candidates.length - 1) {
+          throw retryErr;
+        }
+      }
+    }
+    throw err;
+  }
 }
 
 export async function loadKnowledgeDocumentsAndSpaces(
@@ -703,8 +852,8 @@ export async function loadKnowledgeDocumentsAndSpaces(
               .map((c) => `# ${c.heading}\n${c.content}`)
               .join("\n\n");
             const docSha256 = createHash("sha256").update(docFullText).digest("hex");
-            const docInsert = buildLegacySafeInsert({
-              tableName: "knowledge_documents",
+            const docMd5 = createHash("md5").update(docFullText).digest("hex");
+            await insertDocumentWithChecksumRecovery(query, {
               baseColumns: [
                 "workspace_id",
                 "id",
@@ -761,8 +910,9 @@ export async function loadKnowledgeDocumentsAndSpaces(
                 created_by_membership_id: access.membershipId,
               },
               onConflictSql: "ON CONFLICT (workspace_id, id) DO NOTHING",
+              sha256Hex: docSha256,
+              md5Hex: docMd5,
             });
-            await query(docInsert.sql, docInsert.values);
 
             const verInsert = buildLegacySafeInsert({
               tableName: "knowledge_document_versions",
@@ -1150,17 +1300,19 @@ export async function createUploadedKnowledgeDocument(
         "knowledge_document_chunks",
       ]);
 
+      const uploadContentInput =
+        args.rawBytes && args.rawBytes.length > 0
+          ? Buffer.from(args.rawBytes)
+          : storedChunks.map((c) => `${c.heading}\n${c.content}`).join("\n\n");
       const uploadContentSha256 = createHash("sha256")
-        .update(
-          args.rawBytes && args.rawBytes.length > 0
-            ? Buffer.from(args.rawBytes)
-            : storedChunks.map((c) => `${c.heading}\n${c.content}`).join("\n\n"),
-        )
+        .update(uploadContentInput)
+        .digest("hex");
+      const uploadContentMd5 = createHash("md5")
+        .update(uploadContentInput)
         .digest("hex");
 
       const govLabel = args.locale === "vi" ? "Tải lên bởi người dùng" : "User uploaded";
-      const docInsert = buildLegacySafeInsert({
-        tableName: "knowledge_documents",
+      await insertDocumentWithChecksumRecovery(query, {
         baseColumns: [
           "workspace_id",
           "id",
@@ -1226,8 +1378,9 @@ export async function createUploadedKnowledgeDocument(
           membership_id: access.membershipId,
           created_by_membership_id: access.membershipId,
         },
+        sha256Hex: uploadContentSha256,
+        md5Hex: uploadContentMd5,
       });
-      await query(docInsert.sql, docInsert.values);
 
       const verCols = await query(
         `SELECT column_name::text AS column_name

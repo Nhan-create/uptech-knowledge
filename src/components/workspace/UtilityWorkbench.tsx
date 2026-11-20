@@ -176,6 +176,37 @@ type UtilityWorkbenchProps = Readonly<{
   spaces: readonly SpaceSummaryView[];
 }>;
 
+function renderUtilityInlineText(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/gu);
+  return parts.map((part, idx) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return (
+        <strong key={idx} className="font-semibold text-[#0D1321]">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code
+          key={idx}
+          className="rounded bg-[#ECEFF6] px-1.5 py-0.5 font-mono text-[12px] text-[#0D1321]"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+      return (
+        <em key={idx} className="text-[#505A6E]">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    return part;
+  });
+}
+
 export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
   const { locale } = usePreferences();
   const readyDocuments = documents.filter((doc) => doc.processing.kind === "ready");
@@ -718,7 +749,7 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
                       if (trimmed.startsWith("### ")) {
                         return (
                           <h4 key={index} className="pt-2 text-sm font-bold text-[#0D1321]">
-                            {trimmed.slice(4)}
+                            {renderUtilityInlineText(trimmed.slice(4))}
                           </h4>
                         );
                       }
@@ -726,7 +757,7 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
                         const headingText = trimmed.replace(/^#+\s*/u, "");
                         return (
                           <h3 key={index} className="pt-2 text-base font-bold text-[#0D1321]">
-                            {headingText}
+                            {renderUtilityInlineText(headingText)}
                           </h3>
                         );
                       }
@@ -757,7 +788,7 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
                                 isChecked && "text-[#505A6E] line-through",
                               )}
                             >
-                              {checkboxMatch[2]}
+                              {renderUtilityInlineText(checkboxMatch[2] ?? "")}
                             </span>
                           </button>
                         );
@@ -766,11 +797,13 @@ export function UtilityWorkbench({ documents, spaces }: UtilityWorkbenchProps) {
                         return (
                           <p key={index} className="flex items-start gap-2 pl-1">
                             <span className="mt-2 size-1.5 shrink-0 rounded-full bg-[#1B44FF]" />
-                            <span>{trimmed.replace(/^(?:-|\*)\s+/u, "")}</span>
+                            <span>
+                              {renderUtilityInlineText(trimmed.replace(/^(?:-|\*)\s+/u, ""))}
+                            </span>
                           </p>
                         );
                       }
-                      return <p key={index}>{trimmed}</p>;
+                      return <p key={index}>{renderUtilityInlineText(trimmed)}</p>;
                     })}
                   </div>
                 )}
