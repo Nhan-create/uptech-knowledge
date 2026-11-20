@@ -92,6 +92,7 @@ export function createConfiguredGoogleDirectoryProductionWorker(
     connectionTimeoutMillis: 5_000,
     allowExitOnIdle: true,
   });
+  pool.on("error", () => {});
   const boundary = createWorkerBoundary({
     leaseNextJob: () => leaseNextDirectoryJobFromPool(pool),
     withWorkerTransaction: (context, work) =>

@@ -836,31 +836,30 @@ export async function loadAdminUsersBundle(admin: AdminApiContext): Promise<{
   readonly orgUnits: readonly AdminDirectoryOrgUnitRecord[];
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, membersRes, invitesRes, requestsRes, groupsRes, orgUnitsRes] =
-      await Promise.all([
-        queryOverviewInTx(client),
-        client.query<Record<string, unknown>>("SELECT * FROM uptech.admin_list_members_v1()"),
-        client.query<Record<string, unknown>>(
-          `SELECT id, normalized_email, role, department_key, status, note,
-                  created_at, expires_at, accepted_at
-           FROM uptech.workspace_member_invites
-           WHERE workspace_id = $1
-           ORDER BY
-             CASE status WHEN 'PENDING' THEN 0 WHEN 'ACCEPTED' THEN 1 ELSE 2 END,
-             created_at DESC
-           LIMIT 100`,
-          [admin.workspaceId],
-        ),
-        client.query<Record<string, unknown>>(
-          "SELECT * FROM uptech.admin_list_access_requests_v1()",
-        ),
-        client.query<Record<string, unknown>>(
-          "SELECT * FROM uptech.admin_list_directory_groups_v1()",
-        ),
-        client.query<Record<string, unknown>>(
-          "SELECT * FROM uptech.admin_list_directory_org_units_v1()",
-        ),
-      ]);
+    const overview = await queryOverviewInTx(client);
+    const membersRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_members_v1()",
+    );
+    const invitesRes = await client.query<Record<string, unknown>>(
+      `SELECT id, normalized_email, role, department_key, status, note,
+              created_at, expires_at, accepted_at
+       FROM uptech.workspace_member_invites
+       WHERE workspace_id = $1
+       ORDER BY
+         CASE status WHEN 'PENDING' THEN 0 WHEN 'ACCEPTED' THEN 1 ELSE 2 END,
+         created_at DESC
+       LIMIT 100`,
+      [admin.workspaceId],
+    );
+    const requestsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_access_requests_v1()",
+    );
+    const groupsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_directory_groups_v1()",
+    );
+    const orgUnitsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_directory_org_units_v1()",
+    );
 
     const members: AdminMemberRecord[] = membersRes.rows.map((row) => ({
       membershipId: String(row.membership_id),
@@ -1087,18 +1086,16 @@ export async function loadAdminPermissionsBundle(admin: AdminApiContext): Promis
   readonly orgUnits: readonly AdminDirectoryOrgUnitRecord[];
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, mappingsRes, groupsRes, orgUnitsRes] = await Promise.all([
-      queryOverviewInTx(client),
-      client.query<Record<string, unknown>>(
-        "SELECT * FROM uptech.admin_list_permission_mappings_v1()",
-      ),
-      client.query<Record<string, unknown>>(
-        "SELECT * FROM uptech.admin_list_directory_groups_v1()",
-      ),
-      client.query<Record<string, unknown>>(
-        "SELECT * FROM uptech.admin_list_directory_org_units_v1()",
-      ),
-    ]);
+    const overview = await queryOverviewInTx(client);
+    const mappingsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_permission_mappings_v1()",
+    );
+    const groupsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_directory_groups_v1()",
+    );
+    const orgUnitsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_directory_org_units_v1()",
+    );
 
     const mappings: AdminPermissionMappingRecord[] = mappingsRes.rows.map((row) => ({
       mappingId: String(row.mapping_id),
@@ -1192,11 +1189,13 @@ export async function loadAdminConnectorsBundle(admin: AdminApiContext): Promise
   );
 
   return runAdminTx(admin, async (client) => {
-    const [overview, connectorsRes, jobsRes] = await Promise.all([
-      queryOverviewInTx(client),
-      client.query<Record<string, unknown>>("SELECT * FROM uptech.admin_list_connectors_v1()"),
-      client.query<Record<string, unknown>>("SELECT * FROM uptech.admin_list_sync_jobs_v1(30)"),
-    ]);
+    const overview = await queryOverviewInTx(client);
+    const connectorsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_connectors_v1()",
+    );
+    const jobsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_sync_jobs_v1(30)",
+    );
 
     const connectors: AdminConnectorRecord[] = connectorsRes.rows.map((row) => ({
       connectorId: String(row.connector_id),
@@ -1241,17 +1240,15 @@ export async function loadAdminAuditEvents(
   readonly auditExportEnabled: boolean;
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, eventsRes, settingsRes] = await Promise.all([
-      queryOverviewInTx(client),
-      client.query<Record<string, unknown>>(
-        "SELECT * FROM uptech.admin_list_audit_events_v1($1::integer, $2, $3)",
-        [options.limit ?? 100, options.outcome ?? null, options.search ?? null],
-      ),
-      client.query<Record<string, unknown>>(
-        "SELECT audit_export_enabled FROM uptech.workspace_settings WHERE workspace_id = $1",
-        [admin.workspaceId],
-      ),
-    ]);
+    const overview = await queryOverviewInTx(client);
+    const eventsRes = await client.query<Record<string, unknown>>(
+      "SELECT * FROM uptech.admin_list_audit_events_v1($1::integer, $2, $3)",
+      [options.limit ?? 100, options.outcome ?? null, options.search ?? null],
+    );
+    const settingsRes = await client.query<Record<string, unknown>>(
+      "SELECT audit_export_enabled FROM uptech.workspace_settings WHERE workspace_id = $1",
+      [admin.workspaceId],
+    );
 
     const events: AdminAuditEventRecord[] = eventsRes.rows.map((row) => ({
       eventId: String(row.event_id),
@@ -1309,17 +1306,15 @@ export async function loadAdminSettingsBundle(admin: AdminApiContext): Promise<{
   readonly settings: AdminSettingsRecord;
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, settingsRes] = await Promise.all([
-      queryOverviewInTx(client),
-      client.query<Record<string, unknown>>(
-        `SELECT organization_name, default_locale, retention_days, max_upload_mb,
-                allow_member_uploads, require_verified_cards_in_chat,
-                audit_export_enabled, updated_at
-         FROM uptech.workspace_settings
-         WHERE workspace_id = $1`,
-        [admin.workspaceId],
-      ),
-    ]);
+    const overview = await queryOverviewInTx(client);
+    const settingsRes = await client.query<Record<string, unknown>>(
+      `SELECT organization_name, default_locale, retention_days, max_upload_mb,
+              allow_member_uploads, require_verified_cards_in_chat,
+              audit_export_enabled, updated_at
+       FROM uptech.workspace_settings
+       WHERE workspace_id = $1`,
+      [admin.workspaceId],
+    );
 
     const row = settingsRes.rows[0];
     const settings: AdminSettingsRecord = row
@@ -1521,18 +1516,16 @@ export async function loadAdminBillingBundle(admin: AdminApiContext): Promise<{
   readonly analytics: AdminKnowledgeAnalyticsRecord;
 }> {
   return runAdminTx(admin, async (client) => {
-    const [overview, billingRes, analytics] = await Promise.all([
-      queryOverviewInTx(client),
-      client.query<Record<string, unknown>>(
-        `SELECT plan_code, billing_cycle, seat_limit, storage_limit_mb,
-                monthly_ai_turn_limit, billing_contact_email,
-                company_legal_name, tax_id, updated_at
-         FROM uptech.workspace_billing_profiles
-         WHERE workspace_id = $1`,
-        [admin.workspaceId],
-      ),
-      queryKnowledgeAnalyticsInTx(client),
-    ]);
+    const overview = await queryOverviewInTx(client);
+    const billingRes = await client.query<Record<string, unknown>>(
+      `SELECT plan_code, billing_cycle, seat_limit, storage_limit_mb,
+              monthly_ai_turn_limit, billing_contact_email,
+              company_legal_name, tax_id, updated_at
+       FROM uptech.workspace_billing_profiles
+       WHERE workspace_id = $1`,
+      [admin.workspaceId],
+    );
+    const analytics = await queryKnowledgeAnalyticsInTx(client);
 
     const row = billingRes.rows[0];
     const billing: AdminBillingProfileRecord = row

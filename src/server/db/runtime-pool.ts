@@ -39,6 +39,7 @@ export function getRuntimeDatabasePool(databaseUrl: string): DatabasePool {
   }
 
   const pool = new Pool(runtimePoolConfig(safeUrl));
+  pool.on("error", () => {});
   runtimeGlobal.__uptechRuntimeDatabasePool = pool;
   runtimeGlobal.__uptechRuntimeDatabaseUrl = safeUrl;
   return pool;

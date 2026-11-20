@@ -1,5 +1,6 @@
 import {
   authenticateWebSession,
+  clearedWebSessionCookie,
   WebSessionAuthenticationError,
 } from "@/server/auth/web-session";
 import { loadWebSessionRuntimeConfig } from "@/server/auth/google/config";
@@ -90,9 +91,13 @@ export function createWebSessionBootstrapGet(
       );
     } catch (error) {
       if (error instanceof WebSessionAuthenticationError) {
-        return problemResponse(
+        const response = problemResponse(
           createSafeProblem("UNAUTHENTICATED", operationRequestId),
         );
+        if (typeof clearedWebSessionCookie === "function") {
+          response.headers.append("Set-Cookie", clearedWebSessionCookie());
+        }
+        return response;
       }
       return problemResponse(
         createSafeProblem("PROVIDER_UNAVAILABLE", operationRequestId),

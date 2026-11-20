@@ -258,9 +258,43 @@ export function mapAdminDbError(
   requestId: string,
   fallbackMessage: string,
 ): Response {
-  const pgError = error as { code?: string; message?: string } | null;
-  const code = pgError?.code ?? "";
-  const message = pgError?.message ?? "";
+  const pgError = error as {
+    code?: unknown;
+    message?: unknown;
+    routine?: unknown;
+    table?: unknown;
+    column?: unknown;
+    constraint?: unknown;
+  } | null;
+  const code = typeof pgError?.code === "string" ? pgError.code : "";
+  const message = typeof pgError?.message === "string" ? pgError.message : "";
+  const safeToken = (value: unknown): string | undefined =>
+    typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/u.test(value)
+      ? value
+      : undefined;
+
+  console.error(
+    JSON.stringify({
+      event: "UPTECH_ADMIN_DB_ERROR_V1",
+      request_id: requestId,
+      ...(code ? { pg_code: code } : {}),
+      ...(safeToken(pgError?.routine) ? { pg_routine: safeToken(pgError?.routine) } : {}),
+      ...(safeToken(pgError?.table) ? { pg_table: safeToken(pgError?.table) } : {}),
+      ...(safeToken(pgError?.column) ? { pg_column: safeToken(pgError?.column) } : {}),
+      ...(safeToken(pgError?.constraint)
+        ? { pg_constraint: safeToken(pgError?.constraint) }
+        : {}),
+    }),
+  );
+
+  if (code === "57P01" || code === "57P02" || code === "57P03") {
+    return adminError(
+      503,
+      "SERVICE_UNAVAILABLE",
+      "Kết nối cơ sở dữ liệu vừa khởi động lại. Vui lòng thử lại.",
+      requestId,
+    );
+  }
 
   if (code === "42501") {
     return adminError(

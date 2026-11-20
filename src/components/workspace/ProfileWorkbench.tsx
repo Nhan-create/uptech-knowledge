@@ -362,8 +362,7 @@ export function ProfileWorkbench({
           cache: "no-store",
         });
         if (bootstrap.status === 401) {
-          router.replace("/login?error=session_expired");
-          router.refresh();
+          window.location.assign("/login?error=session_expired");
           return;
         }
         if (!bootstrap.ok) {
@@ -380,14 +379,12 @@ export function ProfileWorkbench({
           headers: { "X-CSRF-Token": payload.csrf_token },
         });
         if (response.status === 204 || response.status === 401) {
-          router.replace("/login");
-          router.refresh();
+          window.location.assign("/login");
           return;
         }
         throw new Error("logout failed");
       }
-      router.replace("/login");
-      router.refresh();
+      window.location.assign("/login");
     } catch {
       setLogoutError(
         isVi
