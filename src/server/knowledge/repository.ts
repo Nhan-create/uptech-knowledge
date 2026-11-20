@@ -370,6 +370,113 @@ async function withTenantPostgres<T>(
   }
 }
 
+interface RequiredColumnMeta {
+  readonly columnName: string;
+  readonly udtName: string;
+}
+
+type TenantPgQuery = (
+  sql: string,
+  params?: unknown[],
+) => Promise<{ rows: Record<string, unknown>[] }>;
+
+async function loadRequiredColumnsByTable(
+  query: TenantPgQuery,
+  tableNames: readonly string[],
+): Promise<Map<string, readonly RequiredColumnMeta[]>> {
+  const res = await query(
+    `SELECT table_name::text AS table_name,
+            column_name::text AS column_name,
+            udt_name::text AS udt_name
+     FROM information_schema.columns
+     WHERE table_schema = 'uptech'
+       AND table_name = ANY($1::text[])
+       AND is_nullable = 'NO'
+       AND column_default IS NULL
+     ORDER BY ordinal_position ASC`,
+    [tableNames],
+  );
+  const byTable = new Map<string, RequiredColumnMeta[]>();
+  for (const row of res.rows) {
+    const tbl = String(row.table_name);
+    const list = byTable.get(tbl) ?? [];
+    list.push({
+      columnName: String(row.column_name),
+      udtName: String(row.udt_name),
+    });
+    byTable.set(tbl, list);
+  }
+  return byTable;
+}
+
+function defaultValueForLegacyColumn(
+  udtName: string,
+  access: WorkspaceAccessContext,
+): unknown {
+  if (udtName === "uuid") return access.userId || access.membershipId || access.workspaceId;
+  if (
+    udtName === "int2" ||
+    udtName === "int4" ||
+    udtName === "int8" ||
+    udtName === "numeric" ||
+    udtName === "float4" ||
+    udtName === "float8"
+  ) {
+    return 0;
+  }
+  if (udtName === "bool") return false;
+  if (udtName === "json" || udtName === "jsonb") return "{}";
+  if (udtName === "timestamptz" || udtName === "timestamp") {
+    return new Date().toISOString();
+  }
+  if (udtName === "date") return new Date().toISOString().slice(0, 10);
+  if (udtName.startsWith("_")) return [];
+  return "";
+}
+
+function buildLegacySafeInsert(args: Readonly<{
+  tableName: string;
+  baseColumns: readonly string[];
+  baseValues: readonly unknown[];
+  requiredColumns: readonly RequiredColumnMeta[] | undefined;
+  access: WorkspaceAccessContext;
+  contextDefaults?: Readonly<Record<string, unknown>>;
+  columnCasts?: Readonly<Record<string, string>>;
+  onConflictSql?: string;
+}>): { readonly sql: string; readonly values: unknown[] } {
+  const columns = [...args.baseColumns];
+  const values = [...args.baseValues];
+  const casts: Record<string, string> = { ...(args.columnCasts ?? {}) };
+  const present = new Set(columns);
+
+  for (const reqCol of args.requiredColumns ?? []) {
+    if (present.has(reqCol.columnName)) continue;
+    if (!/^[a-z_][a-z0-9_]*$/u.test(reqCol.columnName)) continue;
+    present.add(reqCol.columnName);
+    columns.push(reqCol.columnName);
+    const hasContextOverride =
+      args.contextDefaults &&
+      Object.prototype.hasOwnProperty.call(args.contextDefaults, reqCol.columnName) &&
+      args.contextDefaults[reqCol.columnName] !== undefined;
+    values.push(
+      hasContextOverride
+        ? args.contextDefaults![reqCol.columnName]
+        : defaultValueForLegacyColumn(reqCol.udtName, args.access),
+    );
+    if (reqCol.udtName === "jsonb") casts[reqCol.columnName] = "::jsonb";
+    else if (reqCol.udtName === "json") casts[reqCol.columnName] = "::json";
+    else if (reqCol.udtName === "uuid") casts[reqCol.columnName] = "::uuid";
+  }
+
+  const colList = columns.map((c) => `"${c}"`).join(", ");
+  const placeholders = columns.map((c, idx) => `$${idx + 1}${casts[c] ?? ""}`).join(", ");
+  const suffix = args.onConflictSql ? ` ${args.onConflictSql}` : "";
+  return {
+    sql: `INSERT INTO uptech."${args.tableName}" (${colList}) VALUES (${placeholders})${suffix}`,
+    values,
+  };
+}
+
 export async function loadKnowledgeDocumentsAndSpaces(
   access: WorkspaceAccessContext,
 ): Promise<{
@@ -433,20 +540,37 @@ export async function loadKnowledgeDocumentsAndSpaces(
         spaceRows.length > 0 &&
         !docRows.rows.some((r) => String(r.id).startsWith("kb_uptech_"))
       ) {
+        const requiredCols = await loadRequiredColumnsByTable(query, [
+          "knowledge_documents",
+          "knowledge_document_versions",
+          "knowledge_document_chunks",
+        ]);
         const availableSpaceIds = new Set(spaceRows.map((s) => String(s.id)));
         const fallbackSpaceId = String(spaceRows[0]!.id);
         for (const seedDoc of UPTECH_BAOGIA_SEED_DOCUMENTS) {
           const targetSpaceId = availableSpaceIds.has(seedDoc.summary.space.id)
             ? seedDoc.summary.space.id
             : fallbackSpaceId;
-          await query(
-            `INSERT INTO uptech.knowledge_documents (
-               workspace_id, id, space_id, name, file_type, version_label, detail,
-               owner_label, updated_label, processing_kind, processing_label,
-               governance_kind, governance_label, byte_size, is_user_uploaded
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', $10, 'active', $11, $12, false)
-             ON CONFLICT (workspace_id, id) DO NOTHING`,
-            [
+          const docInsert = buildLegacySafeInsert({
+            tableName: "knowledge_documents",
+            baseColumns: [
+              "workspace_id",
+              "id",
+              "space_id",
+              "name",
+              "file_type",
+              "version_label",
+              "detail",
+              "owner_label",
+              "updated_label",
+              "processing_kind",
+              "processing_label",
+              "governance_kind",
+              "governance_label",
+              "byte_size",
+              "is_user_uploaded",
+            ],
+            baseValues: [
               access.workspaceId,
               seedDoc.summary.id,
               targetSpaceId,
@@ -456,17 +580,43 @@ export async function loadKnowledgeDocumentsAndSpaces(
               seedDoc.summary.detail,
               seedDoc.summary.ownerLabel,
               seedDoc.summary.updatedLabel,
+              "ready",
               seedDoc.summary.processing.label,
+              "active",
               seedDoc.summary.governance[0]?.label ?? "Dữ liệu UPTECH",
               seedDoc.byteSize,
+              false,
             ],
-          );
-          await query(
-            `INSERT INTO uptech.knowledge_document_versions (
-               workspace_id, document_id, version_id, version_label, note, updated_label
-             ) VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (workspace_id, document_id, version_id) DO NOTHING`,
-            [
+            requiredColumns: requiredCols.get("knowledge_documents"),
+            access,
+            contextDefaults: {
+              title: seedDoc.summary.name,
+              slug: seedDoc.summary.id,
+              status: "ready",
+              file_name: seedDoc.summary.name,
+              original_filename: seedDoc.summary.name,
+              filename: seedDoc.summary.name,
+              mime_type: "text/markdown",
+              content_type: "text/markdown",
+              source_type: "system",
+              membership_id: access.membershipId,
+              created_by_membership_id: access.membershipId,
+            },
+            onConflictSql: "ON CONFLICT (workspace_id, id) DO NOTHING",
+          });
+          await query(docInsert.sql, docInsert.values);
+
+          const verInsert = buildLegacySafeInsert({
+            tableName: "knowledge_document_versions",
+            baseColumns: [
+              "workspace_id",
+              "document_id",
+              "version_id",
+              "version_label",
+              "note",
+              "updated_label",
+            ],
+            baseValues: [
               access.workspaceId,
               seedDoc.summary.id,
               seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
@@ -474,14 +624,33 @@ export async function loadKnowledgeDocumentsAndSpaces(
               seedDoc.summary.detail,
               seedDoc.summary.updatedLabel,
             ],
-          );
+            requiredColumns: requiredCols.get("knowledge_document_versions"),
+            access,
+            contextDefaults: {
+              id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+              title: seedDoc.summary.name,
+              status: "ready",
+              membership_id: access.membershipId,
+              author_label: seedDoc.summary.ownerLabel,
+              byte_size: seedDoc.byteSize,
+            },
+            onConflictSql: "ON CONFLICT (workspace_id, document_id, version_id) DO NOTHING",
+          });
+          await query(verInsert.sql, verInsert.values);
+
           for (const chunk of seedDoc.chunks) {
-            await query(
-              `INSERT INTO uptech.knowledge_document_chunks (
-                 workspace_id, chunk_id, document_id, chunk_index, heading, locator, content
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-               ON CONFLICT (workspace_id, chunk_id) DO NOTHING`,
-              [
+            const chunkInsert = buildLegacySafeInsert({
+              tableName: "knowledge_document_chunks",
+              baseColumns: [
+                "workspace_id",
+                "chunk_id",
+                "document_id",
+                "chunk_index",
+                "heading",
+                "locator",
+                "content",
+              ],
+              baseValues: [
                 access.workspaceId,
                 chunk.chunkId,
                 seedDoc.summary.id,
@@ -490,7 +659,17 @@ export async function loadKnowledgeDocumentsAndSpaces(
                 chunk.locator,
                 chunk.content,
               ],
-            );
+              requiredColumns: requiredCols.get("knowledge_document_chunks"),
+              access,
+              contextDefaults: {
+                id: chunk.chunkId,
+                version_id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+                title: chunk.heading,
+                token_count: chunk.content.length,
+              },
+              onConflictSql: "ON CONFLICT (workspace_id, chunk_id) DO NOTHING",
+            });
+            await query(chunkInsert.sql, chunkInsert.values);
           }
         }
         docRows = await query(
@@ -763,14 +942,33 @@ export async function createUploadedKnowledgeDocument(
         );
       }
 
+      const requiredCols = await loadRequiredColumnsByTable(query, [
+        "knowledge_documents",
+        "knowledge_document_versions",
+        "knowledge_document_chunks",
+      ]);
+
       const govLabel = args.locale === "vi" ? "Tải lên bởi người dùng" : "User uploaded";
-      await query(
-        `INSERT INTO uptech.knowledge_documents (
-          workspace_id, id, space_id, name, file_type, version_label, detail,
-          owner_label, updated_label, processing_kind, processing_label,
-          governance_kind, governance_label, byte_size, is_user_uploaded
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', $10, 'active', $11, $12, true)`,
-        [
+      const docInsert = buildLegacySafeInsert({
+        tableName: "knowledge_documents",
+        baseColumns: [
+          "workspace_id",
+          "id",
+          "space_id",
+          "name",
+          "file_type",
+          "version_label",
+          "detail",
+          "owner_label",
+          "updated_label",
+          "processing_kind",
+          "processing_label",
+          "governance_kind",
+          "governance_label",
+          "byte_size",
+          "is_user_uploaded",
+        ],
+        baseValues: [
           access.workspaceId,
           args.id,
           targetSpace.id,
@@ -780,43 +978,101 @@ export async function createUploadedKnowledgeDocument(
           detailText,
           access.actorLabel,
           nowLabel,
+          "ready",
           readyLabel,
+          "active",
           govLabel,
           args.byteSize,
+          true,
         ],
-      );
+        requiredColumns: requiredCols.get("knowledge_documents"),
+        access,
+        contextDefaults: {
+          title: args.fileName,
+          slug: args.id,
+          status: "ready",
+          file_name: args.fileName,
+          original_filename: args.fileName,
+          filename: args.fileName,
+          mime_type:
+            args.extension.toLowerCase() === "docx"
+              ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              : args.extension.toLowerCase() === "pdf"
+                ? "application/pdf"
+                : "text/plain",
+          content_type:
+            args.extension.toLowerCase() === "docx"
+              ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              : args.extension.toLowerCase() === "pdf"
+                ? "application/pdf"
+                : "text/plain",
+          source_type: "upload",
+          membership_id: access.membershipId,
+          created_by_membership_id: access.membershipId,
+        },
+      });
+      await query(docInsert.sql, docInsert.values);
 
-      try {
-        await query(
-          `INSERT INTO uptech.knowledge_document_versions (
-            workspace_id, document_id, version_id, version_label, note, updated_label, chunks_snapshot_json, author_label, byte_size
-          ) VALUES ($1, $2, $3, 'v1.0', $4, $5, $6::jsonb, $7, $8)`,
-          [
-            access.workspaceId,
-            args.id,
-            `${args.id}-v1`,
-            detailText,
-            nowLabel,
-            JSON.stringify(storedChunks),
-            access.actorLabel,
-            args.byteSize,
-          ],
-        );
-      } catch {
-        await query(
-          `INSERT INTO uptech.knowledge_document_versions (
-            workspace_id, document_id, version_id, version_label, note, updated_label
-          ) VALUES ($1, $2, $3, 'v1.0', $4, $5)`,
-          [access.workspaceId, args.id, `${args.id}-v1`, detailText, nowLabel],
-        );
+      const verCols = await query(
+        `SELECT column_name::text AS column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'uptech' AND table_name = 'knowledge_document_versions'`,
+      );
+      const verColSet = new Set(verCols.rows.map((r) => String(r.column_name)));
+      const verBaseCols = [
+        "workspace_id",
+        "document_id",
+        "version_id",
+        "version_label",
+        "note",
+        "updated_label",
+      ];
+      const verBaseVals: unknown[] = [
+        access.workspaceId,
+        args.id,
+        `${args.id}-v1`,
+        "v1.0",
+        detailText,
+        nowLabel,
+      ];
+      const verCasts: Record<string, string> = {};
+      if (verColSet.has("chunks_snapshot_json")) {
+        verBaseCols.push("chunks_snapshot_json", "author_label", "byte_size");
+        verBaseVals.push(JSON.stringify(storedChunks), access.actorLabel, args.byteSize);
+        verCasts.chunks_snapshot_json = "::jsonb";
       }
+      const verInsert = buildLegacySafeInsert({
+        tableName: "knowledge_document_versions",
+        baseColumns: verBaseCols,
+        baseValues: verBaseVals,
+        requiredColumns: requiredCols.get("knowledge_document_versions"),
+        access,
+        contextDefaults: {
+          id: `${args.id}-v1`,
+          title: args.fileName,
+          status: "ready",
+          membership_id: access.membershipId,
+          author_label: access.actorLabel,
+          byte_size: args.byteSize,
+        },
+        columnCasts: verCasts,
+      });
+      await query(verInsert.sql, verInsert.values);
 
       for (const chunk of storedChunks) {
-        await query(
-          `INSERT INTO uptech.knowledge_document_chunks (
-            workspace_id, chunk_id, document_id, chunk_index, heading, locator, content, embedding_json
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
-          [
+        const chunkInsert = buildLegacySafeInsert({
+          tableName: "knowledge_document_chunks",
+          baseColumns: [
+            "workspace_id",
+            "chunk_id",
+            "document_id",
+            "chunk_index",
+            "heading",
+            "locator",
+            "content",
+            "embedding_json",
+          ],
+          baseValues: [
             access.workspaceId,
             chunk.chunkId,
             args.id,
@@ -826,7 +1082,17 @@ export async function createUploadedKnowledgeDocument(
             chunk.content,
             chunk.embedding ? JSON.stringify(chunk.embedding) : null,
           ],
-        );
+          requiredColumns: requiredCols.get("knowledge_document_chunks"),
+          access,
+          contextDefaults: {
+            id: chunk.chunkId,
+            version_id: `${args.id}-v1`,
+            title: chunk.heading,
+            token_count: chunk.content.length,
+          },
+          columnCasts: { embedding_json: "::jsonb" },
+        });
+        await query(chunkInsert.sql, chunkInsert.values);
       }
 
       if (args.rawBytes && args.rawBytes.length > 0) {
@@ -1411,13 +1677,29 @@ export async function savePersistedChatTurn(
 ): Promise<ChatSession> {
   if (canAttemptPostgres(access)) {
     return withTenantPostgres(access, async (query) => {
-      await query(
-        `INSERT INTO uptech.ai_chat_sessions (workspace_id, id, membership_id, title, scope, updated_at)
-         VALUES ($1, $2, $3, $4, $5, transaction_timestamp())
-         ON CONFLICT (workspace_id, id) DO UPDATE
-           SET scope = EXCLUDED.scope, updated_at = transaction_timestamp()`,
-        [access.workspaceId, args.sessionId, access.membershipId, args.title, args.scope],
-      );
+      const chatRequiredCols = await loadRequiredColumnsByTable(query, [
+        "ai_chat_sessions",
+        "ai_chat_turns",
+      ]);
+      const sessionInsert = buildLegacySafeInsert({
+        tableName: "ai_chat_sessions",
+        baseColumns: ["workspace_id", "id", "membership_id", "title", "scope"],
+        baseValues: [
+          access.workspaceId,
+          args.sessionId,
+          access.membershipId,
+          args.title,
+          args.scope,
+        ],
+        requiredColumns: chatRequiredCols.get("ai_chat_sessions"),
+        access,
+        contextDefaults: {
+          created_by_membership_id: access.membershipId,
+        },
+        onConflictSql:
+          "ON CONFLICT (workspace_id, id) DO UPDATE SET scope = EXCLUDED.scope, updated_at = transaction_timestamp()",
+      });
+      await query(sessionInsert.sql, sessionInsert.values);
 
       const serializedAnswerBody = JSON.stringify({
         scopeLabel: args.turn.scopeLabel,
@@ -1452,12 +1734,23 @@ export async function savePersistedChatTurn(
           [args.sessionId],
         );
         const nextOrder = Number(orderRow.rows[0]?.next_order ?? 0);
-        await query(
-          `INSERT INTO uptech.ai_chat_turns (
-             workspace_id, session_id, id, turn_order, prompt, scope, evidence_state,
-             answer_paragraphs, citations, excluded_count, model_name, feedback
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12)`,
-          [
+        const turnInsert = buildLegacySafeInsert({
+          tableName: "ai_chat_turns",
+          baseColumns: [
+            "workspace_id",
+            "session_id",
+            "id",
+            "turn_order",
+            "prompt",
+            "scope",
+            "evidence_state",
+            "answer_paragraphs",
+            "citations",
+            "excluded_count",
+            "model_name",
+            "feedback",
+          ],
+          baseValues: [
             access.workspaceId,
             args.sessionId,
             args.turn.id,
@@ -1471,7 +1764,17 @@ export async function savePersistedChatTurn(
             args.modelName ?? null,
             args.turn.feedback,
           ],
-        );
+          requiredColumns: chatRequiredCols.get("ai_chat_turns"),
+          access,
+          contextDefaults: {
+            membership_id: access.membershipId,
+          },
+          columnCasts: {
+            answer_paragraphs: "::jsonb",
+            citations: "::jsonb",
+          },
+        });
+        await query(turnInsert.sql, turnInsert.values);
       }
 
       const sessions = await listPersistedChatSessions(access);
