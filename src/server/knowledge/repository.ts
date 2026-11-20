@@ -373,12 +373,32 @@ async function withTenantPostgres<T>(
 interface RequiredColumnMeta {
   readonly columnName: string;
   readonly udtName: string;
+  readonly allowedValues?: readonly string[];
 }
 
 type TenantPgQuery = (
   sql: string,
   params?: unknown[],
 ) => Promise<{ rows: Record<string, unknown>[] }>;
+
+function extractAllowedLiterals(constraintDef: string): string[] {
+  const arrayMatch = constraintDef.match(/ARRAY\[([^\]]+)\]/u);
+  if (arrayMatch) {
+    const literals: string[] = [];
+    for (const m of arrayMatch[1]!.matchAll(/'([^']+)'/gu)) {
+      if (m[1]) literals.push(m[1]);
+    }
+    return literals;
+  }
+  const setMatch = constraintDef.match(/ANY\s*\(\s*'\{([^}]+)\}'::text\[\]\s*\)/u);
+  if (setMatch) {
+    return setMatch[1]!
+      .split(",")
+      .map((s) => s.trim().replace(/^"|"$/gu, ""))
+      .filter(Boolean);
+  }
+  return [];
+}
 
 async function loadRequiredColumnsByTable(
   query: TenantPgQuery,
@@ -396,17 +416,64 @@ async function loadRequiredColumnsByTable(
      ORDER BY ordinal_position ASC`,
     [tableNames],
   );
+
+  const allowedByTableCol = new Map<string, Map<string, readonly string[]>>();
+  try {
+    const checkRes = await query(
+      `SELECT c.relname::text AS table_name,
+              pg_catalog.pg_get_constraintdef(con.oid) AS def
+       FROM pg_catalog.pg_constraint con
+       JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'uptech'
+         AND c.relname = ANY($1::text[])
+         AND con.contype = 'c'`,
+      [tableNames],
+    );
+    for (const row of checkRes.rows) {
+      const tbl = String(row.table_name);
+      const def = String(row.def ?? "");
+      const literals = extractAllowedLiterals(def);
+      if (literals.length === 0) continue;
+      const colMatch = def.match(/\(\s*([a-z_][a-z0-9_]*)\s*=\s*ANY/iu);
+      if (!colMatch) continue;
+      const colName = colMatch[1]!;
+      const colMap = allowedByTableCol.get(tbl) ?? new Map<string, readonly string[]>();
+      colMap.set(colName, literals);
+      allowedByTableCol.set(tbl, colMap);
+    }
+  } catch {
+    // Best-effort check-constraint inspection.
+  }
+
   const byTable = new Map<string, RequiredColumnMeta[]>();
   for (const row of res.rows) {
     const tbl = String(row.table_name);
+    const colName = String(row.column_name);
     const list = byTable.get(tbl) ?? [];
     list.push({
-      columnName: String(row.column_name),
+      columnName: colName,
       udtName: String(row.udt_name),
+      allowedValues: allowedByTableCol.get(tbl)?.get(colName),
     });
     byTable.set(tbl, list);
   }
   return byTable;
+}
+
+function resolveAllowedValue(
+  candidate: unknown,
+  allowedValues: readonly string[] | undefined,
+): unknown {
+  if (!allowedValues || allowedValues.length === 0) return candidate;
+  if (typeof candidate === "string") {
+    if (allowedValues.includes(candidate)) return candidate;
+    const ciMatch = allowedValues.find(
+      (item) => item.toLowerCase() === candidate.toLowerCase(),
+    );
+    if (ciMatch) return ciMatch;
+  }
+  return allowedValues[0]!;
 }
 
 function defaultValueForLegacyColumn(
@@ -458,11 +525,10 @@ function buildLegacySafeInsert(args: Readonly<{
       args.contextDefaults &&
       Object.prototype.hasOwnProperty.call(args.contextDefaults, reqCol.columnName) &&
       args.contextDefaults[reqCol.columnName] !== undefined;
-    values.push(
-      hasContextOverride
-        ? args.contextDefaults![reqCol.columnName]
-        : defaultValueForLegacyColumn(reqCol.udtName, args.access),
-    );
+    const rawCandidate = hasContextOverride
+      ? args.contextDefaults![reqCol.columnName]
+      : defaultValueForLegacyColumn(reqCol.udtName, args.access);
+    values.push(resolveAllowedValue(rawCandidate, reqCol.allowedValues));
     if (reqCol.udtName === "jsonb") casts[reqCol.columnName] = "::jsonb";
     else if (reqCol.udtName === "json") casts[reqCol.columnName] = "::json";
     else if (reqCol.udtName === "uuid") casts[reqCol.columnName] = "::uuid";
@@ -536,149 +602,177 @@ export async function loadKnowledgeDocumentsAndSpaces(
          ORDER BY created_at DESC`,
       );
 
+      let seedFallbackDocs: readonly StoredKnowledgeDocument[] = [];
       if (
         spaceRows.length > 0 &&
         !docRows.rows.some((r) => String(r.id).startsWith("kb_uptech_"))
       ) {
-        const requiredCols = await loadRequiredColumnsByTable(query, [
-          "knowledge_documents",
-          "knowledge_document_versions",
-          "knowledge_document_chunks",
-        ]);
-        const availableSpaceIds = new Set(spaceRows.map((s) => String(s.id)));
-        const fallbackSpaceId = String(spaceRows[0]!.id);
-        for (const seedDoc of UPTECH_BAOGIA_SEED_DOCUMENTS) {
-          const targetSpaceId = availableSpaceIds.has(seedDoc.summary.space.id)
-            ? seedDoc.summary.space.id
-            : fallbackSpaceId;
-          const docInsert = buildLegacySafeInsert({
-            tableName: "knowledge_documents",
-            baseColumns: [
-              "workspace_id",
-              "id",
-              "space_id",
-              "name",
-              "file_type",
-              "version_label",
-              "detail",
-              "owner_label",
-              "updated_label",
-              "processing_kind",
-              "processing_label",
-              "governance_kind",
-              "governance_label",
-              "byte_size",
-              "is_user_uploaded",
-            ],
-            baseValues: [
-              access.workspaceId,
-              seedDoc.summary.id,
-              targetSpaceId,
-              seedDoc.summary.name,
-              seedDoc.summary.fileType,
-              seedDoc.summary.versionLabel,
-              seedDoc.summary.detail,
-              seedDoc.summary.ownerLabel,
-              seedDoc.summary.updatedLabel,
-              "ready",
-              seedDoc.summary.processing.label,
-              "active",
-              seedDoc.summary.governance[0]?.label ?? "Dữ liệu UPTECH",
-              seedDoc.byteSize,
-              false,
-            ],
-            requiredColumns: requiredCols.get("knowledge_documents"),
-            access,
-            contextDefaults: {
-              title: seedDoc.summary.name,
-              slug: seedDoc.summary.id,
-              status: "ready",
-              file_name: seedDoc.summary.name,
-              original_filename: seedDoc.summary.name,
-              filename: seedDoc.summary.name,
-              mime_type: "text/markdown",
-              content_type: "text/markdown",
-              source_type: "system",
-              membership_id: access.membershipId,
-              created_by_membership_id: access.membershipId,
-            },
-            onConflictSql: "ON CONFLICT (workspace_id, id) DO NOTHING",
-          });
-          await query(docInsert.sql, docInsert.values);
-
-          const verInsert = buildLegacySafeInsert({
-            tableName: "knowledge_document_versions",
-            baseColumns: [
-              "workspace_id",
-              "document_id",
-              "version_id",
-              "version_label",
-              "note",
-              "updated_label",
-            ],
-            baseValues: [
-              access.workspaceId,
-              seedDoc.summary.id,
-              seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
-              seedDoc.summary.versionLabel,
-              seedDoc.summary.detail,
-              seedDoc.summary.updatedLabel,
-            ],
-            requiredColumns: requiredCols.get("knowledge_document_versions"),
-            access,
-            contextDefaults: {
-              id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
-              title: seedDoc.summary.name,
-              status: "ready",
-              membership_id: access.membershipId,
-              author_label: seedDoc.summary.ownerLabel,
-              byte_size: seedDoc.byteSize,
-            },
-            onConflictSql: "ON CONFLICT (workspace_id, document_id, version_id) DO NOTHING",
-          });
-          await query(verInsert.sql, verInsert.values);
-
-          for (const chunk of seedDoc.chunks) {
-            const chunkInsert = buildLegacySafeInsert({
-              tableName: "knowledge_document_chunks",
+        await query("SAVEPOINT sp_uptech_seed");
+        try {
+          const requiredCols = await loadRequiredColumnsByTable(query, [
+            "knowledge_documents",
+            "knowledge_document_versions",
+            "knowledge_document_chunks",
+          ]);
+          const availableSpaceIds = new Set(spaceRows.map((s) => String(s.id)));
+          const fallbackSpaceId = String(spaceRows[0]!.id);
+          for (const seedDoc of UPTECH_BAOGIA_SEED_DOCUMENTS) {
+            const targetSpaceId = availableSpaceIds.has(seedDoc.summary.space.id)
+              ? seedDoc.summary.space.id
+              : fallbackSpaceId;
+            const docFullText = seedDoc.chunks
+              .map((c) => `# ${c.heading}\n${c.content}`)
+              .join("\n\n");
+            const docSha256 = createHash("sha256").update(docFullText).digest("hex");
+            const docInsert = buildLegacySafeInsert({
+              tableName: "knowledge_documents",
               baseColumns: [
                 "workspace_id",
-                "chunk_id",
-                "document_id",
-                "chunk_index",
-                "heading",
-                "locator",
-                "content",
+                "id",
+                "space_id",
+                "name",
+                "file_type",
+                "version_label",
+                "detail",
+                "owner_label",
+                "updated_label",
+                "processing_kind",
+                "processing_label",
+                "governance_kind",
+                "governance_label",
+                "byte_size",
+                "is_user_uploaded",
               ],
               baseValues: [
                 access.workspaceId,
-                chunk.chunkId,
                 seedDoc.summary.id,
-                chunk.chunkIndex,
-                chunk.heading,
-                chunk.locator,
-                chunk.content,
+                targetSpaceId,
+                seedDoc.summary.name,
+                seedDoc.summary.fileType,
+                seedDoc.summary.versionLabel,
+                seedDoc.summary.detail,
+                seedDoc.summary.ownerLabel,
+                seedDoc.summary.updatedLabel,
+                "ready",
+                seedDoc.summary.processing.label,
+                "active",
+                seedDoc.summary.governance[0]?.label ?? "Dữ liệu UPTECH",
+                seedDoc.byteSize,
+                false,
               ],
-              requiredColumns: requiredCols.get("knowledge_document_chunks"),
+              requiredColumns: requiredCols.get("knowledge_documents"),
               access,
               contextDefaults: {
-                id: chunk.chunkId,
-                version_id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
-                title: chunk.heading,
-                token_count: chunk.content.length,
+                title: seedDoc.summary.name,
+                slug: seedDoc.summary.id,
+                status: "ready",
+                checksum: docSha256,
+                sha256: docSha256,
+                content_hash: docSha256,
+                content_sha256: docSha256,
+                digest: docSha256,
+                etag: docSha256,
+                file_name: seedDoc.summary.name,
+                original_filename: seedDoc.summary.name,
+                filename: seedDoc.summary.name,
+                mime_type: "text/markdown",
+                content_type: "text/markdown",
+                source_type: "system",
+                membership_id: access.membershipId,
+                created_by_membership_id: access.membershipId,
               },
-              onConflictSql: "ON CONFLICT (workspace_id, chunk_id) DO NOTHING",
+              onConflictSql: "ON CONFLICT (workspace_id, id) DO NOTHING",
             });
-            await query(chunkInsert.sql, chunkInsert.values);
+            await query(docInsert.sql, docInsert.values);
+
+            const verInsert = buildLegacySafeInsert({
+              tableName: "knowledge_document_versions",
+              baseColumns: [
+                "workspace_id",
+                "document_id",
+                "version_id",
+                "version_label",
+                "note",
+                "updated_label",
+              ],
+              baseValues: [
+                access.workspaceId,
+                seedDoc.summary.id,
+                seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+                seedDoc.summary.versionLabel,
+                seedDoc.summary.detail,
+                seedDoc.summary.updatedLabel,
+              ],
+              requiredColumns: requiredCols.get("knowledge_document_versions"),
+              access,
+              contextDefaults: {
+                id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+                title: seedDoc.summary.name,
+                status: "ready",
+                checksum: docSha256,
+                sha256: docSha256,
+                content_hash: docSha256,
+                membership_id: access.membershipId,
+                author_label: seedDoc.summary.ownerLabel,
+                byte_size: seedDoc.byteSize,
+              },
+              onConflictSql: "ON CONFLICT (workspace_id, document_id, version_id) DO NOTHING",
+            });
+            await query(verInsert.sql, verInsert.values);
+
+            for (const chunk of seedDoc.chunks) {
+              const chunkSha256 = createHash("sha256")
+                .update(chunk.content)
+                .digest("hex");
+              const chunkInsert = buildLegacySafeInsert({
+                tableName: "knowledge_document_chunks",
+                baseColumns: [
+                  "workspace_id",
+                  "chunk_id",
+                  "document_id",
+                  "chunk_index",
+                  "heading",
+                  "locator",
+                  "content",
+                ],
+                baseValues: [
+                  access.workspaceId,
+                  chunk.chunkId,
+                  seedDoc.summary.id,
+                  chunk.chunkIndex,
+                  chunk.heading,
+                  chunk.locator,
+                  chunk.content,
+                ],
+                requiredColumns: requiredCols.get("knowledge_document_chunks"),
+                access,
+                contextDefaults: {
+                  id: chunk.chunkId,
+                  version_id: seedDoc.versions[0]?.id ?? `${seedDoc.summary.id}-v1`,
+                  title: chunk.heading,
+                  checksum: chunkSha256,
+                  sha256: chunkSha256,
+                  content_hash: chunkSha256,
+                  token_count: chunk.content.length,
+                },
+                onConflictSql: "ON CONFLICT (workspace_id, chunk_id) DO NOTHING",
+              });
+              await query(chunkInsert.sql, chunkInsert.values);
+            }
           }
+          await query("RELEASE SAVEPOINT sp_uptech_seed");
+          docRows = await query(
+            `SELECT id, space_id, name, file_type, version_label, detail, owner_label,
+                    updated_label, processing_kind, processing_label, governance_kind,
+                    governance_label, byte_size, is_user_uploaded
+             FROM uptech.knowledge_documents
+             ORDER BY created_at DESC`,
+          );
+        } catch {
+          await query("ROLLBACK TO SAVEPOINT sp_uptech_seed");
+          await query("RELEASE SAVEPOINT sp_uptech_seed");
+          seedFallbackDocs = UPTECH_BAOGIA_SEED_DOCUMENTS;
         }
-        docRows = await query(
-          `SELECT id, space_id, name, file_type, version_label, detail, owner_label,
-                  updated_label, processing_kind, processing_label, governance_kind,
-                  governance_label, byte_size, is_user_uploaded
-           FROM uptech.knowledge_documents
-           ORDER BY created_at DESC`,
-        );
       }
 
       const chunkRows = await query(
@@ -696,6 +790,7 @@ export async function loadKnowledgeDocumentsAndSpaces(
         docRows: docRows.rows,
         chunkRows: chunkRows.rows,
         versionRows: versionRows.rows,
+        seedFallbackDocs,
       };
     });
 
@@ -826,6 +921,34 @@ export async function loadKnowledgeDocumentsAndSpaces(
         };
       });
 
+    if (dbResult.seedFallbackDocs.length > 0 && visibleSpaces.length > 0) {
+      const existingIds = new Set(documents.map((d) => d.summary.id));
+      for (const fallbackDoc of dbResult.seedFallbackDocs) {
+        if (existingIds.has(fallbackDoc.summary.id)) continue;
+        const targetSpace =
+          spaceMap.get(fallbackDoc.summary.space.id) ?? visibleSpaces[0]!;
+        if (!visibleSpaceIds.has(targetSpace.id)) continue;
+        documents.push({
+          ...fallbackDoc,
+          summary: {
+            ...fallbackDoc.summary,
+            space: { id: targetSpace.id, name: targetSpace.name },
+          },
+        });
+      }
+      const counts = new Map<string, number>();
+      for (const d of documents) {
+        counts.set(d.summary.space.id, (counts.get(d.summary.space.id) ?? 0) + 1);
+      }
+      return {
+        spaces: visibleSpaces.map((s) => ({
+          ...s,
+          documentCount: counts.get(s.id) ?? s.documentCount,
+        })),
+        documents,
+      };
+    }
+
     return { spaces: visibleSpaces, documents };
   }
 
@@ -948,6 +1071,14 @@ export async function createUploadedKnowledgeDocument(
         "knowledge_document_chunks",
       ]);
 
+      const uploadContentSha256 = createHash("sha256")
+        .update(
+          args.rawBytes && args.rawBytes.length > 0
+            ? Buffer.from(args.rawBytes)
+            : storedChunks.map((c) => `${c.heading}\n${c.content}`).join("\n\n"),
+        )
+        .digest("hex");
+
       const govLabel = args.locale === "vi" ? "Tải lên bởi người dùng" : "User uploaded";
       const docInsert = buildLegacySafeInsert({
         tableName: "knowledge_documents",
@@ -991,6 +1122,12 @@ export async function createUploadedKnowledgeDocument(
           title: args.fileName,
           slug: args.id,
           status: "ready",
+          checksum: uploadContentSha256,
+          sha256: uploadContentSha256,
+          content_hash: uploadContentSha256,
+          content_sha256: uploadContentSha256,
+          digest: uploadContentSha256,
+          etag: uploadContentSha256,
           file_name: args.fileName,
           original_filename: args.fileName,
           filename: args.fileName,
@@ -1051,6 +1188,9 @@ export async function createUploadedKnowledgeDocument(
           id: `${args.id}-v1`,
           title: args.fileName,
           status: "ready",
+          checksum: uploadContentSha256,
+          sha256: uploadContentSha256,
+          content_hash: uploadContentSha256,
           membership_id: access.membershipId,
           author_label: access.actorLabel,
           byte_size: args.byteSize,
@@ -1060,6 +1200,9 @@ export async function createUploadedKnowledgeDocument(
       await query(verInsert.sql, verInsert.values);
 
       for (const chunk of storedChunks) {
+        const chunkSha256 = createHash("sha256")
+          .update(chunk.content)
+          .digest("hex");
         const chunkInsert = buildLegacySafeInsert({
           tableName: "knowledge_document_chunks",
           baseColumns: [
@@ -1088,6 +1231,9 @@ export async function createUploadedKnowledgeDocument(
             id: chunk.chunkId,
             version_id: `${args.id}-v1`,
             title: chunk.heading,
+            checksum: chunkSha256,
+            sha256: chunkSha256,
+            content_hash: chunkSha256,
             token_count: chunk.content.length,
           },
           columnCasts: { embedding_json: "::jsonb" },
